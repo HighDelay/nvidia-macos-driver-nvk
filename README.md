@@ -119,6 +119,14 @@ renderer plus **8-bit BGRA SDR capture**. Other apps continue using Zink.
 Select your display in **macOS Screen Capture**.
 [Details and opt-out](docs/ZINK-OPENGL.md#obs-display-capture-compatibility).
 
+## Additional video codecs
+
+The codec addon adds **VP8/VP9 hardware decoding on RTX 20**, retaining the
+existing H.264/HEVC encoders. VP9 supports 8-bit and 10-bit VideoToolbox output.
+VP8/VP9 encoding uses software; Turing has no AV1 hardware support.
+Existing Ada/Ampere codec paths are retained.
+[Setup, application limits and builds](video/INSTALL.md).
+
 ## Build from source
 
 Requires Xcode 16+, Rust (stable), Meson/Ninja, and NVIDIA's

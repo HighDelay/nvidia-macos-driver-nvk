@@ -1,0 +1,280 @@
+{
+  "schema_version": 1,
+  "date": "2026-10-31",
+  "scope": "Additional TU10x VP8/VP9 VideoToolbox decoders; retain existing codec paths for other GPU families",
+  "driver_base": "7044b06b3ca81e8bf90afc398b5d93c0c74974f5",
+  "source": {
+    "repository": "https://github.com/mickys/nvenc.git",
+    "commit": "90d1d6a291fac6e7bccd5689b5a04971fe46d214"
+  },
+  "overlay_sha256": "d56fb6246a926dff38349fda05f1647a60374c6d773a2a615ebfb1f263c8a8a8",
+  "library_sha256": "a62de6153f9ede2840f830a7f749a9f60691ccade327b5937dfe214e7999c9ce",
+  "runtime_record_sha256": "f3567631d9d5b603bd32499227b97fd2b4ba8d4e37059a7fc55dc21b1d39ad1d",
+  "target": {
+    "os": "macos",
+    "arch": "x86_64",
+    "minimum_macos": "15.0"
+  },
+  "hardware": {
+    "gpu": "NVIDIA GeForce RTX 2060 SUPER",
+    "pci_vendor": "10de",
+    "pci_device": "1f06",
+    "chipset": "TU106",
+    "nvdec_class": "0xc4b0",
+    "nvenc_class": "0xc4b7",
+    "bar1_bytes": 8589934592,
+    "macos": "26.7.1",
+    "macos_build": "25G241"
+  },
+  "software_reference": {
+    "decoder": "libvpx",
+    "version": "1.14.1",
+    "input": "synthetic YUV420 only",
+    "comparison": "Every decoded luma/chroma sample equals the independent software decoder output; P010 samples normalized to 10-bit values"
+  },
+  "hardware_results": {
+    "final_videotoolbox_sessions": 24,
+    "final_videotoolbox_frames": 180,
+    "raw_nvdec_cases": 13,
+    "raw_nvdec_frames": 96,
+    "installed_driver": "Automatic loading via Metal verified without manual registration; VP8 351x287 async and VP9 1366x768 10-bit sync pass",
+    "retained_encoders": {
+      "H264": {
+        "hardware": true,
+        "packets": 8,
+        "errors": 0
+      },
+      "HEVC": {
+        "hardware": true,
+        "packets": 8,
+        "errors": 0
+      },
+      "scope": "Hardware-session smoke test with ready codec-typed packets; no bitstream reconstruction or quality claim"
+    },
+    "malformed_vp8": "Zero-width keyframe rejected with no output before engine submission; basic parser cases and 50000 bounded random headers pass ASan/UBSan"
+  },
+  "fixtures": [
+    {
+      "codec": "vp8",
+      "width": 128,
+      "height": 96,
+      "bit_depth": 8,
+      "frames": 12,
+      "ivf_sha256": "255e6557045379e40d7f1a566c12ed6540f647a79b63672a88091de8e02efa90",
+      "software_reference_sha256": "09f5d2e068c04c7faa8bd525ff36ec14e3c55016d513e974e697486b9588a9cf",
+      "raw_nvdec": "passed",
+      "videotoolbox": {
+        "synchronous": "passed",
+        "asynchronous": "passed"
+      }
+    },
+    {
+      "codec": "vp8",
+      "width": 351,
+      "height": 287,
+      "bit_depth": 8,
+      "frames": 8,
+      "ivf_sha256": "3de88981033b40f518ae43b68808736f840c19c9dba28c95965000682c0609af",
+      "software_reference_sha256": "1ca3035930e774139a6972555ff67da70b8c7b7a1ef74351be6297976faf5c8d",
+      "raw_nvdec": "passed",
+      "videotoolbox": {
+        "synchronous": "passed",
+        "asynchronous": "passed"
+      }
+    },
+    {
+      "codec": "vp8",
+      "width": 640,
+      "height": 360,
+      "bit_depth": 8,
+      "frames": 12,
+      "ivf_sha256": "8a673ad0f535e9a08ff08279e19186bd8665e03b41e8d46d8665188d37d37d3f",
+      "software_reference_sha256": "3d4aafdb5d3860e8e73f45bcb2b67c7bc32d145686cb4f74543f78e4ac43fc75",
+      "raw_nvdec": "passed",
+      "videotoolbox": {
+        "synchronous": "passed",
+        "asynchronous": "passed"
+      }
+    },
+    {
+      "codec": "vp8",
+      "width": 1920,
+      "height": 1080,
+      "bit_depth": 8,
+      "frames": 6,
+      "ivf_sha256": "a72b90d53541b80cc822ffe0ba5f7b4ee947db2e75177bbe4f7b3eee25d529d6",
+      "software_reference_sha256": "14a2651b5f7024fcac3fa4cd1946fff87a5dc3d8990b40603ea9d47beabf2b27",
+      "raw_nvdec": "passed",
+      "videotoolbox": {
+        "synchronous": "passed",
+        "asynchronous": "passed"
+      }
+    },
+    {
+      "codec": "vp8",
+      "width": 3840,
+      "height": 2160,
+      "bit_depth": 8,
+      "frames": 3,
+      "ivf_sha256": "df4452a020ae12a4d460f7375cfec0ca6805d2e745463f49f9085b6b189a0f31",
+      "software_reference_sha256": "8344379e647d108c1ea575d8d7c494a5783bdb587a901ba71c17af9f674e15b8",
+      "raw_nvdec": "passed",
+      "videotoolbox": {
+        "synchronous": "passed",
+        "asynchronous": "passed"
+      }
+    },
+    {
+      "codec": "vp9",
+      "width": 128,
+      "height": 96,
+      "bit_depth": 8,
+      "frames": 12,
+      "ivf_sha256": "4ee6bef6c177ec86ced263bf32cf3184e439c6ab2d0af7c20bc55b73e5040a17",
+      "software_reference_sha256": "1bf619342f357495d4925f10618a8c83d2263e30e606be89aac4b0501551bcd1",
+      "raw_nvdec": "passed",
+      "videotoolbox": {
+        "synchronous": "passed",
+        "asynchronous": "passed"
+      }
+    },
+    {
+      "codec": "vp9",
+      "width": 351,
+      "height": 287,
+      "bit_depth": 8,
+      "frames": 8,
+      "ivf_sha256": "27595366918a2b643dc9e8948c760b31a62e4e2d6caf3668d7a8f35e279effd3",
+      "software_reference_sha256": "8b40834ac42da092bf2a0f13f07b7648963039ae2378d9a29e323636a4942728",
+      "raw_nvdec": "passed",
+      "videotoolbox": {
+        "synchronous": "passed",
+        "asynchronous": "passed"
+      }
+    },
+    {
+      "codec": "vp9",
+      "width": 640,
+      "height": 360,
+      "bit_depth": 8,
+      "frames": 12,
+      "ivf_sha256": "3ff93bb045ee559c47896365b82c257d4735b0c94d6d19707a6e1416a10a7219",
+      "software_reference_sha256": "6c3737f4dc475990a38a7d41efff7ecc5585b19c624860f484d6be8227c997e4",
+      "raw_nvdec": "passed",
+      "videotoolbox": {
+        "synchronous": "passed",
+        "asynchronous": "passed"
+      }
+    },
+    {
+      "codec": "vp9",
+      "width": 1920,
+      "height": 1080,
+      "bit_depth": 8,
+      "frames": 6,
+      "ivf_sha256": "eefcc2c9f3dd6362f578ffca75e7bcea212206972253896ed21a8e6fa8c8af5e",
+      "software_reference_sha256": "531aae7a6e9af8289a909aa16d05d6413510f64d41e92f1812bd986a74414b53",
+      "raw_nvdec": "passed",
+      "videotoolbox": {
+        "synchronous": "passed",
+        "asynchronous": "passed"
+      }
+    },
+    {
+      "codec": "vp9",
+      "width": 3840,
+      "height": 2160,
+      "bit_depth": 8,
+      "frames": 3,
+      "ivf_sha256": "ab1bdac39960e626ede80ca76b18542c0b8becd7e640294c3e1c5f649691f985",
+      "software_reference_sha256": "413edb05fdb51a0b5d71ff0d24be845a83446a64d43b96785f5b4a53d7c720d4",
+      "raw_nvdec": "passed",
+      "videotoolbox": {
+        "synchronous": "passed",
+        "asynchronous": "passed"
+      }
+    },
+    {
+      "codec": "vp9",
+      "width": 1366,
+      "height": 768,
+      "bit_depth": 10,
+      "frames": 6,
+      "ivf_sha256": "03399bb586cb47b164913062c77e726e2fc0e414693add7cc7bbc4438b327c18",
+      "software_reference_sha256": "b6d91b347506a34089b599cd4d5715b08a7d52c3ce5fe1c352cd0ef78c57cc43",
+      "raw_nvdec": "passed",
+      "videotoolbox": {
+        "synchronous": "passed",
+        "asynchronous": "passed"
+      }
+    },
+    {
+      "codec": "vp9",
+      "width": 3840,
+      "height": 2160,
+      "bit_depth": 10,
+      "frames": 2,
+      "ivf_sha256": "3502b0100c3f37327c404afdf634719f96c5eb78a2d9b5caa469c735714b7c61",
+      "software_reference_sha256": "e335093dd9e32ac58bc09f27d63c9620d02922186a3471da1effe4d471c59c23",
+      "raw_nvdec": "passed",
+      "videotoolbox": {
+        "synchronous": "passed",
+        "asynchronous": "passed"
+      }
+    },
+    {
+      "codec": "vp9",
+      "width": 640,
+      "height": 360,
+      "bit_depth": 12,
+      "frames": 6,
+      "ivf_sha256": "5c6895e88ac70d928670937bebdedbd697d814c754a7c19ec0275f78f5dfd19b",
+      "software_reference_sha256": "826ed8a78ce8143ad37504b40a76eff24e9e13f77e3892e2397899c197f2c366",
+      "raw_nvdec": "passed",
+      "videotoolbox": "raw-only: no 12-bit output adapter"
+    }
+  ],
+  "host_checks": {
+    "video-package-final": {
+      "status": "passed",
+      "log_sha256": "e645665e0938cefc206a362f82747b6a72a1b0dd244f0da0e619948727ecb0d8",
+      "checks": 7
+    },
+    "stage-regression-final": {
+      "status": "passed",
+      "log_sha256": "7efb0a43ced38968cc5d4d59a6a54e6fc06905d26d16bf6408e189d723022332",
+      "checks": 27
+    },
+    "zink-package-final": {
+      "status": "passed",
+      "log_sha256": "629ca63a842b54c937a6a4849382663b8ad01d98c90a4eee4a4e75d680ee6c38",
+      "checks": 18
+    },
+    "license-final": {
+      "status": "passed",
+      "log_sha256": "589e9a35b7397f94a9151efd9198b13e82784e76e7080ade83b11bc78c2b052f",
+      "checks": 6
+    },
+    "codec-policy-final": {
+      "status": "passed",
+      "log_sha256": "08d9408efd4500c10253ece16fcd2ba55c94208fb7735259b3a68f204087b1a4"
+    }
+  },
+  "other_gpu_policy": "Complete production registrars exercised with stubbed OS registration calls: Ada H264/HEVC/AV1 encoding and legacy/VP9/AV1 decoding; TU117 H264/HEVC encoding and existing decoding; Ampere decoder-only VP9/AV1; TU10x decoder-only VP8/VP9. NVIDIA audio functions do not identify a GPU.",
+  "evidence_log_sha256": {
+    "INSTALLED-CAPABILITIES.log": "d4dd4d4d15cb27dad7bd585b6d608a5267cfa4c24a2bcddff081c0cc32a58ec5",
+    "installed-vp8-351x287-8.log": "50e28face4d04e4cbbd8b551c8381c3d929b051629fc6b0c1b4dcfc93b890771",
+    "installed-vp9-1366x768-10.log": "e6c7ad23efb673e5949a01a76b627dddbdf260f4ce8c6305d56c90e2be1d9a86",
+    "STOCK-ENCODER-REGRESSION.log": "18b904c88ab86b6906245cccc44f20b1a43edea5cca131694eec31890c3f21d9",
+    "REJECT-ZERO-DIMENSION.log": "94ba81291cacaf71d94a1ca2d5d57b3b1f9f48a3bb0fe720ea167b3ed2557356",
+    "GPU-PROBE.log": "7e8b9c3e58be1821472250789b39c68c5feed76407ff07e13253be16407729af"
+  },
+  "limitations": [
+    "No physical Ada, Ampere or TU117 hardware codec testing in this change.",
+    "No Sequoia hardware codec test; library deployment target is macOS 15.0.",
+    "Applications must choose VideoToolbox; browser, Discord, OBS, QuickTime and their container negotiation have not been qualified by these API tests.",
+    "Turing has no VP8/VP9 NVENC encoding or AV1 hardware codec; no capability is advertised for them.",
+    "No kernel, Zink, Wine or display code changed; this is not a kernel or reboot qualification.",
+    "No performance improvement is claimed."
+  ]
+}

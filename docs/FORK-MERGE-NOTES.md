@@ -34,6 +34,22 @@ This is experimental firmware-mode framebuffer support. The accelerator's
 Intel-panel gameplay or laptop sleep/wake qualification from a kernel link
 check. See [Intel panel setup](INTEL-PANEL.md).
 
+## Additional NVIDIA video codecs
+
+Retain the pinned `video/` codec overlay and `build/build_nvenc.py`. Complete
+future packages pass its verified output as `--video-runtime` to
+`build/stage_package.py`; keep the library in the Metal bundle and the source,
+license and hash record under `nvmtl/video`. Preserve an explicit addon opt-out.
+TU10x adds VP8/VP9 VideoToolbox decoders and keeps the driver's matched H.264/HEVC
+encoders/decoders. Do not register AV1 or VP8/VP9 hardware encoding on Turing.
+Keep PCI display-function filtering, VP8 odd-width chroma and malformed-frame
+checks, and qualify application codec selection separately from API decoding.
+The overlay is built against pinned NVIDIA/WebKit headers; it does not change
+the driver kernel, renderer, Zink or Wine interfaces. See [codec setup](../video/INSTALL.md).
+Preserve Ada's upstream H.264/HEVC/AV1 encoders and decoder selection, TU117's
+H.264/HEVC encoders and decoders, and Ampere's VP9/AV1 decoders alongside the
+driver's H.264/HEVC encoders. Turing must not narrow these existing paths.
+
 ## Capture import reuse and planar GPU copies
 
 Preserve the Photo Booth follow-up to upstream PR #433: request an actual

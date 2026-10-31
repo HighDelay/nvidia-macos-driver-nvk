@@ -1,0 +1,34 @@
+{
+  "schema_version": 1,
+  "source": {
+    "repository": "https://github.com/mickys/nvenc.git",
+    "commit": "90d1d6a291fac6e7bccd5689b5a04971fe46d214"
+  },
+  "overlay": "nvenc-turing.patch",
+  "dependencies": {
+    "open-gpu-kernel-modules": {
+      "repository": "https://github.com/NVIDIA/open-gpu-kernel-modules.git",
+      "commit": "e4a5faa2567f28c8eabe0ebb6422b6d0abcf37eb",
+      "tag": "610.57.04",
+      "sparse": [
+        "src/common/sdk/nvidia/inc",
+        "src/nvidia/arch/nvalloc/unix/include"
+      ]
+    },
+    "open-gpu-doc": {
+      "repository": "https://github.com/NVIDIA/open-gpu-doc.git",
+      "commit": "9fdf5c4062007929d9f4e6cbad9c9771fe61b880",
+      "sparse": [
+        "classes/video"
+      ]
+    },
+    "webkit-spi": {
+      "commit": "3bfbc200370710495ffa440abdd31b943c83ad7a",
+      "url": "https://raw.githubusercontent.com/WebKit/WebKit/3bfbc200370710495ffa440abdd31b943c83ad7a/Source/ThirdParty/libwebrtc/Source/webrtc/webkit_sdk/WebKit/",
+      "files": {
+        "CMBaseObjectSPI.h": "2e30b39dadff06145a1dfc29f735b9067eb99d08151a7fe8b9464803df784a62",
+        "VTVideoDecoderSPI.h": "3d3f58450ba71ec689a50dfab37d3d84e3d7e686c20b01d5892300866030092f"
+      }
+    }
+  }
+}

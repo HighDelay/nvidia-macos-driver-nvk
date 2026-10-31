@@ -1,0 +1,348 @@
+diff --git a/src/vp8dec.c b/src/vp8dec.c
+index a11a93a..3ea6360 100644
+--- a/src/vp8dec.c
++++ b/src/vp8dec.c
+@@ -47,7 +47,7 @@ int vp8_parse_header(const uint8_t *buf, size_t len, Vp8Header *h)
+         h->width = (buf[6] | buf[7] << 8) & 0x3fff; h->height = (buf[8] | buf[9] << 8) & 0x3fff;
+         off = 10;
+     }
+-    if (off + (size_t)h->first_part_size > len) return -1;
++    if (h->version > 3 || h->first_part_size <= 0 || off + (size_t)h->first_part_size > len) return -1;
+     Bd b; bd_init(&b, buf + off, (size_t)h->first_part_size);
+     if (h->key) { L(&b, 1); L(&b, 1); }                         // color_space, clamping_type
+     h->segmentation = (int)L(&b, 1);
+@@ -115,7 +115,8 @@ void vp8dec_release(Vp8Dec *d, int surf) { if (surf >= 0 && surf < VP8_SURFACES)
+ void vp8dec_read_nv12(Vp8Dec *d, int surf, uint8_t *y, size_t ystride, uint8_t *uv, size_t uvstride, unsigned w, unsigned h)
+ {
+     nvenc_in_untile_plane(y, ystride, d->luma[surf].cpu, w, h, d->pitch);
+-    nvenc_in_untile_plane(uv, uvstride, d->chroma[surf].cpu, w, (h + 1) / 2, d->pitch);
++    // Interleaved chroma includes both U and V for an odd final luma column.
++    nvenc_in_untile_plane(uv, uvstride, d->chroma[surf].cpu, ((w + 1) / 2) * 2, (h + 1) / 2, d->pitch);
+ }
+ 
+ void vp8dec_read_i420(Vp8Dec *d, int surf, uint8_t *dst, unsigned w, unsigned h)
+@@ -143,7 +144,12 @@ int vp8dec_frame(Vp8Dec *d, const uint8_t *buf, size_t len)
+ {
+     Vp8Header *h = &d->h;
+     if (vp8_parse_header(buf, len, h)) { fprintf(stderr, "vp8dec: bad frame header\n"); return -1; }
+-    if (h->key) { d->width = h->width; d->height = h->height; }
++    if (h->key) {
++        if (h->width <= 0 || h->height <= 0 || h->width > 4096 || h->height > 4096) {
++            fprintf(stderr, "vp8dec: invalid picture size %dx%d\n", h->width, h->height); return -1;
++        }
++        d->width = h->width; d->height = h->height;
++    }
+     else if (d->last < 0) return 0;                             // no key frame yet
+     if ((unsigned)d->width > d->maxW || (unsigned)d->height > d->maxH) { fprintf(stderr, "vp8dec: %dx%d is larger than the session\n", d->width, d->height); return -1; }
+     const int surf = free_surface(d);
+diff --git a/vt/nvencvt.c b/vt/nvencvt.c
+index 8b25172..73b0644 100644
+--- a/vt/nvencvt.c
++++ b/vt/nvencvt.c
+@@ -66,7 +66,7 @@ static FILE *gLogF;   // NVENCVT_LOG: stderr; flag file /tmp/nvencvt.log (apps s
+ #define LOG(...) do { if (gLog) { FILE *lf_ = gLogF ? gLogF : stderr; fprintf(lf_, "nvencvt: " __VA_ARGS__); fputc('\n', lf_); fflush(lf_); } } while (0)
+ 
+ enum { VT_MAX_B = 3 };
+-enum { GPU_NONE = 0, GPU_ADA = 1, GPU_TU117 = 2, GPU_AMPERE = 3 };   // the GPUs the codecs register on
++enum { GPU_NONE = 0, GPU_ADA = 1, GPU_TU117 = 2, GPU_AMPERE = 3, GPU_TU10X = 4 };
+ extern int gNvencvtGpu;                               // which of them (set by NVEncVT_Register)
+ 
+ typedef struct {
+@@ -887,7 +887,8 @@ static int gpu_nvenc_kind(void)
+     if (rm_open(&rm)) { LOG("no NVIDIA RM device"); return GPU_NONE; }
+     const NvU32 cls = rm_class(&rm, RM_CLS_NVENC);
+     rm_close(&rm);
+-    return cls == 0xc9b7 ? GPU_ADA : cls == 0xb4b7 ? GPU_TU117 : cls == 0xc7b7 ? GPU_AMPERE : GPU_NONE;
++    return cls == 0xc9b7 ? GPU_ADA : cls == 0xb4b7 ? GPU_TU117 : cls == 0xc7b7 ? GPU_AMPERE :
++           cls == 0xc4b7 || cls == 0xc5b7 ? GPU_TU10X : GPU_NONE;
+ }
+ 
+ static OSStatus register_one(FourCharCode codec, CFStringRef id, CFStringRef name, int rating)
+@@ -931,20 +932,37 @@ static void card_name_from(io_object_t d)
+ 
+ int gNvencvtGpu = GPU_NONE;   // what NVEncVT_Register found (vt/nvencvt_dec.c: AV1 on Ada and on GA10x)
+ 
++static int pci_codec_family(unsigned vendor, unsigned device, unsigned classCode)
++{
++    if (vendor != 0x10de || (classCode >> 16) != 0x03) return GPU_NONE;
++    if (device >= 0x2600 && device <= 0x28ff) return GPU_ADA;
++    if (device >= 0x1f80 && device <= 0x1fff) return GPU_TU117;
++    if (device >= 0x2200 && device <= 0x25ff) return GPU_AMPERE;
++    if ((device >= 0x1e00 && device <= 0x1f7f) || (device >= 0x2180 && device <= 0x21ff)) return GPU_TU10X;
++    return GPU_NONE;
++}
++
++static bool codec_external_encoder(int gpu)
++{
++    return gpu == GPU_ADA || gpu == GPU_TU117 || (gpu == GPU_AMPERE && getenv("NVENCVT_AMPERE_ENC"));
++}
++
+ static int pci_gpu_kind(void)
+ {
+     io_iterator_t it = 0; io_object_t d; int found = -1;
+     if (IOServiceGetMatchingServices(kIOMainPortDefault, IOServiceMatching("IOPCIDevice"), &it) != KERN_SUCCESS) return -1;
+     while ((d = IOIteratorNext(it))) {
+         CFTypeRef ven = IORegistryEntryCreateCFProperty(d, CFSTR("vendor-id"), NULL, 0), dev = IORegistryEntryCreateCFProperty(d, CFSTR("device-id"), NULL, 0);
+-        unsigned v = 0, id = 0;
++        CFTypeRef cls = IORegistryEntryCreateCFProperty(d, CFSTR("class-code"), NULL, 0);
++        unsigned v = 0, id = 0, displayClass = 0;
+         if (ven && CFGetTypeID(ven) == CFDataGetTypeID() && CFDataGetLength(ven) >= 2) CFDataGetBytes(ven, CFRangeMake(0, 2), (UInt8 *)&v);
+         if (dev && CFGetTypeID(dev) == CFDataGetTypeID() && CFDataGetLength(dev) >= 2) CFDataGetBytes(dev, CFRangeMake(0, 2), (UInt8 *)&id);
++        if (cls && CFGetTypeID(cls) == CFDataGetTypeID() && CFDataGetLength(cls) >= 3) CFDataGetBytes(cls, CFRangeMake(0, 3), (UInt8 *)&displayClass);
+         if (ven) CFRelease(ven);
+         if (dev) CFRelease(dev);
+-        if (v == 0x10de && found < 1) {
+-            found = id >= 0x2600 && id <= 0x28ff ? GPU_ADA : id >= 0x1f80 && id <= 0x1fff ? GPU_TU117
+-                  : id >= 0x2200 && id <= 0x25ff ? GPU_AMPERE : GPU_NONE;
++        if (cls) CFRelease(cls);
++        if (v == 0x10de && (displayClass >> 16) == 0x03 && found < 1) {
++            found = pci_codec_family(v, id, displayClass);
+             if (found > 0) card_name_from(d);
+         }
+         IOObjectRelease(d);
+@@ -1044,7 +1062,7 @@ __attribute__((visibility("default"))) OSStatus NVEncVT_Register(int rating)
+     int gpu = getenv("NVENCVT_ANY_GPU") ? GPU_ADA : pci_gpu_kind();
+     if (gpu < 0) gpu = gpu_nvenc_kind();   // no PCI match (unusual): ask RM for the class list
+     if (gpu <= 0) {
+-        LOG("GPU is neither Ada, TU117 nor GA10x (NVENC class c9b7 / b4b7 / c7b7): not registering");
++        LOG("GPU has no qualified codec family: not registering");
+         return kVTCouldNotFindVideoEncoderErr;
+     }
+     gNvencvtGpu = gpu;
+@@ -1079,8 +1097,11 @@ __attribute__((visibility("default"))) OSStatus NVEncVT_Register(int rating)
+     // GA10x (RTX 30): the NVENC there is not Ada's, and our encoder setups are written for NVENC 8.2 (Ada) and 6.6
+     // (TU117). Registering them anyway would make VideoToolbox pick an encoder that cannot start (NullMoth's own
+     // encoders stay for these cards), so only the decoders register on GA10x. NVENCVT_AMPERE_ENC=1 tries them anyway.
+-    const bool encoders = gpu != GPU_AMPERE || getenv("NVENCVT_AMPERE_ENC");
+-    if (!encoders) LOG("GA10x (RTX 30): the decoders only (NVENCVT_AMPERE_ENC=1 registers the encoders too)");
++    // TU10x keeps the driver's matched H.264/HEVC encoders. Its NVDEC has
++    // VP8/VP9, but its NVENC cannot encode them or AV1.
++    const bool encoders = codec_external_encoder(gpu);
++    if (gpu == GPU_TU10X) LOG("TU10x: additional VP8/VP9 decoders; keeping the driver's H.264/HEVC encoders");
++    else if (!encoders) LOG("GA10x (RTX 30): the decoders only (NVENCVT_AMPERE_ENC=1 registers the encoders too)");
+     OSStatus st = encoders ? register_one(kCMVideoCodecType_H264, CFSTR(ENCODER_ID), na, rating) : kVTCouldNotFindVideoEncoderErr;
+     OSStatus sh = !encoders || getenv("NVENCVT_NO_HEVC") ? kVTCouldNotFindVideoEncoderErr
+                 : register_one(kCMVideoCodecType_HEVC, CFSTR(ENCODER_ID_HEVC), nh, rating);
+@@ -1095,8 +1116,8 @@ __attribute__((visibility("default"))) OSStatus NVEncVT_Register(int rating)
+     if (!s1) { ids[nreg] = ENCODER_ID_AV1; names[nreg] = nameAv1; codecs[nreg++] = "AV1"; }
+     rename_encoders(ids, names, codecs, nreg);
+     extern OSStatus NVDecVT_Register(int rating);   // vt/nvencvt_dec.c: the H.264 decoder (NVDEC), same rating
+-    NVDecVT_Register(rating);
+-    return st;
++    const OSStatus decStatus = NVDecVT_Register(rating);
++    return encoders ? st : decStatus;
+ }
+ 
+ // System-wide settings for apps that do not get our environment variables (started from the Dock / Finder):
+diff --git a/vt/nvencvt_dec.c b/vt/nvencvt_dec.c
+index 55063ca..150d0b4 100644
+--- a/vt/nvencvt_dec.c
++++ b/vt/nvencvt_dec.c
+@@ -7,6 +7,7 @@
+ // into a process (NullMoth's NVMTL_NVENCVT hook, nvenc-run) brings the decoder too.
+ #include "dec.h"
+ #include "vp9dec.h"
++#include "vp8dec.h"
+ #include "av1dec.h"
+ #include "hevcdec.h"
+ #include "mpeg2dec.h"
+@@ -55,13 +56,14 @@ typedef struct { CMBaseVTable base; const DecoderClass *decoderClass; } DecoderV
+ 
+ #define DECODER_ID "org.nvenc.videodecoder.avc"
+ #define DECODER_ID_VP9 "org.nvenc.videodecoder.vp9"
++#define DECODER_ID_VP8 "org.nvenc.videodecoder.vp8"
+ #define DECODER_ID_AV1 "org.nvenc.videodecoder.av1"
+ #define DECODER_ID_HEVC "org.nvenc.videodecoder.hevc"
+ #define DECODER_ID_MPEG2 "org.nvenc.videodecoder.mpeg2"
+ #define DECODER_ID_MPEG1 "org.nvenc.videodecoder.mpeg1"
+ #define DECODER_ID_MPEG4 "org.nvenc.videodecoder.mpeg4"
+ static bool is_mpeg12(FourCharCode c) { return c == kCMVideoCodecType_MPEG2Video || c == kCMVideoCodecType_MPEG1Video; }
+-enum { CODEC_VP9 = 0x76703039, CODEC_AV1 = 0x61763031 };   // 'vp09', 'av01' (kCMVideoCodecType_VP9 / _AV1)
++enum { CODEC_VP8 = 0x76703038, CODEC_VP9 = 0x76703039, CODEC_AV1 = 0x61763031 };   // 'vp08', 'vp09', 'av01'
+ enum { CODEC_HEV1 = 0x68657631, CODEC_AVC3 = 0x61766333 };  // 'hev1', 'avc3': sample entries macOS has no decoder for
+ static bool gDLog; static FILE *gDLogF;
+ #define DLOG(...) do { if (gDLog) { FILE *lf_ = gDLogF ? gDLogF : stderr; fprintf(lf_, "nvdecvt: " __VA_ARGS__); fputc('\n', lf_); fflush(lf_); } } while (0)
+@@ -73,6 +75,7 @@ typedef struct {
+     FourCharCode codec;
+     Rm rm; H264Dec dec; bool opened;
+     Rm *vrm; Vp9Dec *vp9;           // VP9: on the heap, so that the next session can take them over (park_vp9)
++    Vp8Dec *vp8;
+     Av1Dec *av1;                    // AV1: likewise (with vrm)
+     HevcDec *hevc;                  // HEVC (with rm)
+     Mpeg2Dec *m2;                   // MPEG-1/2 (with rm)
+@@ -183,6 +186,7 @@ static OSStatus b_invalidate(CMBaseObjectRef o)
+     }
+     if (s->opened) {
+         if (s->codec == CODEC_VP9) { park_vp9(s->vrm, s->vp9); s->vrm = NULL; s->vp9 = NULL; }
++        else if (s->codec == CODEC_VP8) { vp8dec_close(s->vp8); free(s->vp8); s->vp8 = NULL; rm_close(&s->rm); }
+         else if (s->codec == CODEC_AV1) { park_av1(s->vrm, s->av1); s->vrm = NULL; s->av1 = NULL; }
+         else if (s->codec == kCMVideoCodecType_HEVC) { hevcdec_close(s->hevc); free(s->hevc); s->hevc = NULL; rm_close(&s->rm); }
+         else if (is_mpeg12(s->codec)) { mpeg2dec_close(s->m2); free(s->m2); s->m2 = NULL; rm_close(&s->rm); }
+@@ -208,7 +212,7 @@ static void b_finalize(CMBaseObjectRef o)
+ static CFStringRef b_desc(CMBaseObjectRef o)
+ {
+     const FourCharCode c = dstate(o)->codec;
+-    return c == CODEC_VP9 ? CFSTR("nvenc VP9 decoder (NVDEC)") : c == CODEC_AV1 ? CFSTR("nvenc AV1 decoder (NVDEC)") :
++    return c == CODEC_VP8 ? CFSTR("nvenc VP8 decoder (NVDEC)") : c == CODEC_VP9 ? CFSTR("nvenc VP9 decoder (NVDEC)") : c == CODEC_AV1 ? CFSTR("nvenc AV1 decoder (NVDEC)") :
+            c == kCMVideoCodecType_HEVC ? CFSTR("nvenc HEVC decoder (NVDEC)") : is_mpeg12(c) ? CFSTR("nvenc MPEG-1/2 decoder (NVDEC)") :
+            c == kCMVideoCodecType_MPEG4Video ? CFSTR("nvenc MPEG-4 Part 2 decoder (NVDEC)") :
+            CFSTR("nvenc H.264 decoder (NVDEC)");
+@@ -230,6 +234,24 @@ static OSStatus b_setProperty(CMBaseObjectRef o, CFStringRef key, CFTypeRef v)
+ // ---- decoder class ----
+ static OSStatus set_output(DState *s, VTVideoDecoderSession session, CMVideoFormatDescriptionRef fmt, OSType pf, bool full);
+ 
++static OSStatus start_vp8(DState *s, VTVideoDecoderSession session, CMVideoFormatDescriptionRef fmt)
++{
++    const CMVideoDimensions dm = CMVideoFormatDescriptionGetDimensions(fmt);
++    if (dm.width <= 0 || dm.height <= 0 || dm.width > 4096 || dm.height > 4096)
++        return kVTVideoDecoderUnsupportedDataFormatErr;
++    s->w = dm.width; s->h = dm.height;
++    if (rm_open(&s->rm) || rm_va_init(&s->rm)) {
++        rm_close(&s->rm); return kVTVideoDecoderMalfunctionErr;
++    }
++    s->vp8 = calloc(1, sizeof *s->vp8);
++    if (!s->vp8 || vp8dec_open(s->vp8, &s->rm, (unsigned)dm.width, (unsigned)dm.height)) {
++        if (s->vp8) { vp8dec_close(s->vp8); free(s->vp8); s->vp8 = NULL; }
++        rm_close(&s->rm); return kVTVideoDecoderMalfunctionErr;
++    }
++    s->opened = true;
++    return set_output(s, session, fmt, kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange, false);
++}
++
+ // VP9: size from the format description, bit depth and range from its vpcC atom (VP Codec ISO Media File Format Binding:
+ // version/flags, profile, level, bitDepth(4) chromaSubsampling(3) videoFullRangeFlag(1), ...)
+ static OSStatus start_vp9(DState *s, VTVideoDecoderSession session, CMVideoFormatDescriptionRef fmt)
+@@ -395,6 +417,7 @@ static OSStatus d_startSession(VTVideoDecoderRef o, VTVideoDecoderSession sessio
+     DState *s = dstate(o);
+     pthread_mutex_lock(&s->lock);
+     s->session = session; s->fmt = (CMVideoFormatDescriptionRef)CFRetain(fmt);
++    if (s->codec == CODEC_VP8) { OSStatus r = start_vp8(s, session, fmt); pthread_mutex_unlock(&s->lock); return r; }
+     if (s->codec == CODEC_VP9) { OSStatus r = start_vp9(s, session, fmt); pthread_mutex_unlock(&s->lock); return r; }
+     if (s->codec == CODEC_AV1) { OSStatus r = start_av1(s, session, fmt); pthread_mutex_unlock(&s->lock); return r; }
+     if (s->codec == kCMVideoCodecType_HEVC) { OSStatus r = start_hevc(s, session, fmt); pthread_mutex_unlock(&s->lock); return r; }
+@@ -547,7 +570,8 @@ static void out_copy(DState *s, OutJob *j)
+     CVPixelBufferLockBaseAddress(pb, 0);
+     uint8_t *y = CVPixelBufferGetBaseAddressOfPlane(pb, 0), *uv = CVPixelBufferGetBaseAddressOfPlane(pb, 1);
+     const size_t ys = CVPixelBufferGetBytesPerRowOfPlane(pb, 0), uvs = CVPixelBufferGetBytesPerRowOfPlane(pb, 1);
+-    if (s->codec == CODEC_VP9) vp9dec_read_nv12(s->vp9, j->surf, y, ys, uv, uvs, j->w, j->h);
++    if (s->codec == CODEC_VP8) vp8dec_read_nv12(s->vp8, j->surf, y, ys, uv, uvs, j->w, j->h);
++    else if (s->codec == CODEC_VP9) vp9dec_read_nv12(s->vp9, j->surf, y, ys, uv, uvs, j->w, j->h);
+     else if (s->codec == CODEC_AV1) av1dec_read_nv12(s->av1, j->surf, y, ys, uv, uvs, j->w, j->h);
+     else if (s->codec == kCMVideoCodecType_HEVC) hevcdec_read_nv12(s->hevc, j->surf, y, ys, uv, uvs, j->w, j->h, j->cx, j->cy);
+     else if (is_mpeg12(s->codec)) mpeg2dec_read_nv12(s->m2, j->surf, y, ys, uv, uvs, j->w, j->h);
+@@ -561,7 +585,8 @@ static void out_copy(DState *s, OutJob *j)
+ static void out_release(DState *s, const OutJob *j)   // lock held
+ {
+     if (j->rel < 0) return;
+-    if (s->codec == CODEC_VP9) vp9dec_release(s->vp9, j->rel);
++    if (s->codec == CODEC_VP8) vp8dec_release(s->vp8, j->rel);
++    else if (s->codec == CODEC_VP9) vp9dec_release(s->vp9, j->rel);
+     else if (s->codec == CODEC_AV1) av1dec_release(s->av1, j->rel);
+     else if (s->codec == kCMVideoCodecType_HEVC) hevcdec_release(s->hevc, j->rel);
+     else if (is_mpeg12(s->codec)) mpeg2dec_release(s->m2, j->rel);
+@@ -624,7 +649,7 @@ static void out_deliver(DState *s, OutJob *j)
+ static bool out_async_ok(DState *s)
+ {
+     if (s->codec == kCMVideoCodecType_HEVC) return s->hevc && s->hevc->max_dec_pic <= HEVC_SURFACES - 2;
+-    if (s->codec == CODEC_VP9 || s->codec == CODEC_AV1 || is_mpeg12(s->codec) || s->codec == kCMVideoCodecType_MPEG4Video) return true;
++    if (s->codec == CODEC_VP8 || s->codec == CODEC_VP9 || s->codec == CODEC_AV1 || is_mpeg12(s->codec) || s->codec == kCMVideoCodecType_MPEG4Video) return true;
+     int refs = 0;
+     for (int i = 0; i < 32; i++) if (s->dec.params.sps[i].max_num_ref_frames > refs) refs = s->dec.params.sps[i].max_num_ref_frames;
+     return refs <= DEC_SURFACES - 3;
+@@ -774,6 +799,27 @@ static OSStatus decode_mpeg4(DState *s, VTVideoDecoderFrame frame, const uint8_t
+     return res;
+ }
+ 
++// VP8 samples contain one compressed frame. Hidden reference frames still
++// update NVDEC state, but emit a dropped result and release their caller hold.
++static OSStatus decode_vp8(DState *s, VTVideoDecoderFrame frame, const uint8_t *p, size_t len)
++{
++    Vp8Dec *d = s->vp8;
++    const int r = vp8dec_frame(d, p, len);
++    OSStatus res = r < 0 || d->err_status || d->mbs_err ? kVTVideoDecoderBadDataErr : noErr;
++    OutJob j = { .frame = frame, .surf = -1, .rel = r == 1 ? d->cur_surf : -1 };
++    const bool shown = !res && r == 1 && d->h.show;
++    if (shown) {
++        s->tEngine += d->engine_ms; const double tp = nowms();
++        j.w = (unsigned)d->width; j.h = (unsigned)d->height;
++        if (output_buffer(s, j.w, j.h, &j.pb) || !j.pb) res = kVTVideoDecoderMalfunctionErr;
++        else j.surf = d->cur_surf;
++        s->tPool += nowms() - tp; s->frames++;
++    }
++    j.res = res; j.fl = !res && !shown ? kVTDecodeInfo_FrameDropped : 0;
++    out_deliver(s, &j);
++    return res;
++}
++
+ static OSStatus d_decodeFrame(VTVideoDecoderRef o, VTVideoDecoderFrame frame, CMSampleBufferRef sb, VTDecodeFrameFlags flags, VTDecodeInfoFlags *info)
+ {
+     DState *s = dstate(o);
+@@ -792,8 +838,9 @@ static OSStatus d_decodeFrame(VTVideoDecoderRef o, VTVideoDecoderFrame frame, CM
+         if (s->tmpCap < len) { free(s->tmp); s->tmp = malloc(len); s->tmpCap = s->tmp ? len : 0; }
+         if (!s->tmp || CMBlockBufferCopyDataBytes(bb, 0, len, s->tmp)) res = kVTVideoDecoderBadDataErr; else p = (char *)s->tmp;
+     }
+-    if (s->codec == CODEC_VP9 || s->codec == CODEC_AV1 || s->codec == kCMVideoCodecType_HEVC || is_mpeg12(s->codec) || s->codec == kCMVideoCodecType_MPEG4Video) {
+-        res = res ? res : s->codec == CODEC_AV1 ? decode_av1(s, frame, (const uint8_t *)p, len) :
++    if (s->codec == CODEC_VP8 || s->codec == CODEC_VP9 || s->codec == CODEC_AV1 || s->codec == kCMVideoCodecType_HEVC || is_mpeg12(s->codec) || s->codec == kCMVideoCodecType_MPEG4Video) {
++        res = res ? res : s->codec == CODEC_VP8 ? decode_vp8(s, frame, (const uint8_t *)p, len) :
++                          s->codec == CODEC_AV1 ? decode_av1(s, frame, (const uint8_t *)p, len) :
+                           is_mpeg12(s->codec) ? decode_mpeg2(s, frame, (const uint8_t *)p, len) :
+                           s->codec == kCMVideoCodecType_MPEG4Video ? decode_mpeg4(s, frame, (const uint8_t *)p, len) :
+                           s->codec == kCMVideoCodecType_HEVC ? decode_hevc(s, frame, (const uint8_t *)p, len) : decode_vp9(s, frame, (const uint8_t *)p, len);
+@@ -897,7 +944,7 @@ __attribute__((visibility("default"))) OSStatus NVDecVT_CreateInstance(FourCharC
+ {
+     const FourCharCode entry = codec;   // 'hev1' / 'avc3' (parameter sets may also come in band) decode as HEVC / H.264
+     if (codec == CODEC_HEV1) codec = kCMVideoCodecType_HEVC; else if (codec == CODEC_AVC3) codec = kCMVideoCodecType_H264;
+-    if (codec != kCMVideoCodecType_H264 && codec != kCMVideoCodecType_HEVC && codec != CODEC_VP9 && codec != CODEC_AV1 && !is_mpeg12(codec) && codec != kCMVideoCodecType_MPEG4Video) return kVTCouldNotFindVideoDecoderErr;
++    if (codec != kCMVideoCodecType_H264 && codec != kCMVideoCodecType_HEVC && codec != CODEC_VP8 && codec != CODEC_VP9 && codec != CODEC_AV1 && !is_mpeg12(codec) && codec != kCMVideoCodecType_MPEG4Video) return kVTCouldNotFindVideoDecoderErr;
+     CMBaseObjectRef obj = NULL;
+     OSStatus st = CMDerivedObjectCreate(al, &gDVT.base, VTVideoDecoderGetClassID(), &obj);
+     if (st) return st;
+@@ -906,7 +953,7 @@ __attribute__((visibility("default"))) OSStatus NVDecVT_CreateInstance(FourCharC
+     s->codec = codec;
+     *(DState **)CMBaseObjectGetDerivedStorage(obj) = s;
+     *out = obj;
+-    DLOG("instance %p (%s)", obj, entry == CODEC_HEV1 ? "hev1" : entry == CODEC_AVC3 ? "avc3" : codec == CODEC_VP9 ? "vp09" : codec == CODEC_AV1 ? "av01" : codec == kCMVideoCodecType_HEVC ? "hvc1" :
++    DLOG("instance %p (%s)", obj, entry == CODEC_HEV1 ? "hev1" : entry == CODEC_AVC3 ? "avc3" : codec == CODEC_VP8 ? "vp08" : codec == CODEC_VP9 ? "vp09" : codec == CODEC_AV1 ? "av01" : codec == kCMVideoCodecType_HEVC ? "hvc1" :
+          codec == kCMVideoCodecType_MPEG2Video ? "mp2v" : codec == kCMVideoCodecType_MPEG1Video ? "mp1v" :
+          codec == kCMVideoCodecType_MPEG4Video ? "mp4v" : "avc1");
+     return noErr;
+@@ -939,7 +986,9 @@ OSStatus NVDecVT_Register(int rating)
+     if (getenv("NVENCVT_NO_DEC")) return kVTCouldNotFindVideoDecoderErr;
+     extern int gNvencvtGpu;   // vt/nvencvt.c: 1 Ada, 2 TU117 (GTX 1650: NVDEC 0xc4b0 has no AV1), 3 GA10x (RTX 30)
+     const bool ampere = gNvencvtGpu == 3;
+-    const bool av1Vp9Only = ampere && !getenv("NVENCVT_AMPERE_ALL_DEC");
++    const bool tu10x = gNvencvtGpu == 4;
++    const bool av1Vp9Only = (ampere && !getenv("NVENCVT_AMPERE_ALL_DEC")) ||
++                           (tu10x && !getenv("NVENCVT_TURING_ALL_DEC"));
+     typedef OSStatus (*RegFn)(FourCharCode, CFDictionaryRef, void *);
+     RegFn reg = (RegFn)dlsym(RTLD_DEFAULT, "VTRegisterVideoDecoderWithInfo");
+     if (!reg) { DLOG("VTRegisterVideoDecoderWithInfo not found"); return kVTCouldNotFindVideoDecoderErr; }
+@@ -966,6 +1015,7 @@ OSStatus NVDecVT_Register(int rating)
+         CFDictionaryRef i9 = CFDictionaryCreate(NULL, k, v9, 4, &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
+         OSStatus s9 = reg(CODEC_VP9, i9, (void *)NVDecVT_CreateInstance);
+         CFRelease(i9);
++        if (!s9) st = noErr;
+         DLOG("registered %s -> %d (rating %d)", DECODER_ID_VP9, (int)s9, rating);
+         // VideoToolbox offers VP9 decoders only to a process that opted in (public API, macOS 11+; WebKit and ffmpeg call
+         // it themselves). Opting in for the process lets AVFoundation apps decode VP9 too; on Macs without Apple's own
+@@ -974,11 +1024,18 @@ OSStatus NVDecVT_Register(int rating)
+         SuppFn supp = (SuppFn)dlsym(RTLD_DEFAULT, "VTRegisterSupplementalVideoDecoderIfAvailable");
+         if (supp && !getenv("NVENCVT_NO_VP9SUPP")) { supp(CODEC_VP9); DLOG("opted in to VP9 decoding for this process"); }
+     }
++    if (tu10x && !getenv("NVENCVT_NO_VP8DEC")) {
++        const void *v8[] = { CFSTR(DECODER_ID_VP8), CFSTR("NVDEC - VP8 - mickys/nvenc + NVK Turing"), nr, kCFBooleanTrue };
++        CFDictionaryRef i8 = CFDictionaryCreate(NULL, k, v8, 4, &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
++        OSStatus s8 = reg(CODEC_VP8, i8, (void *)NVDecVT_CreateInstance);
++        CFRelease(i8); if (!s8) st = noErr;
++        DLOG("registered %s -> %d (rating %d)", DECODER_ID_VP8, (int)s8, rating);
++    }
+     // AV1: the NVDEC classes that have it (GA10x 0xc7b0 = RTX 30, Ada 0xc9b0). The class is the truth, not the card's name:
+     // a decoder that registers on a card without AV1 would take the session away from Apple's own decoder and then fail.
+     // Ada's and Turing's class is known from the card (the PCI device ID), so RM is asked only for GA10x and for cards the
+     // registry does not name - and RM answering 0 (no driver) means no AV1 decoder at all.
+-    const NvU32 nvcls = gNvencvtGpu == 1 ? 0xc9b0 : gNvencvtGpu == 2 ? 0xc4b0 : nvdec_class();
++    const NvU32 nvcls = gNvencvtGpu == 1 ? 0xc9b0 : gNvencvtGpu == 2 || tu10x ? 0xc4b0 : nvdec_class();
+     const bool hasAv1 = nvcls == 0xc7b0 || nvcls == 0xc9b0;
+     DLOG("NVDEC class 0x%x%s", nvcls, hasAv1 ? " (AV1)" : " (no AV1)");
+     if (!getenv("NVENCVT_NO_AV1DEC") && hasAv1) {   // AV1 likewise (NVENCVT_NO_AV1DEC=1 leaves it out)
