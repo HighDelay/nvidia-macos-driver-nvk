@@ -26,6 +26,10 @@ Applications must request VideoToolbox decoding for that codec. A registered
 VP8 decoder does not redirect an application's private software VP8 decoder.
 Container support and codec negotiation remain application-specific. Browser,
 Discord, OBS and QuickTime use should be qualified separately from API tests.
+Edge 156 VP9 YouTube playback at **2160p60** is verified on RTX 2060 SUPER / Tahoe
+with VideoToolbox decoding and ANGLE enabled. If an earlier GPU crash forced
+software rendering, fully quit and reopen the browser after updating.
+[Browser repair and validation](../docs/BROWSER-VIDEO-DECODING.md).
 
 For command-line tools, preload the codec before their first VideoToolbox
 session. For example, with an existing compatible FFmpeg installation:
@@ -69,14 +73,16 @@ packages. No kernel or CGL changes are required for the codec library.
 
 ## Validation
 
-On an RTX 2060 SUPER / Tahoe 26.7.1, 24 hardware VideoToolbox sessions decoded
-180 synthetic VP8/VP9 frames through 4K, with every luma/chroma sample matching
-libvpx. This includes odd dimensions, VP9 10-bit output and synchronous/asynchronous
-delivery. Separate checks confirmed installed-driver loading. The retained
+On an RTX 2060 SUPER / Tahoe 26.7.1, 48 hardware VideoToolbox sessions decoded
+360 synthetic VP8/VP9 frames through 4K, with every luma/chroma sample matching
+libvpx. This includes odd dimensions, VP9 10-bit output, synchronous/asynchronous
+delivery and minimal browser output requests. Every frame has IOSurface backing.
+Separate checks confirmed installed-driver loading. The retained
 H.264/HEVC hardware encoders each produced eight valid packets in a smoke test.
 
 Ada, Ampere and TU117 codec registration is regression-tested with recorded OS
 calls; those cards and Sequoia have not received hardware codec testing here.
-See the [validation record](../docs/VIDEO-CODECS-VALIDATION.json) and the probes in
+See the [initial validation](../docs/VIDEO-CODECS-VALIDATION.json),
+[browser follow-up](../docs/BROWSER-VIDEO-DECODING.json) and the probes in
 [`tools/video`](../tools/video). The probe's `installed` argument checks automatic
 driver loading; a library path checks process-local registration.

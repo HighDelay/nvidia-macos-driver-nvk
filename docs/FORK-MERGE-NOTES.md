@@ -50,6 +50,15 @@ Preserve Ada's upstream H.264/HEVC/AV1 encoders and decoder selection, TU117's
 H.264/HEVC encoders and decoders, and Ampere's VP9/AV1 decoders alongside the
 driver's H.264/HEVC encoders. Turing must not narrow these existing paths.
 
+Keep decoder-owned pixel pools based on the negotiated output attributes,
+including IOSurface backing and Metal compatibility, even when the client
+requests only a pixel format. Copying only that minimal client dictionary
+produces heap-backed frames and crashes Chromium's GPU process during VP9
+playback. Preserve the direct-pool optimization and format/size conversion
+fallback. The native regression must require IOSurface-backed output for both
+minimal and explicit requests; retain the live Edge 2160p60 qualification in
+[browser validation](BROWSER-VIDEO-DECODING.md).
+
 ## Capture import reuse and planar GPU copies
 
 Preserve the Photo Booth follow-up to upstream PR #433: request an actual

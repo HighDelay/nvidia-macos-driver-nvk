@@ -1,0 +1,121 @@
+{
+  "schema_version": 1,
+  "date": "2026-11-01",
+  "driver_base": "bdf3836d161d2bb962d9f91ea4875eca8b30ef2e",
+  "codec_source": {
+    "repository": "https://github.com/mickys/nvenc.git",
+    "commit": "90d1d6a291fac6e7bccd5689b5a04971fe46d214"
+  },
+  "overlay_sha256": "6402351e433ff5ef301b6446449b217339c15c85ff87b7ff5a604a46f4713a82",
+  "fixed_library_sha256": "910c86eb27c4934a5d3a9e8ef32b149bf78ec408ee26e37cd1a72768e8c9e848",
+  "original_library_sha256": "a62de6153f9ede2840f830a7f749a9f60691ccade327b5937dfe214e7999c9ce",
+  "hardware": {
+    "gpu": "NVIDIA GeForce RTX 2060 SUPER",
+    "os": "Tahoe 26.7.1",
+    "build": "25G241"
+  },
+  "original_failure": {
+    "browser_gpu_exit_code": 5,
+    "native_minimal_output": "12 frames returned without IOSurface backing; all rejected by the regression probe",
+    "original_library_session_pool_override": "NVDEC_NOOWNPOOL=1 avoids the browser crash, isolating the custom-pool output contract"
+  },
+  "native_regression": {
+    "sessions": 48,
+    "frames": 360,
+    "minimal_output_sessions": 24,
+    "explicit_output_sessions": 24,
+    "all_frames_have_iosurface": true,
+    "all_luma_chroma_samples_equal_libvpx": true,
+    "max_resolution": "3840x2160",
+    "vp9_bit_depths": [
+      8,
+      10
+    ],
+    "modes": [
+      "sync",
+      "async"
+    ]
+  },
+  "browser": {
+    "name": "Microsoft Edge",
+    "version": "156.0.4314.58",
+    "sandboxed": true,
+    "video": "https://www.youtube.com/watch?v=VhZtweWFtVI",
+    "format_itag": "315",
+    "codec": "VP9 profile 0",
+    "size": [
+      3840,
+      2160
+    ],
+    "stream_fps": 60,
+    "duration_seconds": 34.12259999999986,
+    "snapshots": 35,
+    "decoder": "VideoToolboxVideoDecoder",
+    "platform_video_decoder": true,
+    "gpu_crashes": 0,
+    "angle_backend": "Metal",
+    "gpu_feature_status": {
+      "2d_canvas": "unavailable_software",
+      "direct_rendering_display_compositor": "disabled_off_ok",
+      "gpu_compositing": "enabled",
+      "multiple_raster_threads": "enabled_on",
+      "opengl": "enabled_on",
+      "rasterization": "enabled",
+      "raw_draw": "disabled_off_ok",
+      "skia_graphite": "enabled_on",
+      "trees_in_viz": "disabled_off",
+      "video_decode": "enabled",
+      "video_encode": "enabled",
+      "webgl": "enabled",
+      "webgpu": "enabled",
+      "webnn": "disabled_off"
+    },
+    "first_sample": {
+      "wall": 35342.60000000009,
+      "id": "VhZtweWFtVI",
+      "quality": "hd2160",
+      "format": "315",
+      "optimal": "2160p60",
+      "width": 3840,
+      "height": 2160,
+      "ended": false,
+      "paused": false,
+      "time": 0.019517,
+      "duration": 9.601,
+      "total": 5,
+      "dropped": 0,
+      "ready": 4,
+      "loop": true
+    },
+    "last_sample": {
+      "wall": 69465.19999999995,
+      "id": "VhZtweWFtVI",
+      "quality": "hd2160",
+      "format": "315",
+      "optimal": "2160p60",
+      "width": 3840,
+      "height": 2160,
+      "ended": false,
+      "paused": false,
+      "time": 5.058476,
+      "duration": 9.601,
+      "total": 2021,
+      "dropped": 31,
+      "ready": 4,
+      "loop": true
+    },
+    "operator_note": "User deliberately revealed player controls during the run and attributed the observed frame drops to that interaction; this is not an isolated FPS benchmark."
+  },
+  "retained_h264_hevc_encoding": "Hardware smoke tests pass: eight ready packets per codec, no callback errors.",
+  "evidence_sha256": {
+    "native_matrix": "754eb0710b129fa1cfa2d876b621c3ed2bef9d95f84ba95d51ddc1fca76ed3d2",
+    "browser_cdp_media_and_gpu": "500d2f0637205b7aa583a86ba47cead5aa8a21d362a587b2670f1ee2dd3de188",
+    "minimal_output_before": "df2fdb38459b8c988f0aa9bcdb7b7c41d7b7f9ec5c9af0e39cd922055231cbae",
+    "encoder_regression": "be0b3aa86c648cf03e1716335b35b78967da437f2162374e9ed16a87e24fc88a"
+  },
+  "limits": [
+    "Hardware tests ran on RTX 2060 SUPER / Tahoe; no new physical Ada/Ampere/TU117/Sequoia qualification.",
+    "Other browsers and media applications are not qualified by this Edge test.",
+    "Existing kernel, ANGLE policy, Zink and gaming runtime sources are unchanged."
+  ]
+}

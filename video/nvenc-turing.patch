@@ -135,7 +135,7 @@ index 8b25172..73b0644 100644
  
  // System-wide settings for apps that do not get our environment variables (started from the Dock / Finder):
 diff --git a/vt/nvencvt_dec.c b/vt/nvencvt_dec.c
-index 55063ca..150d0b4 100644
+index 55063ca..26eda44 100644
 --- a/vt/nvencvt_dec.c
 +++ b/vt/nvencvt_dec.c
 @@ -7,6 +7,7 @@
@@ -220,7 +220,39 @@ index 55063ca..150d0b4 100644
      if (s->codec == CODEC_VP9) { OSStatus r = start_vp9(s, session, fmt); pthread_mutex_unlock(&s->lock); return r; }
      if (s->codec == CODEC_AV1) { OSStatus r = start_av1(s, session, fmt); pthread_mutex_unlock(&s->lock); return r; }
      if (s->codec == kCMVideoCodecType_HEVC) { OSStatus r = start_hevc(s, session, fmt); pthread_mutex_unlock(&s->lock); return r; }
-@@ -547,7 +570,8 @@ static void out_copy(DState *s, OutJob *j)
+@@ -469,8 +492,8 @@ static OSStatus set_output(DState *s, VTVideoDecoderSession session, CMVideoForm
+         CFRelease(attrs); attrs = m;
+     }
+     st = VTDecoderSessionSetPixelBufferAttributes(session, attrs);
+-    CFRelease(attrs); CFRelease(ios); CFRelease(npf); CFRelease(nw); CFRelease(nh);
+-    // Our own pool, made with the client's destination attributes verbatim (PR #1). A client that asks for an
++    CFRelease(ios); CFRelease(npf); CFRelease(nw); CFRelease(nh);
++    // Our own pool keeps the client's destination attributes and the negotiated backing. A client that asks for an
+     // OpenGL-compatible buffer (ffmpeg, mpv: kCVPixelBufferIOSurfaceOpenGLTextureCompatibilityKey) cannot have one on
+     // this system: CVPixelBufferIsCompatibleWithAttributes answers 0 for every buffer, even one made with those very
+     // attributes. VideoToolbox then transfers every decoded picture into a buffer of its own (14-32 ms per 4K frame
+@@ -486,7 +509,11 @@ static OSStatus set_output(DState *s, VTVideoDecoderSession session, CMVideoForm
+         if ((x = CFDictionaryGetValue(dst, kCVPixelBufferHeightKey)) && CFGetTypeID(x) == CFNumberGetTypeID()) CFNumberGetValue(x, kCFNumberIntType, &dh);
+         const bool fits = want == pf && dw == s->w && dh == s->h;
+         if (fits) {
+-            CFMutableDictionaryRef m = CFDictionaryCreateMutableCopy(NULL, 0, dst);   // the size made explicit (a pool needs one)
++            // Keep the negotiated IOSurface/Metal backing as well as the
++            // client's attributes. Chromium may specify only PixelFormatType;
++            // copying that dictionary alone produces a heap-backed buffer
++            // which its GPU frame converter cannot import.
++            CFMutableDictionaryRef m = CFDictionaryCreateMutableCopy(NULL, 0, attrs);
+             CFNumberRef w2 = CFNumberCreate(NULL, kCFNumberIntType, &s->w), h2 = CFNumberCreate(NULL, kCFNumberIntType, &s->h);
+             CFDictionarySetValue(m, kCVPixelBufferWidthKey, w2); CFDictionarySetValue(m, kCVPixelBufferHeightKey, h2);
+             CFRelease(w2); CFRelease(h2);
+@@ -498,6 +525,7 @@ static OSStatus set_output(DState *s, VTVideoDecoderSession session, CMVideoForm
+         DLOG("  our own pool: %s", s->ownPool ? "yes (the client's destination attributes)" : fits ? "no (CVPixelBufferPoolCreate failed)"
+                                     : "no (the client's format or size is not the picture's: the session's pool, VideoToolbox converts)");
+     }
++    CFRelease(attrs);
+     if (dst) CFRelease(dst);
+     CFMutableDictionaryRef col = CFDictionaryCreateMutable(NULL, 0, &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
+     // colour description and HDR metadata from the format description (the extension keys are the attachment keys), as
+@@ -547,7 +575,8 @@ static void out_copy(DState *s, OutJob *j)
      CVPixelBufferLockBaseAddress(pb, 0);
      uint8_t *y = CVPixelBufferGetBaseAddressOfPlane(pb, 0), *uv = CVPixelBufferGetBaseAddressOfPlane(pb, 1);
      const size_t ys = CVPixelBufferGetBytesPerRowOfPlane(pb, 0), uvs = CVPixelBufferGetBytesPerRowOfPlane(pb, 1);
@@ -230,7 +262,7 @@ index 55063ca..150d0b4 100644
      else if (s->codec == CODEC_AV1) av1dec_read_nv12(s->av1, j->surf, y, ys, uv, uvs, j->w, j->h);
      else if (s->codec == kCMVideoCodecType_HEVC) hevcdec_read_nv12(s->hevc, j->surf, y, ys, uv, uvs, j->w, j->h, j->cx, j->cy);
      else if (is_mpeg12(s->codec)) mpeg2dec_read_nv12(s->m2, j->surf, y, ys, uv, uvs, j->w, j->h);
-@@ -561,7 +585,8 @@ static void out_copy(DState *s, OutJob *j)
+@@ -561,7 +590,8 @@ static void out_copy(DState *s, OutJob *j)
  static void out_release(DState *s, const OutJob *j)   // lock held
  {
      if (j->rel < 0) return;
@@ -240,7 +272,7 @@ index 55063ca..150d0b4 100644
      else if (s->codec == CODEC_AV1) av1dec_release(s->av1, j->rel);
      else if (s->codec == kCMVideoCodecType_HEVC) hevcdec_release(s->hevc, j->rel);
      else if (is_mpeg12(s->codec)) mpeg2dec_release(s->m2, j->rel);
-@@ -624,7 +649,7 @@ static void out_deliver(DState *s, OutJob *j)
+@@ -624,7 +654,7 @@ static void out_deliver(DState *s, OutJob *j)
  static bool out_async_ok(DState *s)
  {
      if (s->codec == kCMVideoCodecType_HEVC) return s->hevc && s->hevc->max_dec_pic <= HEVC_SURFACES - 2;
@@ -249,7 +281,7 @@ index 55063ca..150d0b4 100644
      int refs = 0;
      for (int i = 0; i < 32; i++) if (s->dec.params.sps[i].max_num_ref_frames > refs) refs = s->dec.params.sps[i].max_num_ref_frames;
      return refs <= DEC_SURFACES - 3;
-@@ -774,6 +799,27 @@ static OSStatus decode_mpeg4(DState *s, VTVideoDecoderFrame frame, const uint8_t
+@@ -774,6 +804,27 @@ static OSStatus decode_mpeg4(DState *s, VTVideoDecoderFrame frame, const uint8_t
      return res;
  }
  
@@ -277,7 +309,7 @@ index 55063ca..150d0b4 100644
  static OSStatus d_decodeFrame(VTVideoDecoderRef o, VTVideoDecoderFrame frame, CMSampleBufferRef sb, VTDecodeFrameFlags flags, VTDecodeInfoFlags *info)
  {
      DState *s = dstate(o);
-@@ -792,8 +838,9 @@ static OSStatus d_decodeFrame(VTVideoDecoderRef o, VTVideoDecoderFrame frame, CM
+@@ -792,8 +843,9 @@ static OSStatus d_decodeFrame(VTVideoDecoderRef o, VTVideoDecoderFrame frame, CM
          if (s->tmpCap < len) { free(s->tmp); s->tmp = malloc(len); s->tmpCap = s->tmp ? len : 0; }
          if (!s->tmp || CMBlockBufferCopyDataBytes(bb, 0, len, s->tmp)) res = kVTVideoDecoderBadDataErr; else p = (char *)s->tmp;
      }
@@ -289,7 +321,7 @@ index 55063ca..150d0b4 100644
                            is_mpeg12(s->codec) ? decode_mpeg2(s, frame, (const uint8_t *)p, len) :
                            s->codec == kCMVideoCodecType_MPEG4Video ? decode_mpeg4(s, frame, (const uint8_t *)p, len) :
                            s->codec == kCMVideoCodecType_HEVC ? decode_hevc(s, frame, (const uint8_t *)p, len) : decode_vp9(s, frame, (const uint8_t *)p, len);
-@@ -897,7 +944,7 @@ __attribute__((visibility("default"))) OSStatus NVDecVT_CreateInstance(FourCharC
+@@ -897,7 +949,7 @@ __attribute__((visibility("default"))) OSStatus NVDecVT_CreateInstance(FourCharC
  {
      const FourCharCode entry = codec;   // 'hev1' / 'avc3' (parameter sets may also come in band) decode as HEVC / H.264
      if (codec == CODEC_HEV1) codec = kCMVideoCodecType_HEVC; else if (codec == CODEC_AVC3) codec = kCMVideoCodecType_H264;
@@ -298,7 +330,7 @@ index 55063ca..150d0b4 100644
      CMBaseObjectRef obj = NULL;
      OSStatus st = CMDerivedObjectCreate(al, &gDVT.base, VTVideoDecoderGetClassID(), &obj);
      if (st) return st;
-@@ -906,7 +953,7 @@ __attribute__((visibility("default"))) OSStatus NVDecVT_CreateInstance(FourCharC
+@@ -906,7 +958,7 @@ __attribute__((visibility("default"))) OSStatus NVDecVT_CreateInstance(FourCharC
      s->codec = codec;
      *(DState **)CMBaseObjectGetDerivedStorage(obj) = s;
      *out = obj;
@@ -307,7 +339,7 @@ index 55063ca..150d0b4 100644
           codec == kCMVideoCodecType_MPEG2Video ? "mp2v" : codec == kCMVideoCodecType_MPEG1Video ? "mp1v" :
           codec == kCMVideoCodecType_MPEG4Video ? "mp4v" : "avc1");
      return noErr;
-@@ -939,7 +986,9 @@ OSStatus NVDecVT_Register(int rating)
+@@ -939,7 +991,9 @@ OSStatus NVDecVT_Register(int rating)
      if (getenv("NVENCVT_NO_DEC")) return kVTCouldNotFindVideoDecoderErr;
      extern int gNvencvtGpu;   // vt/nvencvt.c: 1 Ada, 2 TU117 (GTX 1650: NVDEC 0xc4b0 has no AV1), 3 GA10x (RTX 30)
      const bool ampere = gNvencvtGpu == 3;
@@ -318,7 +350,7 @@ index 55063ca..150d0b4 100644
      typedef OSStatus (*RegFn)(FourCharCode, CFDictionaryRef, void *);
      RegFn reg = (RegFn)dlsym(RTLD_DEFAULT, "VTRegisterVideoDecoderWithInfo");
      if (!reg) { DLOG("VTRegisterVideoDecoderWithInfo not found"); return kVTCouldNotFindVideoDecoderErr; }
-@@ -966,6 +1015,7 @@ OSStatus NVDecVT_Register(int rating)
+@@ -966,6 +1020,7 @@ OSStatus NVDecVT_Register(int rating)
          CFDictionaryRef i9 = CFDictionaryCreate(NULL, k, v9, 4, &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
          OSStatus s9 = reg(CODEC_VP9, i9, (void *)NVDecVT_CreateInstance);
          CFRelease(i9);
@@ -326,7 +358,7 @@ index 55063ca..150d0b4 100644
          DLOG("registered %s -> %d (rating %d)", DECODER_ID_VP9, (int)s9, rating);
          // VideoToolbox offers VP9 decoders only to a process that opted in (public API, macOS 11+; WebKit and ffmpeg call
          // it themselves). Opting in for the process lets AVFoundation apps decode VP9 too; on Macs without Apple's own
-@@ -974,11 +1024,18 @@ OSStatus NVDecVT_Register(int rating)
+@@ -974,11 +1029,18 @@ OSStatus NVDecVT_Register(int rating)
          SuppFn supp = (SuppFn)dlsym(RTLD_DEFAULT, "VTRegisterSupplementalVideoDecoderIfAvailable");
          if (supp && !getenv("NVENCVT_NO_VP9SUPP")) { supp(CODEC_VP9); DLOG("opted in to VP9 decoding for this process"); }
      }

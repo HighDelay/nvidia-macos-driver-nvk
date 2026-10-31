@@ -30,6 +30,7 @@ static void output(void *context,void *source,OSStatus status,VTDecodeInfoFlags 
     const int64_t index=CMTimeConvertScale(pts,30,kCMTimeRoundingMethod_RoundTowardZero).value;
     if(index<0||(uint64_t)index>=r->expected||[r->seen containsIndex:(NSUInteger)index]){r->errors++;goto done;}
     [r->seen addIndex:(NSUInteger)index];
+    if(!CVPixelBufferGetIOSurface(image)){fprintf(stderr,"frame=%lld has no IOSurface backing\n",(long long)index);r->errors++;goto done;}
     if(CVPixelBufferGetWidth(image)!=r->w||CVPixelBufferGetHeight(image)!=r->h||CVPixelBufferGetPlaneCount(image)!=2){r->errors++;goto done;}
     const size_t bpp=r->depth>8?2:1,cw=(r->w+1)/2,ch=(r->h+1)/2,frameBytes=((size_t)r->w*r->h+2*cw*ch)*bpp;
     if(((size_t)index+1)*frameBytes>r->reference.length){r->errors++;goto done;}
@@ -54,7 +55,9 @@ done:pthread_mutex_unlock(&r->mutex);
 }
 
 int main(int argc,char **argv){@autoreleasepool{
-    require(argc==6||argc==3,"usage: vt-codec-probe LIBRARY|installed INPUT.ivf REFERENCE.yuv DEPTH sync|async|reject | LIBRARY|installed capabilities");
+    require(argc==6||argc==7||argc==3,"usage: vt-codec-probe LIBRARY|installed INPUT.ivf REFERENCE.yuv DEPTH sync|async|reject [--minimal-output] | LIBRARY|installed capabilities");
+    BOOL minimal=argc==7;
+    if(minimal)require(!strcmp(argv[6],"--minimal-output"),"minimal browser output contract");
     setvbuf(stdout,NULL,_IOLBF,0);
     BOOL installed=!strcmp(argv[1],"installed");
     if(installed)require(MTLCreateSystemDefaultDevice()!=nil,"initialize installed driver");
@@ -89,7 +92,7 @@ int main(int argc,char **argv){@autoreleasepool{
     CMVideoFormatDescriptionRef format=NULL;require(CMVideoFormatDescriptionCreate(NULL,codec,r.w,r.h,(__bridge CFDictionaryRef)extensions,&format)==noErr,"create compressed format");
     NSDictionary *spec=@{(id)kVTVideoDecoderSpecification_RequireHardwareAcceleratedVideoDecoder:@YES};
     OSType pixel=r.depth>8?kCVPixelFormatType_420YpCbCr10BiPlanarVideoRange:kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange;
-    NSDictionary *attrs=@{(id)kCVPixelBufferPixelFormatTypeKey:@(pixel),(id)kCVPixelBufferIOSurfacePropertiesKey:@{}};
+    NSDictionary *attrs=minimal?@{(id)kCVPixelBufferPixelFormatTypeKey:@(pixel)}:@{(id)kCVPixelBufferPixelFormatTypeKey:@(pixel),(id)kCVPixelBufferIOSurfacePropertiesKey:@{}};
     VTDecompressionOutputCallbackRecord callback={output,&r};VTDecompressionSessionRef session=NULL;
     status=VTDecompressionSessionCreate(NULL,format,(__bridge CFDictionaryRef)spec,(__bridge CFDictionaryRef)attrs,&callback,&session);
     printf("session=%d codec=%c%c%c%c size=%ux%u depth=%u\n",(int)status,codec>>24,(codec>>16)&255,(codec>>8)&255,codec&255,r.w,r.h,r.depth);
