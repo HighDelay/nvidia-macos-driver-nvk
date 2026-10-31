@@ -50,8 +50,10 @@ of a signed bundle update or reinstall the previous complete driver package.
 
 ## Build and package
 
+From the repository root, using sibling directories of your choice:
+
 ```sh
-python3 build/build_nvenc.py /Volumes/Games/nvenc-source /Volumes/Games/nvenc-runtime --fetch
+python3 build/build_nvenc.py ../nvenc-source ../nvenc-runtime --fetch
 ```
 
 The builder verifies the pinned source and dependency revisions, applies only
@@ -60,7 +62,7 @@ source identity, compiler, license notices and payload hashes in
 `NVENC-BUILD.json`. Existing unrelated source edits and output directories are
 rejected.
 
-Pass `--video-runtime /Volumes/Games/nvenc-runtime` to `build/stage_package.py`
+Pass `--video-runtime ../nvenc-runtime` to `build/stage_package.py`
 alongside the normal Minecraft, Wine and driver build inputs, then complete the
 normal Zink/combined package steps. Keep this runtime in future complete driver
 packages. No kernel or CGL changes are required for the codec library.
