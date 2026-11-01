@@ -58,7 +58,7 @@ Do not add `-nvaccelnoheadless`. That boot argument keeps a GPU with no connecte
 
 `kexts/NMIntelFB` adopts the mode the firmware already lit on an Intel panel macOS cannot drive, and publishes it as the framebuffer NVIDIA frames are copied into. It is source in this tree. `package/install.sh` does not install it, and it cannot be built on Windows: `kexts/NMIntelFB/build.sh` needs the macOS SDK.
 
-Until that kext is built and copied into `/Library/Extensions` on macOS, the panel stays on the firmware framebuffer (`IONDRVFramebuffer`). The headless path in `kexts/NVRM/accel/nvrm-accel.cpp` is what then exposes the RTX 3050 as a Metal device without arming a display pipe. Build `NMIntelFB` on a Mac before expecting the panel's own timing and brightness slider.
+Since upstream v2.6.5-nvk the installer ships `Optional/NMIntelFB.kext` as an opt-in (default **No**; see [INTEL-PANEL.md](../INTEL-PANEL.md)). To test it on this laptop, on a spare boot drive: `sudo ./install.sh --intel-panel=yes`, reboot, and check the panel, brightness and sleep/wake. Keep `IONDRVSupport` unblocked until it is confirmed loaded. If the panel misbehaves, boot once with `-nmintelfboff`, then `sudo ./install.sh --intel-panel=no`. Without the kext the panel stays on the firmware framebuffer (`IONDRVFramebuffer`) and the RTX 3050 runs headless via `kexts/NVRM/accel/nvrm-accel.cpp`.
 
 ## Games on 4 GB
 
