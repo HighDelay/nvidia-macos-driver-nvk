@@ -2,6 +2,7 @@
 
 ## 2.6.6
 
+- Fork follow-up: restore Photo Booth's preview for default-usage drawables with writable backing while retaining upstream's no-storage-view handling. The user confirmed a moving, upright preview with Zink enabled.
 - Fork integration retains native Zink/Minecraft/Wine, DXVK/vkd3d/DLSS, browser VP8/VP9, display/cursor repairs and the all-app ANGLE Metal default. See [merge notes](docs/FORK-MERGE-NOTES.md#upstream-266-integration).
 - Launchpad and Chrome icons are no longer black. 2.6.5 changed how textures made from an IOSurface with no stated use were set up, and shader writes to them went nowhere (PR #461, thanks Geek).
 - Logic Pro no longer crashes when it opens the Dolby Atmos mixer. A texture upload reached the GPU with no image behind it; the copy is now refused, and the log names the texture so the cause can be found.

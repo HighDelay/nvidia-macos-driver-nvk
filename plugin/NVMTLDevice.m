@@ -1165,9 +1165,10 @@ static BOOL nvmtl_surface_widen_usage(BOOL fbo) {
     return !fbo && !ws;
 }
 static NSUInteger nvmtl_surface_usage(NSUInteger usage, BOOL fbo, BOOL storage) {
-    // Unknown permits shader writes through an optimal-tiled storage twin too.
-    // Keep that contract when a linear surface cannot expose a storage view.
-    if (usage == MTLTextureUsageUnknown) return usage;
+    // Preserve Unknown when writes need an optimal-tiled storage twin. With
+    // real writable backing, eligible app drawables still need explicit bits:
+    // Core Image rejects Photo Booth's Unknown descriptor without ShaderWrite.
+    if (usage == MTLTextureUsageUnknown && !storage) return usage;
     if (nvmtl_surface_widen_usage(fbo)) {
         usage |= MTLTextureUsageShaderRead | MTLTextureUsageRenderTarget;
         if (storage) usage |= MTLTextureUsageShaderWrite;

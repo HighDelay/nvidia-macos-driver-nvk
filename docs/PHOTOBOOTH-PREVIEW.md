@@ -45,3 +45,24 @@ from loading a second installed driver; the probe requires exactly one image.
 This was a local userland update, not a new boot, Sequoia qualification or
 release. No release draft was requested. Camera images are not included in
 the source or validation artifacts.
+
+## Default-descriptor regression after 2.6.6
+
+The merged Unknown-usage early return left the fork's backing/view repair in
+place but bypassed its reported usage flags. Photo Booth can receive a default
+descriptor: `_usage` stayed zero and the public getter returned ShaderRead.
+Core Image rejected that drawable for lacking ShaderWrite and produced a nil
+render destination, even though a writable view existed.
+
+Preserve zero only when no real storage view exists, allowing upstream's
+optimal-tiled storage twin. Eligible app surfaces with actual writable backing
+still expose explicit read/write/render-target usage. WindowServer and FBO
+policy, fallback cleanup and preview orientation remain unchanged.
+
+The original Core Image probe used explicit ShaderRead and missed this case.
+It now checks 32 frames across default/explicit usage, RGBA/BGRA, shared/private
+backing and both orientations. The new case fails on the initial merged build
+and passes with the repair. Unknown RGBA16Unorm GPU writes and the host usage/
+lifetime regressions also pass. The user confirmed the normal Photo Booth
+preview is visible, moving and upright on Tahoe 26.7.1 after the plugin-only
+update, with Zink retained. No camera image was saved for these checks.

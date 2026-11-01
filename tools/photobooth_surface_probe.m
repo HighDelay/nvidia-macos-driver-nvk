@@ -32,17 +32,20 @@ int main(int argc, char **argv) { @autoreleasepool {
     CIContext *context=[CIContext contextWithMTLDevice:dev options:@{kCIContextWorkingColorSpace:[NSNull null]}];
     require(context != nil,"create Core Image context");
     unsigned cases=0;
+    for (unsigned unspecified=0;unspecified<2;unspecified++)
     for (unsigned bgra=0;bgra<2;bgra++) for (unsigned private=0;private<2;private++) { @autoreleasepool {
         const NSUInteger w=private ? 508 : 512,h=64,row=w*4;
         IOSurfaceRef surf=IOSurfaceCreate((__bridge CFDictionaryRef)@{(id)kIOSurfaceWidth:@(w),(id)kIOSurfaceHeight:@(h),(id)kIOSurfaceBytesPerRow:@(row),(id)kIOSurfaceBytesPerElement:@4,(id)kIOSurfacePixelFormat:@(bgra ? 0x42475241 : 0x52474241)});
         require(surf != NULL,"create synthetic surface");
         require(IOSurfaceGetBytesPerRow(surf)==row,"preserve selected pitch");
         MTLTextureDescriptor *desc=[MTLTextureDescriptor texture2DDescriptorWithPixelFormat:bgra ? MTLPixelFormatBGRA8Unorm : MTLPixelFormatRGBA8Unorm width:w height:h mipmapped:NO];
-        desc.usage=MTLTextureUsageShaderRead;desc.storageMode=MTLStorageModeShared;
+        // Photo Booth also receives default (Unknown) drawable descriptors.
+        // Core Image checks the public ShaderWrite bit even for that usage.
+        desc.usage=unspecified?MTLTextureUsageUnknown:MTLTextureUsageShaderRead;desc.storageMode=MTLStorageModeShared;
         id<MTLTexture> reader=[dev newTextureWithDescriptor:desc iosurface:surf plane:0];
         id<MTLTexture> writer=[dev newTextureWithDescriptor:desc iosurface:surf plane:0];
         require(reader && writer,"create repeated surface wrappers");
-        printf("%s %s usage=0x%lx vram=%d storage=%d\n",bgra?"BGRA":"RGBA",private?"private/cache":"shared",(unsigned long)writer.usage,flag(writer,"_vramOn"),flag(writer,"_stex"));
+        printf("%s %s %s usage=0x%lx vram=%d storage=%d\n",unspecified?"unknown":"read",bgra?"BGRA":"RGBA",private?"private/cache":"shared",(unsigned long)writer.usage,flag(writer,"_vramOn"),flag(writer,"_stex"));
         require(writer.usage & MTLTextureUsageShaderWrite,"read-only drawable descriptor must produce writable backing");
         require(flag(writer,"_stex"),"writable usage must have a real storage view");
         if (private) require(!flag(writer,"_vramOn"),"unaligned pitch must exercise private cache");

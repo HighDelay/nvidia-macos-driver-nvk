@@ -27,10 +27,13 @@ the rewritten history. The preceding 2.6.4 base was `f95f4d2`.
 
 Two textual conflicts cover the drawable usage helper and remote plugin builder.
 Keep the fork's real-storage-view request and fallback, Photo Booth orientation
-adapter and WindowServer policy. Add upstream's early return for
-`MTLTextureUsageUnknown`: zero usage permits shader writes and must stay zero,
-including when an optimal-tiled storage twin provides those writes. Explicit
-drawable usage still follows the existing fork storage-view checks.
+adapter and WindowServer policy. Preserve upstream's `MTLTextureUsageUnknown`
+when no storage view exists, so writes can use an optimal-tiled storage twin.
+When a non-framebuffer-only app surface has real writable backing, expose the
+explicit read/write/render-target usage even for an Unknown descriptor. Core
+Image checks the public ShaderWrite bit; an unconditional early return bypasses
+the fork's drawable repair and makes Photo Booth black. WindowServer and FBO
+usage remain unchanged, and ShaderWrite must never advertise a missing view.
 
 Take ordered initialization clears before managed uploads, missing-VkImage
 copy refusal and bounded diagnostics, empty-assembly parsing, same-local-field
@@ -69,6 +72,16 @@ Sequoia/laptop qualification; local user testing remains pending. Signatures,
 minimum OS, symlinks, runtime manifests and package checksums are verified before
 staging. Unchanged kernel/rendering runtimes retain their previous source records
 and exact hashes; upstream's deployment-target-only NVK replacement is not needed.
+
+The initial merge missed that default-descriptor interaction: its Core Image
+probe used explicit ShaderRead, while the Unknown-descriptor probe dispatched
+Metal directly and missed Core Image's stricter usage check. The follow-up
+reproduces both failures on the merged plugin and passes 32 Core Image
+pixel/orientation frames across Unknown/ShaderRead, RGBA/BGRA and shared/private
+backing. Keep that coverage alongside the no-storage/WindowServer/FBO host
+cases and Unknown RGBA16Unorm GPU writes. The user confirmed the normal Photo
+Booth preview is visible, moving and upright on Tahoe 26.7.1 after updating
+only the plugin; Zink, codecs, translator and kernel remain unchanged.
 
 ## Optional Intel laptop panel framebuffer
 
