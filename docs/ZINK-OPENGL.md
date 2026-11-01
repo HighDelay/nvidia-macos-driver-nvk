@@ -254,13 +254,20 @@ Arbitrary overlays of installed `/Library` contents are rejected.
 ```sh
 python3 build/package_zink.py --base /path/to/verified/pkgroot \
   --zink /path/to/zink-out --stage /path/to/new/pkgroot \
-  --archive /path/to/new/nvidia-macos-driver-2.6.4-zink-nvk.tar.gz --native-gld
+  --archive /path/to/new/nvidia-macos-driver-2.6.6-nvk.tar.gz \
+  --build-records /path/to/new/build-records --native-gld
 ```
 
 The archive has one top-level `pkgroot/`. It preserves existing runtimes and
 version metadata, adds Zink in its own subdirectory and selects `NVKZinkGLDriver`
 for both Sequoia and Tahoe accelerators. `--native-gld` is the default. `--explicit-cgl-only` is a developer option
 for attachment tests without system OpenGL selection.
+
+The package has a short `READ-ME.md`, one current `PACKAGE-IDENTITY.json` and
+setup guides in `Guides/`. Detailed build identities, validation reports and
+review notes go to `--build-records`, outside the archive. If omitted, that
+directory defaults to the stage path with `-build-records` appended. Runtime
+manifests, licenses and signed resources retain their required locations.
 
 Read the packaged [local installation guide](COMBINED-INSTALL.md) first. Run
 `Verify.command` with the kernel driver already active, then install using

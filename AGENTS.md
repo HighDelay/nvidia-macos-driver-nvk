@@ -54,6 +54,21 @@ the repositories and artifacts that need changing.
 
 ### Driver release format
 
+Standing user instruction, updated 2026-11-01: keep the installable package
+focused on installation and runtime files. The top level contains one short
+`READ-ME.md`, one current `PACKAGE-IDENTITY.json`, the installer/verification
+tools, `VERSION`, checksums and payload directories. Group useful setup guides
+under `Guides/`; keep optional-component instructions with that component.
+Do not accumulate duplicate identities, `BASE-*` histories, repair/validation
+reports, review notes or temporary test instructions in `pkgroot`. Preserve
+those records beside the build output, outside the installable archive.
+Keep licenses, signed resources and component manifests/build records at the
+paths their runtime/setup/build verifiers expect. Avoid duplicate guides unless
+a component contract requires its copy. Enforce this layout in the package
+builder, regenerate checksums after cleanup, and verify that repackaging leaves
+driver/runtime binaries unchanged. A packaging-only change reuses verified
+binaries and does not require recompiling or repeating kernel link tests.
+
 Standing user instruction, updated 2026-10-31: future driver releases use tags
 `v<version>-nvk` and archives `nvidia-macos-driver-<version>-nvk.tar.gz`.
 Keep optional NMIntelFB support in the normal complete driver package under

@@ -37,6 +37,7 @@ the optional kext separately:
 bash build/build_intel_panel.sh out/intel-panel
 ```
 
-`Optional/INTEL-PANEL-BUILD.json` records source and payload hashes. This feature
+`Optional/INTEL-PANEL-BUILD.json` in the external build-record directory records
+source and payload hashes; it is not part of the installable package. This feature
 does not rely on a MacBook SMBIOS name: Hackintosh model names do not reliably
 identify panel wiring.

@@ -14,6 +14,7 @@ import tempfile
 import stage_package as base_tools
 from record_zink_runtime import COMPONENTS
 from prepare_zink import MESA_COMMIT
+from package_layout import organize
 
 ROOT = Path(__file__).resolve().parents[1]
 BASE_RUNTIME = Path('Library/GPUBundles/nvmtl')
@@ -52,7 +53,7 @@ def copy_file(source, destination):
     destination.chmod(source.stat().st_mode & 0o777)
 
 
-def stage(base, zink, output, components=None, native_gld=False):
+def stage(base, zink, output, components=None, native_gld=False, records=None):
     if components is not None:
         raise ValueError("Stage matched driver components with build/stage_package.py first; arbitrary Library overlays are unsupported")
     base = base.resolve(strict=True)
@@ -60,6 +61,9 @@ def stage(base, zink, output, components=None, native_gld=False):
     output = output.absolute()
     if output.exists() or output.is_symlink() or base_tools.inside(output.resolve(), base):
         raise ValueError('Output must be new and outside the base package')
+    records = Path(records).absolute() if records is not None else output.with_name(output.name + '-build-records')
+    if records.exists() or records.is_symlink() or base_tools.inside(records.resolve(), output.resolve()) or base_tools.inside(records.resolve(), base):
+        raise ValueError('Build records must be new and outside the input/output package')
     base_tools.verify_manifest(base)
     base_tools.validate_links(base)
     for name in ('install.sh', 'uninstall.sh', 'nullmoth-runtime-check.sh', 'nullmoth-runtime-check', 'VERSION'):
@@ -233,9 +237,12 @@ def stage(base, zink, output, components=None, native_gld=False):
             'PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY '
             'CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, '
             'OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.\n')
-        identity = {'base': str(base), 'base_manifest_sha256': base_tools.digest(base / 'SHA256SUMS'),
+        version = (payload / 'VERSION').read_text().strip()
+        identity = {'schema_version': 1, 'repository': 'https://github.com/HighDelay/nvidia-macos-driver-nvk',
+                    'package_version': version, 'release_tag': 'v' + version + '-nvk', 'runtime_minimum_macos': '15.5',
+                    'base': str(base), 'base_manifest_sha256': base_tools.digest(base / 'SHA256SUMS'),
                     'source_commit': run('git', '-C', ROOT, 'rev-parse', 'HEAD').strip(),
-                    'source_dirty': bool(run('git', '-C', ROOT, 'status', '--porcelain').strip()),
+                    'source_dirty': bool(run('git', '-C', ROOT, 'status', '--porcelain', '--untracked-files=no').strip()),
                     'component_replacements': replacements, 'firmware': sorted(firmware_paths),
                     'optional_intel_panel': panel_identity,
                     'zink_sha256': base_tools.digest(runtime / 'libnvk_zink.dylib'),
@@ -250,19 +257,19 @@ def stage(base, zink, output, components=None, native_gld=False):
                     'private_vulkan_build': provenance,
                     'component_builds': components_record,
                     'native_cgl_os_build': (runtime / 'cgl-os-build.txt').read_text().strip()}
-        (payload / 'PACKAGE-IDENTITY.json').write_text(json.dumps(identity, indent=2) + '\n')
-        shutil.copy2(ROOT / 'docs/COMBINED-INSTALL.md', payload / 'READ-ME.md')
-        shutil.copy2(ROOT / 'docs/CAPTURE-PR3-REVIEW.md', payload / 'CAPTURE-REVIEW.md')
+        # Keep detailed source/validation records outside the installable tree.
+        organized = Path(temp) / 'build-records'
+        organize(payload, organized, identity)
         for major in ('15', '26'):
             plist = plistlib.loads((payload / 'Library/NullMoth/kexts' / major / 'NVAccel.kext/Contents/Info.plist').read_bytes())
             if plist.get('IOKitPersonalities', {}).get('NVAccel', {}).get('IOGLBundleName') == 'NVKZinkGLDriver' and not native_gld:
                 raise ValueError('The incomplete diagnostic GLD must not be activated')
             base_tools.write_manifest(payload / 'Library/NullMoth/kexts' / major)
-        names = sorted(p.relative_to(payload).as_posix() for p in payload.rglob('*') if p.is_file() or p.is_symlink())
-        (payload / 'MANIFEST.txt').write_text('\n'.join(n for n in names if n != 'SHA256SUMS') + '\n')
         base_tools.validate_links(payload)
         base_tools.write_manifest(payload)
         run('/bin/bash', payload / 'nullmoth-runtime-check.sh', payload, run('sw_vers', '-productVersion').strip())
+        records.parent.mkdir(parents=True, exist_ok=True)
+        os.rename(organized, records)
         os.rename(payload, output)
     return output
 
@@ -281,11 +288,12 @@ def main():
     ap.add_argument('--components', type=Path, help='Deprecated; use build/stage_package.py to prepare matched components first')
     ap.add_argument('--stage', required=True, type=Path)
     ap.add_argument('--archive', required=True, type=Path)
+    ap.add_argument('--build-records', type=Path, help='New external build-record directory (default: <stage>-build-records)')
     ap.add_argument('--native-gld', action='store_true', default=True, help='Select native Zink OpenGL for applications (default; Intel Sequoia/Tahoe accelerators)')
     ap.add_argument('--explicit-cgl-only', action='store_false', dest='native_gld', help='Developer-only package: do not select a system GLD')
     args = ap.parse_args()
     if args.archive.exists(): raise SystemExit('Archive already exists')
-    payload = stage(args.base, args.zink, args.stage, args.components, args.native_gld)
+    payload = stage(args.base, args.zink, args.stage, args.components, args.native_gld, args.build_records)
     args.archive.parent.mkdir(parents=True, exist_ok=True)
     temporary = args.archive.with_name('.' + args.archive.name + '.tmp')
     try:
