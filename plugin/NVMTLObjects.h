@@ -107,7 +107,8 @@ extern id gNVMTLMainDevice;
   NSData *_raw; id _appleTwin; BOOL _twinTried; NSString *_rawPath; } @end
 @interface NVMTLRenderPipelineState : NSObject <MTLRenderPipelineState> { @public nvk_pipeline _p;
   NSString *_vname, *_fname, *_blend, *_vdesc; MTLRenderPipelineDescriptor *_descriptor; NSMutableDictionary *_samplerVariants;
-  NVMTLFunction *_linkedVert, *_linkedFrag; uint32_t _a8mask; } @end
+  NVMTLFunction *_linkedVert, *_linkedFrag; uint32_t _a8mask;
+  NVMTLFunction *_descVert, *_descFrag; /* _descriptor's functions, read once instead of two property sends per draw */ } @end
 @interface NVMTLCommandQueue : NSObject <MTLCommandQueue> {
   @public nvk_queue _q; id _dev; id _completionQueue; dispatch_queue_t _callbackOrderQueue; NSMutableArray *_reservations; dispatch_semaphore_t _capacity; NSUInteger _capacityCount;
 } @end
@@ -201,6 +202,8 @@ uint32_t nvmtl_geoms_from_descriptor(id desc, nvmtl_geom *out, uint32_t max, int
   NSMutableDictionary *_vertexSamplers, *_fragmentSamplers;
   NSData *_pixelSamplerKey; // sampler specialization depends on values, not the draw or pipeline
   NSMutableArray *_pixelSamplerKeys; // at most eight recent value snapshots, owned by this encoder
+  // the sampler last set at each index through the plain setter; the command buffer's resources keep it alive
+  __unsafe_unretained NVMTLSamplerState *_vsampAt[16], *_fsampAt[16];
   // the buffer and offset bound at each vertex/fragment index, read by embedded argument binding; plain arrays because
   // Apple's GL rebinds buffers for every draw, and a dictionary of (buffer, offset) arrays allocated on each one
   NVMTLBuffer *_vbufAt[NVMTL_NBUFAT], *_fbufAt[NVMTL_NBUFAT]; NSUInteger _vbufOff[NVMTL_NBUFAT], _fbufOff[NVMTL_NBUFAT];
@@ -288,7 +291,8 @@ NSUInteger nvmtl_air_max_tg(NVMTLFunction *fn);
 @interface NVMTLRenderCommandEncoder () { @public NSString *_label; } @end
 @interface NVMTLRenderCommandEncoder () { @public uint32_t _vstride[NVMTL_NVIN]; uint32_t _vstrideSet; } @end
 @interface NVMTLComputeCommandEncoder () { @public NSString *_label; } @end
-@interface NVMTLBlitCommandEncoder () { @public NSString *_label; } @end
+// _tailFull: the last command this encoder recorded was a transfer helper's trailing full barrier (nvmtl_vk_cmd_xfer_tail)
+@interface NVMTLBlitCommandEncoder () { @public NSString *_label; BOOL _tailFull; } @end
 @interface NVMTLAccelerationStructureCommandEncoder () { @public NSString *_label; } @end
 @interface NVMTLHeap () { @public MTLHazardTrackingMode _hazard; } @end
 @interface NVMTLIndirectCommandBuffer () { @public MTLResourceOptions _opts; } @end

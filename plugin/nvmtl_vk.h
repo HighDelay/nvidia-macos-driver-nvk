@@ -100,6 +100,13 @@ typedef struct { void *cb; void *fb; void *pool; void *dset[2]; void *depth_view
                  VkViewport dyn_viewport;
                  VkRect2D dyn_scissor;
                  float dyn_blend[4];
+                 /* Last vertex/index buffer bindings (Vulkan keeps them across pipeline binds). A recorded stride is only
+                    trusted while the same pipeline stays bound: a pipeline with static strides overwrites the dynamic ones. */
+                 void *dyn_vb[32]; uint64_t dyn_vb_off[32], dyn_vb_stride[32];
+                 uint32_t dyn_vb_valid, dyn_vb_stride_valid;
+                 void *dyn_ib; uint64_t dyn_ib_off; uint32_t dyn_ib_type;
+                 uint32_t skip_lead;   /* the next transfer helper may skip its leading full barrier (blit encoder) */
+                 uint32_t xfer_tail;   /* that helper ended with its full barrier, still the last recorded command */
                  /* Separate compute state, including internal dispatches. Zeroed at every recording begin. */
                  void *compute_pipeline, *compute_layout, *compute_sets[3];
                  uint32_t compute_set_count, compute_offset_count, compute_offsets[2];
@@ -386,6 +393,13 @@ int nvmtl_vk_cmd_copy_image_to_buffer_layer(nvk_cmdbuf *c, nvk_image *img, uint3
                                   nvk_buffer *b, size_t off, uint32_t row_bytes, uint32_t layer);
 
 int nvmtl_vk_cmd_image_gen_mipmaps(nvk_cmdbuf *c, nvk_image *img);
+int nvmtl_vk_cmd_copy_buffer_to_image_3d(nvk_cmdbuf *c, nvk_buffer *b, size_t off, uint32_t row_bytes, size_t image_bytes,
+                                  nvk_image *img, uint32_t x, uint32_t y, uint32_t w, uint32_t h, uint32_t depth, uint32_t level, uint32_t layer);
+int nvmtl_vk_cmd_copy_image_to_buffer_3d(nvk_cmdbuf *c, nvk_image *img, uint32_t x, uint32_t y, uint32_t w, uint32_t h, uint32_t depth,
+                                  nvk_buffer *b, size_t off, uint32_t row_bytes, size_t image_bytes, uint32_t level, uint32_t layer);
+void nvmtl_vk_cmd_skip_lead(nvk_cmdbuf *c, int on);
+int nvmtl_vk_cmd_xfer_tail(nvk_cmdbuf *c);
+uint64_t nvmtl_vk_lead_skipped(void);
 
 int nvmtl_vk_surface_share_on(void);
 int nvmtl_vk_surface_vram(uint32_t surfaceID, uint32_t plane, size_t need, nvk_buffer *out);

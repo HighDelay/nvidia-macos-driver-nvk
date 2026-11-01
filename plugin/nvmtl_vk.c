@@ -127,6 +127,8 @@ static void *g_lib;
 static int g_sample_loader_unwrapped;
 static VkInstance g_inst; static VkPhysicalDevice g_pdev; static VkDevice g_dev; static VkQueue g_queue;
 static int g_host_query_reset, g_occlusion_precise;
+static uint64_t g_lead_skipped;   /* blit leading barriers skipped after an identical trailing one (diagnostics) */
+uint64_t nvmtl_vk_lead_skipped(void) { return __atomic_load_n(&g_lead_skipped, __ATOMIC_RELAXED); }
 static int g_atomic64_buffer, g_atomic64_shared;
 static int g_coop_matrix, g_float16, g_vulkan_memory_model, g_vulkan_memory_device_scope, g_storage16, g_uniform_storage16;
 static int g_bindless;
@@ -3378,8 +3380,14 @@ int nvmtl_vk_bind_buffer(nvk_cmdbuf *c, uint32_t set, uint32_t index, nvk_buffer
 {
     if (index >= NVMTL_NBUF) { nvlog("bind buffer: index %u is outside [0,%d)", index, NVMTL_NBUF); return -1; }
     if (!b || !b->buf || offset >= b->size) { nvlog("bind buffer: offset %zu outside length %zu", offset, b ? b->size : 0); return -1; }
+    // A rebind of the slot's buffer (the setBytes ring at a new offset, GL's per-draw rebinds) keeps its device address:
+    // the buffer is retained by this recording, so its handle names the same memory until the table is freed.
+    uint64_t known = 0;
+    if (c->table && set <= 1) { const nvmtl_slot *was = &((nvmtl_bindtable *)c->table)->s[set][index];
+        if (was->kind == NVMTL_SLOT_BUF && was->h == b->buf && was->size == b->size) known = was->address; }
     int r = nvmtl_bind_slot(c, set, index, NVMTL_SLOT_BUF, b->buf, offset);
-    if (!r) { nvmtl_bindtable *t = (nvmtl_bindtable *)c->table; nvmtl_slot *sl = &t->s[set][index]; uint64_t a = nvmtl_vk_buffer_address(b);
+    if (!r) { nvmtl_bindtable *t = (nvmtl_bindtable *)c->table; nvmtl_slot *sl = &t->s[set][index];
+              uint64_t a = known ? known : nvmtl_vk_buffer_address(b);
               if (sl->size != b->size || sl->address != a) t->dirty[set] = 1;
               sl->size = b->size; sl->address = a; }
     return r;
@@ -5200,6 +5208,9 @@ static unsigned nvmtl_tspool_cap(void) {
         nvlog("vk: timing query pools recycled (keep <= %d, NVMTL_TSPOOL_KEEP=%s) - one mapped allocation per pool, not per command buffer", cap, e ? e : "unset"); }
     return (unsigned)cap;
 }
+// hostQueryReset: a pool is reset on the CPU when created and when recycled, instead of a vkCmdResetQueryPool recorded
+// into every command buffer (a GPU-side reset NVK executes before the first timestamp).
+static int nvmtl_tspool_host_reset(void) { return g_host_query_reset && pvkResetQueryPool; }
 static VkQueryPool nvmtl_tspool_pop(void) {
     VkQueryPool q = VK_NULL_HANDLE;
     if (!nvmtl_tspool_cap()) return q;
@@ -5208,6 +5219,9 @@ static VkQueryPool nvmtl_tspool_pop(void) {
 }
 static void nvmtl_tspool_push(VkQueryPool q) {
     int kept = 0;
+    // Retirement follows completion (or a recording that never reached the GPU), so no command still uses the queries.
+    // Reset before the pool is visible to another recording's pop.
+    if (nvmtl_tspool_host_reset() && nvmtl_tspool_cap()) pvkResetQueryPool(g_dev, q, 0, 2);
     pthread_mutex_lock(&g_tspool_lock);
     if (g_ntspool < nvmtl_tspool_cap()) { g_tspool[g_ntspool++] = q; kept = 1; }
     pthread_mutex_unlock(&g_tspool_lock);
@@ -5249,9 +5263,13 @@ int nvmtl_vk_cmd_begin(nvk_queue *q, nvk_cmdbuf *out)
     if (pvkGetCalibratedTimestampsEXT && g_timestamp_bits) {
         VkQueryPoolCreateInfo qi = { VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO, NULL, 0, VK_QUERY_TYPE_TIMESTAMP, 2, 0 };
         VkQueryPool timing = nvmtl_tspool_pop();
-        if (timing != VK_NULL_HANDLE || pvkCreateQueryPool(g_dev, &qi, NULL, &timing) == VK_SUCCESS) {
+        int fresh = 0;
+        if (timing == VK_NULL_HANDLE && pvkCreateQueryPool(g_dev, &qi, NULL, &timing) == VK_SUCCESS) fresh = 1;
+        if (timing != VK_NULL_HANDLE) {
             out->timing_pool = timing;
-            pvkCmdResetQueryPool(out->cb, timing, 0, 2);
+            // a recycled pool was reset on the host when it went back to the free list
+            if (!nvmtl_tspool_host_reset()) pvkCmdResetQueryPool(out->cb, timing, 0, 2);
+            else if (fresh) pvkResetQueryPool(g_dev, timing, 0, 2);
             pvkCmdWriteTimestamp(out->cb, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, timing, 0);
         }
     }
@@ -5995,6 +6013,7 @@ void nvmtl_vk_cmd_bind_pipeline(nvk_cmdbuf *c, nvk_pipeline *p) {
     if (p->pipe && c->graphics_pipeline == p->pipe) return;
     pvkCmdBindPipeline(c->cb, VK_PIPELINE_BIND_POINT_GRAPHICS, (VkPipeline)p->pipe);
     c->graphics_pipeline = p->pipe;
+    c->dyn_vb_stride_valid = 0;   /* static-stride pipelines replace the dynamic strides; buffers and offsets stay */
 }
 int nvmtl_vk_cmd_set_topology(nvk_cmdbuf *c, unsigned mtlType) {
     static const VkPrimitiveTopology map[5] = { VK_PRIMITIVE_TOPOLOGY_POINT_LIST, VK_PRIMITIVE_TOPOLOGY_LINE_LIST,
@@ -6021,7 +6040,14 @@ int nvmtl_vk_cmd_vertex_inputs(nvk_cmdbuf *c, const nvk_pipeline *p, const uint3
         if (!sl || sl->kind != NVMTL_SLOT_BUF || !sl->h) { static int said; if (said++ < 8) nvlog("G16 draw: the pipeline fetches vertex "
             "attributes from buffer index %u and nothing is bound there — NOT drawn", i); return -1; }
         VkBuffer b = (VkBuffer)sl->h; VkDeviceSize off = sl->off;
-        if (!p->vin_dyn) { pvkCmdBindVertexBuffers(c->cb, i, 1, &b, &off); continue; }
+        const uint32_t bit = 1u << i;
+        const int same = (c->dyn_vb_valid & bit) && c->dyn_vb[i] == (void *)b && c->dyn_vb_off[i] == off;
+        if (!p->vin_dyn) {
+            if (same) continue;
+            pvkCmdBindVertexBuffers(c->cb, i, 1, &b, &off);
+            c->dyn_vb[i] = (void *)b; c->dyn_vb_off[i] = off; c->dyn_vb_valid |= bit; c->dyn_vb_stride_valid &= ~bit;
+            continue;
+        }
         VkDeviceSize st = p->vin_stride[i];
         if (p->vin_dyn & (1u << i)) {
             if (!vstride || !(vset & (1u << i))) { static int said; if (said++ < 8) nvlog("apps-dyn draw: buffer index %u has a dynamic stride "
@@ -6030,7 +6056,10 @@ int nvmtl_vk_cmd_vertex_inputs(nvk_cmdbuf *c, const nvk_pipeline *p, const uint3
             if (st > g_lim.maxVertexInputBindingStride) { static int said; if (said++ < 8) nvlog("apps-dyn draw: attributeStride %llu at "
                 "buffer index %u is past maxVertexInputBindingStride %u — NOT drawn", (unsigned long long)st, i, g_lim.maxVertexInputBindingStride); return -1; }
         }
+        if (same && (c->dyn_vb_stride_valid & bit) && c->dyn_vb_stride[i] == st) continue;
         pvkCmdBindVertexBuffers2(c->cb, i, 1, &b, &off, NULL, &st);
+        c->dyn_vb[i] = (void *)b; c->dyn_vb_off[i] = off; c->dyn_vb_stride[i] = st;
+        c->dyn_vb_valid |= bit; c->dyn_vb_stride_valid |= bit;
     }
     return 0;
 }
@@ -6054,11 +6083,19 @@ static int nvmtl_index_range_ok(const nvk_buffer *idx, size_t offset)
                                         (unsigned long long)(idx ? idx->size : 0));
     return 0;
 }
+// The index binding is command-buffer state, kept across pipelines and render passes; Metal passes it with every draw.
+static void nvmtl_bind_index(nvk_cmdbuf *c, const nvk_buffer *idx, size_t offset, int is32)
+{
+    const uint32_t type = is32 ? VK_INDEX_TYPE_UINT32 : VK_INDEX_TYPE_UINT16;
+    if (c->dyn_ib == idx->buf && c->dyn_ib_off == offset && c->dyn_ib_type == type) return;
+    pvkCmdBindIndexBuffer(c->cb, (VkBuffer)idx->buf, offset, (VkIndexType)type);
+    c->dyn_ib = idx->buf; c->dyn_ib_off = offset; c->dyn_ib_type = type;
+}
 void nvmtl_vk_cmd_draw_indexed(nvk_cmdbuf *c, nvk_buffer *idx, size_t offset, uint32_t count, int is32,
                                uint32_t instances, int32_t baseVertex, uint32_t baseInstance)
 {
     if (!nvmtl_index_range_ok(idx, offset)) return;
-    pvkCmdBindIndexBuffer(c->cb, (VkBuffer)idx->buf, offset, is32 ? VK_INDEX_TYPE_UINT32 : VK_INDEX_TYPE_UINT16);
+    nvmtl_bind_index(c, idx, offset, is32);
     if (c->nobind) return;
     const uint32_t n = instances ? instances : 1;
     if (nvmtl_fetch_split(c, count, n)) {
@@ -7235,7 +7272,7 @@ int nvmtl_vk_cmd_draw_patches(nvk_cmdbuf *c, const nvk_pipeline *p, uint64_t fac
 void nvmtl_vk_cmd_draw_indexed_indirect(nvk_cmdbuf *c, nvk_buffer *idx, size_t idxOff, int is32, nvk_buffer *b, size_t off)
 {
     if (!nvmtl_index_range_ok(idx, idxOff)) return;
-    pvkCmdBindIndexBuffer(c->cb, (VkBuffer)idx->buf, idxOff, is32 ? VK_INDEX_TYPE_UINT32 : VK_INDEX_TYPE_UINT16);
+    nvmtl_bind_index(c, idx, idxOff, is32);
     if (c->nobind) return;
     NVMTL_SEMU_DRAW(c, pvkCmdDrawIndexedIndirect(c->cb, (VkBuffer)b->buf, off, 1, 0));
 }
@@ -7905,14 +7942,21 @@ uint64_t nvmtl_vk_buffer_address(nvk_buffer *b)
     return pvkGetBufferDeviceAddress(g_dev, &i);
 }
 
+// A blit encoder whose previous command ended with the full ALL_COMMANDS barrier asks the next transfer helper to skip
+// its identical leading one (nvmtl_vk_cmd_skip_lead); the flag is cleared whether or not the helper records anything.
+// The helper reports, through nvmtl_vk_cmd_xfer_tail, whether its own trailing full barrier is now the last command.
+void nvmtl_vk_cmd_skip_lead(nvk_cmdbuf *c, int on) { c->skip_lead = on ? 1u : 0u; c->xfer_tail = 0; }
+int nvmtl_vk_cmd_xfer_tail(nvk_cmdbuf *c) { const int t = (int)c->xfer_tail; c->skip_lead = 0; c->xfer_tail = 0; return t; }
+static void nvmtl_xfer_lead(nvk_cmdbuf *c) { if (c->skip_lead) { c->skip_lead = 0; __atomic_fetch_add(&g_lead_skipped, 1, __ATOMIC_RELAXED); } else nvmtl_vk_cmd_barrier(c); }
+static void nvmtl_xfer_end(nvk_cmdbuf *c) { nvmtl_vk_cmd_barrier(c); c->xfer_tail = 1; }
 int nvmtl_vk_cmd_fill_buffer(nvk_cmdbuf *c, nvk_buffer *b, size_t offset, size_t size, uint8_t value)
 {
     if (!size) return 0;
     if ((offset | size) & 3 || offset > b->size || size > b->size - offset) return -1;
-    nvmtl_vk_cmd_barrier(c);
+    nvmtl_xfer_lead(c);
     uint32_t word = value; word |= word << 8; word |= word << 16;
     pvkCmdFillBuffer(c->cb, (VkBuffer)b->buf, offset, size, word);
-    nvmtl_vk_cmd_barrier(c);
+    nvmtl_xfer_end(c);
     return 0;
 }
 
@@ -7929,10 +7973,10 @@ int nvmtl_vk_cmd_copy_buffer(nvk_cmdbuf *c, nvk_buffer *src, size_t srcOff, nvk_
 {
     if (!size) return 0;
     if (srcOff > src->size || size > src->size-srcOff || dstOff > dst->size || size > dst->size-dstOff) return -1;
-    nvmtl_vk_cmd_barrier(c);
+    nvmtl_xfer_lead(c);
     VkBufferCopy bc = { srcOff, dstOff, size };
     pvkCmdCopyBuffer(c->cb, (VkBuffer)src->buf, (VkBuffer)dst->buf, 1, &bc);
-    nvmtl_vk_cmd_barrier(c);
+    nvmtl_xfer_end(c);
     return 0;
 }
 
@@ -7948,6 +7992,10 @@ int nvmtl_vk_cmd_copy_buffer_to_image_layer(nvk_cmdbuf *c, nvk_buffer *b, size_t
 { return nvmtl_vk_cmd_copy_buffer_to_image_level_layer(c, b, off, row_bytes, img, x, y, w, h, 0, layer); }
 int nvmtl_vk_cmd_copy_buffer_to_image_level_layer(nvk_cmdbuf *c, nvk_buffer *b, size_t off, uint32_t row_bytes,
                                   nvk_image *img, uint32_t x, uint32_t y, uint32_t w, uint32_t h, uint32_t level, uint32_t layer)
+{ return nvmtl_vk_cmd_copy_buffer_to_image_3d(c, b, off, row_bytes, 0, img, x, y, w, h, 1, level, layer); }
+// depth > 1 (3D images only): one region over planes layer..layer+depth-1, each image_bytes apart (0 = rows * row_bytes)
+int nvmtl_vk_cmd_copy_buffer_to_image_3d(nvk_cmdbuf *c, nvk_buffer *b, size_t off, uint32_t row_bytes, size_t image_bytes,
+                                  nvk_image *img, uint32_t x, uint32_t y, uint32_t w, uint32_t h, uint32_t depth, uint32_t level, uint32_t layer)
 {
     if (level >= (img->mips ? img->mips : 1)) { nvlog("copy_buffer_to_image: level %u — this image has %u", level, img->mips ? img->mips : 1); return -1; }
     const uint32_t lw = nvmtl_lvl(img->w, level), lh = nvmtl_lvl(img->h, level);
@@ -7957,18 +8005,31 @@ int nvmtl_vk_cmd_copy_buffer_to_image_level_layer(nvk_cmdbuf *c, nvk_buffer *b, 
     const uint64_t tight = (uint64_t)cols * bpp;
     if (!row_bytes) { if (tight > UINT32_MAX) return -1; row_bytes = (uint32_t)tight; }
     if (bw > 1 && ((x % bw) || (y % bh))) { nvlog("copy: origin (%u,%u) is not block-aligned", x, y); return -1; }
+    if (!w || !h || row_bytes < tight || row_bytes % bpp || off > b->size) return -1;
+    if (!depth) depth = 1;
+    const int vol = img->mtl_type == 7;
+    const uint32_t layers = vol ? nvmtl_lvl(img->layers ? img->layers : 1, level) : (img->layers ? img->layers : 1);
+    if (layer >= layers || (vol && depth > layers - layer)) return -1;
+    if (!image_bytes) image_bytes = (size_t)rows * row_bytes;
+    if (depth > 1 && (!vol || layer > nvmtl_lvl(img->layers ? img->layers : 1, level)
+                      || depth > nvmtl_lvl(img->layers ? img->layers : 1, level) - layer
+                      || image_bytes % row_bytes || image_bytes / row_bytes < rows || image_bytes / row_bytes * bh > UINT32_MAX)) return -1;
+    const uint64_t plane_span = (uint64_t)(rows - 1) * row_bytes + tight;
+    if (depth > 1 && image_bytes > (UINT64_MAX - plane_span) / (depth - 1)) return -1;
+    const uint64_t span = (uint64_t)(depth - 1) * image_bytes + plane_span;
     if (layer >= (img->layers ? img->layers : 1) || !w || !h || x > lw || w > lw-x || y > lh || h > lh-y
-        || row_bytes < tight || row_bytes % bpp || off > b->size || (uint64_t)(rows-1)*row_bytes+tight > b->size-off) return -1;
+        || row_bytes < tight || row_bytes % bpp || off > b->size || span > b->size-off) return -1;
     if (!w || !h || x + w > lw || y + h > lh) { nvlog("copy_buffer_to_image: out of bounds (level %u is %ux%u)", level, lw, lh); return -1; }
-    nvmtl_vk_cmd_barrier(c);
+    nvmtl_xfer_lead(c);
     img_to(c, img, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_ACCESS_MEMORY_WRITE_BIT | VK_ACCESS_MEMORY_READ_BIT, VK_ACCESS_TRANSFER_WRITE_BIT,
            VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT);
-    VkBufferImageCopy bic = { off, row_bytes / bpp * bw, 0, { nvmtl_copy_aspect(img), level, img->mtl_type == 7 ? 0u : layer, 1 },
-                              { (int32_t)x, (int32_t)y, img->mtl_type == 7 ? (int32_t)layer : 0 }, { w, h, 1 } };
+    VkBufferImageCopy bic = { off, row_bytes / bpp * bw, depth > 1 ? (uint32_t)(image_bytes / row_bytes * bh) : 0u,
+                              { nvmtl_copy_aspect(img), level, vol ? 0u : layer, 1 },
+                              { (int32_t)x, (int32_t)y, vol ? (int32_t)layer : 0 }, { w, h, depth } };
     pvkCmdCopyBufferToImage(c->cb, (VkBuffer)b->buf, (VkImage)img->img, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &bic);
     img_to(c, img, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT,
            VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT);
-    nvmtl_vk_cmd_barrier(c);
+    nvmtl_xfer_end(c);
     return 0;
 }
 
@@ -7977,6 +8038,9 @@ int nvmtl_vk_cmd_copy_image_to_buffer_layer(nvk_cmdbuf *c, nvk_image *img, uint3
 { return nvmtl_vk_cmd_copy_image_to_buffer_level_layer(c, img, x, y, w, h, b, off, row_bytes, 0, layer); }
 int nvmtl_vk_cmd_copy_image_to_buffer_level_layer(nvk_cmdbuf *c, nvk_image *img, uint32_t x, uint32_t y, uint32_t w, uint32_t h,
                                   nvk_buffer *b, size_t off, uint32_t row_bytes, uint32_t level, uint32_t layer)
+{ return nvmtl_vk_cmd_copy_image_to_buffer_3d(c, img, x, y, w, h, 1, b, off, row_bytes, 0, level, layer); }
+int nvmtl_vk_cmd_copy_image_to_buffer_3d(nvk_cmdbuf *c, nvk_image *img, uint32_t x, uint32_t y, uint32_t w, uint32_t h, uint32_t depth,
+                                  nvk_buffer *b, size_t off, uint32_t row_bytes, size_t image_bytes, uint32_t level, uint32_t layer)
 {
     if (level >= (img->mips ? img->mips : 1)) { nvlog("copy_image_to_buffer: level %u — this image has %u", level, img->mips ? img->mips : 1); return -1; }
     const uint32_t lw = nvmtl_lvl(img->w, level), lh = nvmtl_lvl(img->h, level);
@@ -7986,23 +8050,36 @@ int nvmtl_vk_cmd_copy_image_to_buffer_level_layer(nvk_cmdbuf *c, nvk_image *img,
     const uint64_t tight = (uint64_t)cols * bpp;
     if (!row_bytes) { if (tight > UINT32_MAX) return -1; row_bytes = (uint32_t)tight; }
     if (bw > 1 && ((x % bw) || (y % bh))) { nvlog("copy: origin (%u,%u) is not block-aligned", x, y); return -1; }
+    if (!w || !h || row_bytes < tight || row_bytes % bpp || off > b->size) return -1;
+    if (!depth) depth = 1;
+    const int vol = img->mtl_type == 7;
+    const uint32_t layers = vol ? nvmtl_lvl(img->layers ? img->layers : 1, level) : (img->layers ? img->layers : 1);
+    if (layer >= layers || (vol && depth > layers - layer)) return -1;
+    if (!image_bytes) image_bytes = (size_t)rows * row_bytes;
+    if (depth > 1 && (!vol || layer > nvmtl_lvl(img->layers ? img->layers : 1, level)
+                      || depth > nvmtl_lvl(img->layers ? img->layers : 1, level) - layer
+                      || image_bytes % row_bytes || image_bytes / row_bytes < rows || image_bytes / row_bytes * bh > UINT32_MAX)) return -1;
+    const uint64_t plane_span = (uint64_t)(rows - 1) * row_bytes + tight;
+    if (depth > 1 && image_bytes > (UINT64_MAX - plane_span) / (depth - 1)) return -1;
+    const uint64_t span = (uint64_t)(depth - 1) * image_bytes + plane_span;
     if (layer >= (img->layers ? img->layers : 1) || !w || !h || x > lw || w > lw-x || y > lh || h > lh-y
-        || row_bytes < tight || row_bytes % bpp || off > b->size || (uint64_t)(rows-1)*row_bytes+tight > b->size-off) return -1;
+        || row_bytes < tight || row_bytes % bpp || off > b->size || span > b->size-off) return -1;
     if (!w || !h || x + w > lw || y + h > lh) { nvlog("copy_image_to_buffer: out of bounds (level %u is %ux%u)", level, lw, lh); return -1; }
-    nvmtl_vk_cmd_barrier(c);
+    nvmtl_xfer_lead(c);
     img_to(c, img, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_ACCESS_MEMORY_WRITE_BIT | VK_ACCESS_MEMORY_READ_BIT, VK_ACCESS_TRANSFER_READ_BIT,
            VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT);
-    VkBufferImageCopy bic = { off, row_bytes / bpp * bw, 0, { nvmtl_copy_aspect(img), level, img->mtl_type == 7 ? 0u : layer, 1 },
-                              { (int32_t)x, (int32_t)y, img->mtl_type == 7 ? (int32_t)layer : 0 }, { w, h, 1 } };
+    VkBufferImageCopy bic = { off, row_bytes / bpp * bw, depth > 1 ? (uint32_t)(image_bytes / row_bytes * bh) : 0u,
+                              { nvmtl_copy_aspect(img), level, vol ? 0u : layer, 1 },
+                              { (int32_t)x, (int32_t)y, vol ? (int32_t)layer : 0 }, { w, h, depth } };
     pvkCmdCopyImageToBuffer(c->cb, (VkImage)img->img, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, (VkBuffer)b->buf, 1, &bic);
-    nvmtl_vk_cmd_barrier(c);
+    nvmtl_xfer_end(c);
     return 0;
 }
 
 int nvmtl_vk_cmd_image_gen_mipmaps(nvk_cmdbuf *c, nvk_image *img)
 {
     if (!img->mips || img->mips < 2) { nvlog("generateMipmaps: texture has %u level(s); nothing to generate", img->mips); return 0; }
-    nvmtl_vk_cmd_barrier(c);
+    nvmtl_xfer_lead(c);
     img_to(c, img, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_ACCESS_MEMORY_WRITE_BIT | VK_ACCESS_MEMORY_READ_BIT, VK_ACCESS_TRANSFER_WRITE_BIT,
            VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT);
     // every slice of an array and every face of a cube gets its levels; a 3D texture (its depth in layers) halves in
@@ -8036,7 +8113,7 @@ int nvmtl_vk_cmd_image_gen_mipmaps(nvk_cmdbuf *c, nvk_image *img)
     };
     pvkCmdPipelineBarrier(c->cb, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0, 0, NULL, 0, NULL, 2, fin);
     img->layout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-    nvmtl_vk_cmd_barrier(c);
+    nvmtl_xfer_end(c);
     return 0;
 }
 
@@ -8610,7 +8687,7 @@ int nvmtl_vk_cmd_copy_image_sub3(nvk_cmdbuf *c, nvk_image *src, uint32_t sl, uin
                                          { aspect, dl, d3 ? 0u : ds, d3 ? 1u : (s3 ? depth : 1u) }, { (int32_t)dx, (int32_t)dy, d3 ? (int32_t)dz : 0 },
                                          { w, h, depth } };
     }
-    nvmtl_vk_cmd_barrier(c);
+    nvmtl_xfer_lead(c);
     img_to(c, src, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_ACCESS_MEMORY_WRITE_BIT | VK_ACCESS_MEMORY_READ_BIT, VK_ACCESS_TRANSFER_READ_BIT,
            VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT);
     img_to(c, dst, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_ACCESS_MEMORY_WRITE_BIT | VK_ACCESS_MEMORY_READ_BIT, VK_ACCESS_TRANSFER_WRITE_BIT,
@@ -8619,7 +8696,7 @@ int nvmtl_vk_cmd_copy_image_sub3(nvk_cmdbuf *c, nvk_image *src, uint32_t sl, uin
                    (VkImage)dst->img, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, count, regions);
     img_to(c, dst, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT,
            VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT);
-    nvmtl_vk_cmd_barrier(c);
+    nvmtl_xfer_end(c);
     return 0;
 }
 int nvmtl_vk_srgb_format(uint32_t fmt)
@@ -8639,7 +8716,7 @@ int nvmtl_vk_cmd_blit_image_2d(nvk_cmdbuf *c, nvk_image *src, nvk_image *dst, ui
     }
     const VkImageBlit r = { { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 }, { { 0, 0, 0 }, { (int32_t)w, (int32_t)h, 1 } },
                             { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 }, { { 0, 0, 0 }, { (int32_t)w, (int32_t)h, 1 } } };
-    nvmtl_vk_cmd_barrier(c);
+    nvmtl_xfer_lead(c);
     img_to(c, src, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_ACCESS_MEMORY_WRITE_BIT | VK_ACCESS_MEMORY_READ_BIT, VK_ACCESS_TRANSFER_READ_BIT,
            VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT);
     img_to(c, dst, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_ACCESS_MEMORY_WRITE_BIT | VK_ACCESS_MEMORY_READ_BIT, VK_ACCESS_TRANSFER_WRITE_BIT,
@@ -8648,7 +8725,7 @@ int nvmtl_vk_cmd_blit_image_2d(nvk_cmdbuf *c, nvk_image *src, nvk_image *dst, ui
                     (VkImage)dst->img, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &r, VK_FILTER_NEAREST);
     img_to(c, dst, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT,
            VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT);
-    nvmtl_vk_cmd_barrier(c);
+    nvmtl_xfer_end(c);
     return 0;
 }
 int nvmtl_vk_cmd_copy_image_sub(nvk_cmdbuf *c, nvk_image *src, uint32_t sl, uint32_t ss, uint32_t sx, uint32_t sy,
