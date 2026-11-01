@@ -16,8 +16,59 @@ Before each merge:
 4. Build the affected components and check their behavior, resource lifetime and synchronization.
    Record which fork changes upstream now covers, what remains local and the validation limits.
 
-The current upstream base is **2.6.5 at `ceba63c`**, from `upstream/main`, integrated on
-2026-10-31. The preceding 2.6.4 base was `f95f4d2`. The preceding base was 2.6.3 at `190a4d4`, integrated on 2026-10-28.
+The current upstream base is **2.6.6 at `470e391`**, from `upstream/main`, integrated on
+2026-11-01. Upstream rewrote its history: the old 2.6.5 base `ceba63c` maps to
+`c6f5aa0`, differing only in remote build paths and a tool docstring. This merge
+uses the actual old snapshot as its explicit three-way base and records the
+new upstream head as a parent; do not replay already integrated changes from
+the rewritten history. The preceding 2.6.4 base was `f95f4d2`.
+
+## Upstream 2.6.6 integration
+
+Two textual conflicts cover the drawable usage helper and remote plugin builder.
+Keep the fork's real-storage-view request and fallback, Photo Booth orientation
+adapter and WindowServer policy. Add upstream's early return for
+`MTLTextureUsageUnknown`: zero usage permits shader writes and must stay zero,
+including when an optimal-tiled storage twin provides those writes. Explicit
+drawable usage still follows the existing fork storage-view checks.
+
+Take ordered initialization clears before managed uploads, missing-VkImage
+copy refusal and bounded diagnostics, empty-assembly parsing, same-local-field
+pointer-phi resolution, and capability-gated rate-map identity. The plugin must
+report no rate-map support before setting translator capability bit 2; generic
+translation still refuses opaque map data. Preserve all existing translator
+pointer, callback, uniform-cbuf, sampler and rounding repairs.
+
+Take the Metal-capable desktop-owner check in both accelerator builds and the
+installer's root-only old-firmware backup/exclusive-create rollback, plus AMFI
+guidance. Keep native GLD installation, optional NMIntelFB default No, external
+kext retention, permanent collection paths, backup/recovery and opt-in handling.
+Remote builders use upstream's environment-selected host/root while retaining
+the fork's rotation headers and release `-O2`.
+
+Native Zink, Minecraft/Wine, DXVK/vkd3d/DLSS, the VP8/VP9 overlay and browser
+IOSurface repair are unchanged. Upstream's 15.0 Vulkan deployment-target change
+does not lower this complete fork package's 15.5 minimum: its retained Zink and
+gaming runtimes still require 15.5. Fork packages do not carry NullMoth's private
+release signature. Build and validation records accompany the local 2.6.6 test
+package; keep those exact assets for a later draft after user approval.
+
+Validation on RTX 2060 SUPER / Tahoe 26.7.1: both accelerator variants and the
+release plugin/translator compile. The library passes 2,227 tests plus 18 focused
+integration tests; the wrapper passes 43, with its two upstream ignores and two
+private-fixture exclusions unchanged. The test-only library copy prunes stale
+workspace lock entries without changing remaining dependency versions/checksums;
+the production dylib uses the tracked wrapper lock with `--locked`.
+All 21 translator GPU readback cases, four unspecified/explicit IOSurface write
+cases, 16 Core Image pixel/orientation frames and the C-ABI rate-map capability
+checks pass. Host regressions retain cursor drain, import lifetime/publication,
+installer rollback/external kexts, native GLD selection and optional panel policy.
+The isolated Tahoe kernel collection links with and without NMIntelFB, leaving
+the installed driver and live collection unchanged. This is not a boot test or
+Sequoia/laptop qualification; local user testing remains pending. Signatures,
+minimum OS, symlinks, runtime manifests and package checksums are verified before
+staging. Unchanged kernel/rendering runtimes retain their previous source records
+and exact hashes; upstream's deployment-target-only NVK replacement is not needed.
 
 ## Optional Intel laptop panel framebuffer
 

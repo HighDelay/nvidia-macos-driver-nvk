@@ -19,6 +19,7 @@ fixture=r'''
 typedef unsigned BOOL;
 typedef unsigned long NSUInteger;
 #define YES 1
+#define MTLTextureUsageUnknown 0
 #define MTLTextureUsageShaderRead 1
 #define MTLTextureUsageShaderWrite 2
 #define MTLTextureUsageRenderTarget 4
@@ -55,6 +56,8 @@ int main(int argc,char **argv) {
  assert(nvmtl_surface_usage(1,1,1)==1);
  assert(nvmtl_surface_usage(3,0,0)==(ws?3:7));
  assert(nvmtl_surface_usage(3,1,1)==3);
+ for(unsigned fbo=0;fbo<2;fbo++)for(unsigned storage=0;storage<2;storage++)
+  assert(nvmtl_surface_usage(MTLTextureUsageUnknown,fbo,storage)==MTLTextureUsageUnknown);
  NVMTLTexture t={0};reset();
  assert(!nvmtl_surface_image_create(&t,(void*)1,0,512,64,44,4,0,1));
  assert(t._vramOn && t._i.storage && alias_requests==1 && !private_requests && !buffer_drops && !image_drops);

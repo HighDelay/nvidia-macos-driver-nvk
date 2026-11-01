@@ -39,6 +39,9 @@ check('"no display here" needs at least one enumerated nub and zero displays on 
 own = body('static void headlessDisplayOwner(')
 check('another GPU = a framebuffer whose PCI device is not vendor 0x10de', '!= 0x10de' in own and '"vendor-id"' in own)
 check('our own heads never count as the other GPU', 'metaCast("NVRMNVDAFramebuffer")) continue' in own)
+check('another vendor only counts when its GPU also publishes a Metal accelerator',
+      'if (*other && !gpuHasMetalAccelerator(e))' in own
+      and '*other = false;' in own.split('if (*other && !gpuHasMetalAccelerator(e))')[1])
 check('the Intel panel driver (a head of this accelerator) never triggers the early hand-over',
       'metaCast("NMIntelFB")) break' in own and own.index('NMIntelFB') < own.index('vendor-id'))
 hc = body('static void headlessCheck(void *p0, void *)')

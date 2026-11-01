@@ -70,3 +70,14 @@ Framebuffer, cursor, parked-VRAM and DXVK implementations remain unchanged.
 The 2.6.4 release separately rebuilds the native frontends and adds the optional
 Wine D3D12/DLSS components. See [merge validation](FORK-MERGE-NOTES.md#upstream-264-integration)
 for package, kernel-link and hardware-test limits.
+
+The 2.6.6 merge passes **2,227 library tests**, the same **43 wrapper tests**
+(with the existing two ignores and two private-fixture exclusions), 18 focused
+integration tests and all 21 GPU readback cases. The added C-ABI check requires
+explicit capability bit 2 for both rate-map coordinate directions, including
+sampler specialization and refusal after clearing that bit. Run it with
+`python3 tools/test_raster_rate_caps.py /path/to/libnvmtl_translate.dylib`.
+Tests used a separate copy whose library lock prunes obsolete workspace-only
+entries; every remaining dependency version/checksum matches the tracked lock.
+The production wrapper still builds with its tracked lock and `--locked`.
+See [2.6.6 merge validation](FORK-MERGE-NOTES.md#upstream-266-integration).

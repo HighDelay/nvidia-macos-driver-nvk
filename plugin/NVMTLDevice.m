@@ -586,6 +586,9 @@ static bool nvmtl_process_is_allowed(void)
     }
     fclose(f);
     if (ok) nvlog("  allow-listed: %s", me);
+    // a list that was read but grants nothing to this process said so nowhere, so a field log showed only the final
+    // refusal and could not tell an empty or replaced list from a deny rule
+    else nvlog("  no rule in nvmtl-allow.txt matches %s: no device (the list was read; it needs a '*' or '%s' line)", me, me);
     return ok;
 }
 
@@ -1162,6 +1165,9 @@ static BOOL nvmtl_surface_widen_usage(BOOL fbo) {
     return !fbo && !ws;
 }
 static NSUInteger nvmtl_surface_usage(NSUInteger usage, BOOL fbo, BOOL storage) {
+    // Unknown permits shader writes through an optimal-tiled storage twin too.
+    // Keep that contract when a linear surface cannot expose a storage view.
+    if (usage == MTLTextureUsageUnknown) return usage;
     if (nvmtl_surface_widen_usage(fbo)) {
         usage |= MTLTextureUsageShaderRead | MTLTextureUsageRenderTarget;
         if (storage) usage |= MTLTextureUsageShaderWrite;
@@ -2136,6 +2142,8 @@ static void nvmtl_log_compute_descriptor(MTLComputePipelineDescriptor *d) {
     return [self heapAccelerationStructureSizeAndAlignWithSize:s.accelerationStructureSize];
 }
 - (BOOL)supportsBCTextureCompression { return YES; }
+- (BOOL)supportsRasterizationRateMapWithLayerCount:(NSUInteger)count { return NO; }
+- (id<MTLRasterizationRateMap>)newRasterizationRateMapWithDescriptor:(MTLRasterizationRateMapDescriptor *)descriptor { return nil; }
 - (BOOL)supportsInt64 { return YES; }
 - (BOOL)isQuadDataSharingSupported { return YES; }
 - (BOOL)supportsCounterSampling:(MTLCounterSamplingPoint)p {
