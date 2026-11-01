@@ -3,11 +3,19 @@ set -u
 # runs as root: tools resolve through a fixed PATH, never one the caller exported
 PATH=/usr/bin:/bin:/usr/sbin:/sbin; export PATH
 HERE=$(cd "$(dirname "$0")" && pwd)
-if [ "${1:-}" = --payload ]; then
-  [ "$#" = 2 ] && [ -d "$2" ] || { echo "STOP: --payload requires an existing package directory" >&2; exit 2; }
-  HERE=$(cd "$2" && pwd) || exit 2
-elif [ "$#" != 0 ]; then echo "STOP: expected --payload directory or no arguments" >&2; exit 2; fi
+INTEL_PANEL_CHOICE=ask
+while [ "$#" != 0 ]; do
+  case "$1" in
+    --payload)
+      [ "$#" -ge 2 ] && [ -d "$2" ] || { echo "STOP: --payload requires an existing package directory" >&2; exit 2; }
+      HERE=$(cd "$2" && pwd) || exit 2; shift 2;;
+    --intel-panel=yes) INTEL_PANEL_CHOICE=yes; shift;;
+    --intel-panel=no) INTEL_PANEL_CHOICE=no; shift;;
+    *) echo "STOP: expected --payload directory or --intel-panel=yes|no" >&2; exit 2;;
+  esac
+done
 KEXTS="NVRM NVAccel NVRMFB NVRMAGDC"
+REMOVED_KEXTS=""
 EXT=/Library/Extensions; GB=/Library/GPUBundles; FW=/Library/NullMoth/nvfw; FWOLD=/Users/Shared/nvfw
 KC=/Library/KernelCollections/AuxiliaryKernelExtensions.kc
 K=/System/Library/Kernels/kernel
@@ -34,10 +42,13 @@ release_install_lock() {
 }
 
 rollback_install() {
-  local failed=0 k b restore_kexts="$KEXTS"
+  local failed=0 k b restore_kexts="$KEXTS $REMOVED_KEXTS"
   # A later process recovering a stale guard has not detected PRIMARY yet.
   if [ -f "$BK/primary-selector-used" ]; then
     case " $restore_kexts " in *' NVPrimarySelector '*) ;; *) restore_kexts="$restore_kexts NVPrimarySelector";; esac
+  fi
+  if [ -f "$BK/intel-panel-touched" ]; then
+    case " $restore_kexts " in *' NMIntelFB '*) ;; *) restore_kexts="$restore_kexts NMIntelFB";; esac
   fi
   [ -z "$NEWKC" ] || rm -f "$NEWKC" || failed=1
   for k in $restore_kexts; do
@@ -138,6 +149,7 @@ kpath() {
   case "$1" in
     NVAccel) echo "$VAR/NVAccel.kext";;
     NVPrimarySelector) echo "$SELECTOR_SOURCE";;
+    NMIntelFB) echo "$HERE/Optional/NMIntelFB.kext";;
     *) echo "$HERE/Library/Extensions/$1.kext";;
   esac
 }
@@ -189,6 +201,41 @@ for target in 15 26; do
     [ -f "$HERE/Library/NullMoth/kexts/$target/NVAccel.kext/Contents/Info.plist" ] || die "this package lacks the complete macOS $target accelerator"
 done
 ok "every file matches SHA256SUMS and both OS accelerators are present"
+# The portable model name can be spoofed on a Hackintosh, and it does not tell
+# us which GPU owns the panel. Ask instead of enabling this framebuffer from it.
+INTEL_PANEL=0; INTEL_PANEL_TOUCHED=0
+if [ -e "$EXT/NMIntelFB.kext" ] || [ -L "$EXT/NMIntelFB.kext" ]; then
+  [ ! -L "$EXT/NMIntelFB.kext" ] && [ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$EXT/NMIntelFB.kext/Contents/Info.plist" 2>/dev/null)" = com.nullmoth.NMIntelFB ] \
+    || die "cannot identify the existing NMIntelFB.kext; no driver changes made"
+  [ "$INTEL_PANEL_CHOICE" != ask ] || INTEL_PANEL_CHOICE=yes
+fi
+if [ "$INTEL_PANEL_CHOICE" = ask ] && [ -d "$HERE/Optional/NMIntelFB.kext" ]; then
+  echo
+  echo "Optional Intel laptop panel support (experimental):"
+  echo "Use only for a laptop whose built-in screen is wired to an Intel GPU unsupported by macOS."
+  echo "Skip for desktops, Apple-supported Intel graphics, or a panel driven directly by NVIDIA."
+  echo "This adopts the firmware display mode; NVIDIA-to-Intel panel acceleration is still disabled by default."
+  if [ -t 0 ]; then
+    printf 'Install NMIntelFB for this laptop panel? [y/N] '
+    answer=""; IFS= read -r answer || answer=""
+    case "$answer" in y|Y|yes|YES|Yes) INTEL_PANEL_CHOICE=yes;; *) INTEL_PANEL_CHOICE=no;; esac
+  else
+    echo "No interactive input: Intel panel support skipped (use --intel-panel=yes to opt in)."
+    INTEL_PANEL_CHOICE=no
+  fi
+fi
+if [ "$INTEL_PANEL_CHOICE" = yes ]; then
+  [ -d "$HERE/Optional/NMIntelFB.kext" ] && [ ! -L "$HERE/Optional/NMIntelFB.kext" ] \
+    || die "this package lacks the optional Intel panel kext"
+  [ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$HERE/Optional/NMIntelFB.kext/Contents/Info.plist" 2>/dev/null)" = com.nullmoth.NMIntelFB ] \
+    || die "invalid optional Intel panel bundle identity"
+  codesign --verify --strict "$HERE/Optional/NMIntelFB.kext" || die "invalid Intel panel kext signature"
+  KEXTS="$KEXTS NMIntelFB"; INTEL_PANEL=1; INTEL_PANEL_TOUCHED=1
+  ok "experimental Intel panel support selected; an existing opt-in is kept on updates"
+elif [ -d "$EXT/NMIntelFB.kext" ]; then
+  REMOVED_KEXTS=NMIntelFB; INTEL_PANEL_TOUCHED=1
+  ok "Intel panel support will be removed; the previous copy is backed up"
+fi
 GLD_BUNDLE=""
 if [ -d "$HERE/Library/GPUBundles/NVKZinkGLDriver.bundle" ]; then
   GLD_BUNDLE=NVKZinkGLDriver.bundle
@@ -350,7 +397,7 @@ if [ -s "$KC" ]; then
     case "$external_path" in *.kext) ;; *) continue;; esac
     case "$external_path" in "$EXT"/*|/Library/Apple/System/Library/Extensions/*|/System/*) continue;; esac
     printf '%s' "$external_id" | grep -Eq '^[A-Za-z0-9_.-]+$' || die "invalid external extension identity"
-    case "$external_id" in com.nullmoth.NVRM|com.nullmoth.NVAccel|com.nullmoth.NVRMFB|com.nullmoth.NVRMAGDC) continue;; esac
+    case "$external_id" in com.nullmoth.NVRM|com.nullmoth.NVAccel|com.nullmoth.NVRMFB|com.nullmoth.NVRMAGDC|com.nullmoth.NMIntelFB) continue;; esac
     permanent_path=$(permanent_kext_path "$external_id" "$external_version" "$external_path") \
       || die "cannot preserve existing extension $external_id from a permanent installed path"
     parent=$permanent_path
@@ -363,7 +410,7 @@ if [ -s "$KC" ]; then
     EXTERNAL_KEXT_IDS="$EXTERNAL_KEXT_IDS $external_id"
   done < "$T/existing-kexts"
 fi
-for x in "$EXT"/*.kext; do [ -d "$x" ] || continue; n=$(basename "$x" .kext); case " $KEXTS " in *" $n "*) ;; *) cp -R "$x" "$T/repo/" || die "stage third-party kext $n";; esac; done
+for x in "$EXT"/*.kext; do [ -d "$x" ] || continue; n=$(basename "$x" .kext); case " $KEXTS $REMOVED_KEXTS " in *" $n "*) ;; *) cp -R "$x" "$T/repo/" || die "stage third-party kext $n";; esac; done
 for k in $KEXTS; do cp -R "$(kpath $k)" "$T/repo/" || die "copy $k"; done
 if [ "$PRIMARY" = 1 ]; then
   primary_apply "$T/repo/NVRM.kext" NVRM && primary_apply "$T/repo/NVAccel.kext" NVAccel \
@@ -375,10 +422,15 @@ kmutil create -n aux --volume-root / ${KARG[@]+"${KARG[@]}"} -B $KB -S $KS --rep
 [ -s "$T/aux.kc" ] || die "test kernel collection build produced no output"
 INS=$(kmutil inspect -a x86_64 -A "$T/aux.kc" 2>/dev/null) || die "cannot inspect the test kernel collection"
 for k in $KEXTS; do printf '%s\n' "$INS" | grep -oE '(com\.nullmoth\.[A-Za-z0-9]+|org\.hackintosh\.experimental\.NVPrimarySelector)' | grep -Fxq "$(primary_bundle_id "$k")" || { tail -20 "$T/kmutil.log"; die "kmutil refused com.nullmoth.$k (log above)"; }; done
+for k in $REMOVED_KEXTS; do
+  if printf '%s\n' "$INS" | grep -oE 'com\.nullmoth\.[A-Za-z0-9]+' | grep -Fxq "$(primary_bundle_id "$k")"; then
+    die "test collection retained deselected $k; no installed files changed"
+  fi
+done
 for external_id in $EXTERNAL_KEXT_IDS; do
   printf '%s\n' "$INS" | awk '{print $1}' | grep -Fxq "$external_id" || die "test collection dropped $external_id"
 done
-ok "test collection holds all four kexts"
+ok "test collection holds all selected kexts"
 [ "${CHECK:-0}" = 1 ] && { rm -rf "$T"; echo; echo "CHECK PASS (nothing changed)"; exit 0; }
 
 BK=$(mktemp -d "/Library/NullMoth/backup-$(date +%Y%m%d-%H%M%S).XXXXXX") && [ -n "$BK" ] && [ -d "$BK" ] || die "create unique backup directory"
@@ -386,9 +438,11 @@ BK=$(mktemp -d "/Library/NullMoth/backup-$(date +%Y%m%d-%H%M%S).XXXXXX") && [ -n
 step "4. back up what is there now -> $BK"
 printf '%s\n' "$BUILD" > "$BK/macos-build" || die "record backup macOS build"
 [ "$PRIMARY" != 1 ] || touch "$BK/primary-selector-used" || die "record primary selector backup"
+[ "$INTEL_PANEL_TOUCHED" != 1 ] || touch "$BK/intel-panel-touched" || die "record Intel panel rollback"
+CHANGED_KEXTS="$KEXTS${REMOVED_KEXTS:+ $REMOVED_KEXTS}"
 # ditto, not cp -Rp: cp re-applies file flags through symlinks and stopped on nvmtl/libvulkan.dylib with "chflags: Too
 # many levels of symbolic links" (Mac 1.10 logs 10-10, 2 uploads); ditto keeps links, flags and xattrs, as the restore does.
-for k in $KEXTS; do [ ! -e "$EXT/$k.kext" ] || backup_copy "$k" ditto "$EXT/$k.kext" "$BK/$k.kext"; done
+for k in $KEXTS $REMOVED_KEXTS; do [ ! -e "$EXT/$k.kext" ] || backup_copy "$k" ditto "$EXT/$k.kext" "$BK/$k.kext"; done
 for b in NVMTLDriver.bundle NVIDIAShared.bundle nvmtl NVKZinkGLDriver.bundle nvmtl-allow.txt; do [ ! -e "$GB/$b" ] || backup_copy "$b" ditto "$GB/$b" "$BK/$b"; done
 [ ! -f "$KC" ] || backup_copy "kernel collection" cp -p "$KC" "$BK/AuxiliaryKernelExtensions.kc"
 [ ! -d /Library/NullMoth/kexts ] || backup_copy "cached accelerators" ditto /Library/NullMoth/kexts "$BK/kexts"
@@ -406,6 +460,7 @@ ok "backup written"
 
 step "5. install"
 INSTALLING=1; [ "${CHECK:-0}" = 1 ] || : > "$LOCKDIR/installing"
+for k in $REMOVED_KEXTS; do rm -rf "$EXT/$k.kext" || die "remove $k (restore from $BK)"; done
 for k in $KEXTS; do
   source=$(kpath "$k")
   if [ "$PRIMARY" = 1 ]; then source="$T/repo/$k.kext"; fi
@@ -518,6 +573,11 @@ kmutil create -n aux --volume-root / ${KARG[@]+"${KARG[@]}"} -B $KB -S $KS --rep
 [ -s "$NEWKC" ] || die "live kernel collection build produced no output (restore from $BK)"
 INS=$(kmutil inspect -a x86_64 -A "$NEWKC" 2>/dev/null) || die "cannot inspect the new kernel collection (restore from $BK)"
 for k in $KEXTS; do printf '%s\n' "$INS" | grep -oE '(com\.nullmoth\.[A-Za-z0-9]+|org\.hackintosh\.experimental\.NVPrimarySelector)' | grep -Fxq "$(primary_bundle_id "$k")" || die "com.nullmoth.$k missing from the new collection (restore from $BK)"; done
+for k in $REMOVED_KEXTS; do
+  if printf '%s\n' "$INS" | grep -oE 'com\.nullmoth\.[A-Za-z0-9]+' | grep -Fxq "$(primary_bundle_id "$k")"; then
+    die "new collection retained deselected $k (restore from $BK)"
+  fi
+done
 for external_id in $EXTERNAL_KEXT_IDS; do
   printf '%s\n' "$INS" | awk '{print $1}' | grep -Fxq "$external_id" || die "new collection dropped $external_id (restore from $BK)"
 done
@@ -563,7 +623,7 @@ v=\$(nvram \$V:nullmoth-nv-starts 2>/dev/null | cut -f2)
 case "\$v" in %0[2-9a-f]|%[1-9a-f]?) ;; *) exit 0;; esac
 [ -d "\$BK/NVRM.kext" ] || { echo "\$(date) the driver turned itself off but its backup \$BK is gone" >> \$LOG; done_job; exit 0; }
 echo "\$(date) the new driver did not bring the display up twice; restoring the previous driver from \$BK" >> \$LOG
-for k in $KEXTS; do rm -rf "$EXT/\$k.kext"; [ ! -e "\$BK/\$k.kext" ] || ditto "\$BK/\$k.kext" "$EXT/\$k.kext"; done
+for k in $CHANGED_KEXTS; do rm -rf "$EXT/\$k.kext"; [ ! -e "\$BK/\$k.kext" ] || ditto "\$BK/\$k.kext" "$EXT/\$k.kext"; done
 for b in NVMTLDriver.bundle NVIDIAShared.bundle nvmtl NVKZinkGLDriver.bundle nvmtl-allow.txt; do rm -rf "$GB/\$b"; [ ! -e "\$BK/\$b" ] || ditto "\$BK/\$b" "$GB/\$b"; done
 rm -rf /Library/NullMoth/kexts "$FW"
 [ ! -d "\$BK/kexts" ] || ditto "\$BK/kexts" /Library/NullMoth/kexts

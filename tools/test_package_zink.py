@@ -73,6 +73,8 @@ class PackageZinkTests(unittest.TestCase):
 
     def fake_run(self, *args):
         self.commands.append(tuple(str(a) for a in args))
+        if args[0] == '/bin/bash' and str(args[1]).endswith('build_intel_panel.sh'):
+            self.bundle(Path(args[2])/'NMIntelFB.kext', 'NMIntelFB')
         if args[0] == 'strings': return self.firmware
         if args[0] == 'git': return 'test-commit\n'
         if args[0] == 'otool': return 'cmd LC_RPATH\n cmdsize 40\n path /Library/GPUBundles/nvmtl (offset 12)\n'
@@ -96,6 +98,12 @@ class PackageZinkTests(unittest.TestCase):
         self.assertEqual((self.out / 'licenses/base-notice.txt').read_bytes(), b'keep this notice')
         self.assertEqual(json.loads((self.out / pkg.RUNTIME / 'nvk_icd.json').read_text())['ICD']['library_path'], './libnvk_renderer.dylib')
         self.assertEqual((self.out / pkg.BASE_RUNTIME / 'nvk_icd.json').read_bytes(), (self.base / pkg.BASE_RUNTIME / 'nvk_icd.json').read_bytes())
+        self.assertTrue((self.out/'Optional/NMIntelFB.kext/Contents/MacOS/NMIntelFB').is_file())
+        self.assertFalse((self.out/'Library/Extensions/NMIntelFB.kext').exists())
+        self.assertFalse(list(self.out.rglob('NMIntelFBVirtual.kext')))
+        identity = json.loads((self.out/'Optional/INTEL-PANEL-BUILD.json').read_text())
+        for name, sha in identity['files'].items():
+            self.assertEqual(pkg.base_tools.digest(self.out/'Optional/NMIntelFB.kext'/name), sha)
         for command in ('Install.command', 'Verify.command', 'Uninstall.command'):
             self.assertTrue((self.out / command).stat().st_mode & 0o111)
         entries = {}

@@ -30,7 +30,10 @@ over MoltenVK has **not** been measured.
 Tahoe 26.7.1 using YAAGL's Wine 11.0-1 build, including characters, scenery,
 UI and FPS overlay. Windows Vulkan readback/presentation and D3D11
 depth/blend/shared-texture probes also pass.
-Genshin Impact, CN gameplay, commercial CrossOver releases, other Wine builds
+Genshin Impact startup and in-world rendering are also user-confirmed on an
+RTX 4060 Laptop GPU with **Steam Patch and Timeout fix enabled**; the screenshot
+shows native NVK/Mesa 26.3.0-devel, characters, scenery and UI.
+CN gameplay, commercial CrossOver releases, other Wine builds
 and physical Sequoia hardware have **not** been qualified.
 
 **D3D12/DLSS require the 2.6.4 Wine/NVK provider or newer.** Older D3D11-only
@@ -49,10 +52,11 @@ the instructions below continue to use the verified D3D11 route.
 4. Settings → General → **DXVK / NVK HUD** controls the overlay on the next
    game launch. D3D11 uses DXVK's device/FPS/frame-time HUD; D3D12 uses the
    native presentation FPS/ms box.
-5. Keep ZZZ's Steam Patch and timeout fix enabled, and launch through YAAGL's
+5. Enable **Steam Patch** and **Timeout fix** for ZZZ and GI; keep both off for
+   the verified HSR configuration. GI currently defaults to off, so enable both
+   manually after applying recommended settings. Launch through YAAGL's
    full patch/preparation flow. A direct `wine steam.exe Game.exe` shortcut is
-   not equivalent and crashed during testing. GI/HSR retain their D3D11 routes
-   and their existing default-off Steam/timeout options.
+   not equivalent and crashed during testing. GI/HSR retain their D3D11 routes.
 
 YAAGL takes NVK, DXVK, vkd3d and NGX/NVAPI from the installed driver provider.
 Its archives contain no graphics runtime or Wine. Wine downloads on first setup.

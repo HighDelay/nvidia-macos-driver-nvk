@@ -108,6 +108,24 @@ def stage(base, zink, output, components=None, native_gld=False):
     with tempfile.TemporaryDirectory(prefix='.zink-package-', dir=output.parent) as temp:
         payload = Path(temp) / 'pkgroot'
         copy_bundle(base, payload)
+        # Always bundle the real framebuffer, outside Library/Extensions. Only
+        # an explicit installer choice copies it into the system repositories.
+        panel_build = Path(temp) / 'intel-panel'
+        run('/bin/bash', ROOT/'build/build_intel_panel.sh', panel_build)
+        panel = payload/'Optional/NMIntelFB.kext'
+        copy_bundle(panel_build/'NMIntelFB.kext', panel)
+        run('codesign', '--verify', '--strict', panel)
+        panel_identity = {
+            'source_commit': run('git', '-C', ROOT, 'rev-parse', 'HEAD').strip(),
+            'source_sha256': {str(p.relative_to(ROOT)): base_tools.digest(p) for p in
+                [ROOT/'build/build_intel_panel.sh', *sorted((ROOT/'kexts/NMIntelFB').glob('*'))]
+                if p.is_file()},
+            'files': {str(p.relative_to(panel)): base_tools.digest(p) for p in panel.rglob('*') if p.is_file()},
+            'installation': 'optional installer prompt; default no; retain an existing opt-in',
+            'nvidia_intel_panel_acceleration_enabled_by_default': False,
+        }
+        (payload/'Optional/INTEL-PANEL-BUILD.json').write_text(json.dumps(panel_identity, indent=2)+'\n')
+        shutil.copy2(ROOT/'docs/INTEL-PANEL.md', payload/'Optional/README.md')
         replacements = {}
         # Verify the firmware version from the actual NVRM image, not stale text
         # in release manifests. Every referenced mandatory firmware must exist.
@@ -219,6 +237,7 @@ def stage(base, zink, output, components=None, native_gld=False):
                     'source_commit': run('git', '-C', ROOT, 'rev-parse', 'HEAD').strip(),
                     'source_dirty': bool(run('git', '-C', ROOT, 'status', '--porcelain').strip()),
                     'component_replacements': replacements, 'firmware': sorted(firmware_paths),
+                    'optional_intel_panel': panel_identity,
                     'zink_sha256': base_tools.digest(runtime / 'libnvk_zink.dylib'),
                     'cgl_sha256': base_tools.digest(runtime / 'libnvk_cgl.dylib'),
                     'gld_sha256': (base_tools.digest(payload / 'Library/GPUBundles/NVKZinkGLDriver.bundle/Contents/MacOS/NVKZinkGLDriver')

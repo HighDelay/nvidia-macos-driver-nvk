@@ -36,9 +36,13 @@ The D3D11 probe completed 300 presents, 600 textured draws, depth/blend checks,
 gameplay through YAAGL Wine 11.0-1 are user-confirmed, including characters,
 scenery, UI and the FPS overlay. HSR 4.6.0 was confirmed with Steam Patch and
 the timeout fix off, using its Jadeite launch route with the required `--`
-separator. Genshin Impact and CN gameplay remain unqualified.
+separator. On 2026-10-31, Genshin Impact startup and in-world rendering were also
+user-confirmed on an RTX 4060 Laptop GPU through native NVK/Mesa 26.3.0-devel,
+with **Steam Patch and Timeout fix enabled**. The supplied photo shows characters,
+scenery and UI. Its OS/Wine versions were not supplied. CN gameplay remains
+unqualified.
 No controlled FPS comparison has been made.
-Physical Sequoia testing, commercial CrossOver releases and other GPU families
+Physical Sequoia testing of Wine, commercial CrossOver releases and other configurations
 remain unqualified.
 
 ## D3D12 and DLSS
@@ -69,11 +73,11 @@ It reports presentation FPS and average ms/frame, including application stalls,
 not GPU execution time. Full drawable pixel checks passed across 45 frames,
 resize and restore. Minecraft's independent frontend is unchanged.
 
-**Source is integrated; the matching driver package has not been built yet.**
-The published D3D11-only driver does not include these new components.
+The **2.6.4 Wine/NVK provider and newer** include these components.
 [Follow the D3D12/DLSS setup guide](INSTALL.md#d3d12-and-dlss) after installing a
-matching build. YAAGL's separate D3D12 and DLSS settings default off; its HUD
-setting defaults on. ZZZ still needs YAAGL's Steam Patch and timeout fix.
+matching driver. YAAGL's separate D3D12 and DLSS settings default off; its HUD
+setting defaults on. Enable YAAGL's Steam Patch and Timeout fix for ZZZ and GI;
+keep both off for the verified HSR route.
 
 ## Setup with YAAGL
 
@@ -83,8 +87,8 @@ setting defaults on. ZZZ still needs YAAGL's Steam Patch and timeout fix.
 3. Let the launcher download/prep its private Wine and initialize its dedicated
    `wineprefix-nvk` prefix. It validates the installed runtime and installs its native x64
    `d3d11.dll` / `dxgi.dll` pair with a rollback journal.
-4. Download ZZZ into the chosen game directory, then launch. The backend forces
-   `-force-d3d11`; a saved D3D12 preference cannot override it.
+4. Download the chosen game and launch through YAAGL's normal preparation flow.
+   D3D11 is the default; ZZZ can explicitly select the D3D12 route described above.
 5. Check the DXVK HUD and game launch logs. The underlying Vulkan device must
    identify NVIDIA/NVK, and loaded-image logs must show the installed driver's
    `libnvk_wine.dylib` and `libnvk_renderer.dylib`.
@@ -98,8 +102,9 @@ The tested backend also defaults to `dxvk.enableDescriptorBuffer = False` and
 logs `Binding model: Legacy`. The descriptor-buffer path rendered ZZZ scenery
 but lost characters and HUD text; switching to descriptor sets restored both.
 The FPS/frame-time/device HUD is enabled by default. ZZZ and HSR Global gameplay
-rendering are user-confirmed; GI, CN gameplay and sustained stability/performance
-remain unqualified.
+and GI in-game rendering are user-confirmed; CN gameplay and sustained
+stability/performance remain unqualified. GI's packaged defaults still need both
+Steam Patch and Timeout fix enabled manually after applying recommended settings.
 
 DXVK may report an AMD PCI vendor to D3D11 applications as its normal NVIDIA/NVAPI
 workaround. Check its Vulkan device/driver log and actual loaded libraries rather

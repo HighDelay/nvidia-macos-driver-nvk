@@ -6,7 +6,7 @@ set -u
 PATH=/usr/bin:/bin:/usr/sbin:/sbin; export PATH
 # the NVIDIA driver only: the AMD/Intel GPU driver, the NPU driver and the audio driver are separate products with
 # their own uninstallers
-KEXTS="NVRM NVAccel NVRMFB NVRMAGDC NVPrimarySelector"; EXT=/Library/Extensions; GB=/Library/GPUBundles
+KEXTS="NVRM NVAccel NVRMFB NVRMAGDC NVPrimarySelector NMIntelFB"; EXT=/Library/Extensions; GB=/Library/GPUBundles
 KC=/Library/KernelCollections/AuxiliaryKernelExtensions.kc
 K=/System/Library/Kernels/kernel
 KARG=(--allow-missing-kdk); [ -f "$K" ] && KARG+=(--kernel "$K")   # without a matching Kernel Debug Kit, kmutil needs --allow-missing-kdk
@@ -111,7 +111,7 @@ KEEP_KEXT_ARGS=(); KEEP_KEXT_IDS=""
 keep_kext() {
   local path=$1 id=$2 parent
   printf '%s' "$id" | grep -Eq '^[A-Za-z0-9_.-]+$' || die "invalid preserved extension identity"
-  case "$id" in com.nullmoth.NVRM|com.nullmoth.NVAccel|com.nullmoth.NVRMFB|com.nullmoth.NVRMAGDC|org.hackintosh.experimental.NVPrimarySelector) return;; esac
+  case "$id" in com.nullmoth.NVRM|com.nullmoth.NVAccel|com.nullmoth.NVRMFB|com.nullmoth.NVRMAGDC|com.nullmoth.NMIntelFB|org.hackintosh.experimental.NVPrimarySelector) return;; esac
   case " $KEEP_KEXT_IDS " in *" $id "*) return;; esac
   parent=$path
   while :; do
@@ -137,7 +137,7 @@ if [ -s "$KC" ]; then
     || die "cannot inspect the existing collection before preserving extensions"
   while IFS=$'\t' read -r external_id external_version external_path external_rest; do
     case "$external_path" in *.kext) ;; *) continue;; esac
-    case "$external_id" in com.nullmoth.NVRM|com.nullmoth.NVAccel|com.nullmoth.NVRMFB|com.nullmoth.NVRMAGDC|org.hackintosh.experimental.NVPrimarySelector) continue;; esac
+    case "$external_id" in com.nullmoth.NVRM|com.nullmoth.NVAccel|com.nullmoth.NVRMFB|com.nullmoth.NVRMAGDC|com.nullmoth.NMIntelFB|org.hackintosh.experimental.NVPrimarySelector) continue;; esac
     case " $KEEP_KEXT_IDS " in *" $external_id "*) continue;; esac
     case "$external_path" in /System/*) continue;; esac
     permanent_path=$(permanent_kext_path "$external_id" "$external_version" "$external_path") \

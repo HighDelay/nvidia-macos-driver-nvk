@@ -25,3 +25,9 @@ kexts/NMIntelFB  Panel brightness follows the method of WhateverXe's panel PWM (
 
 air-runtime  LLVM (Apache-2.0 with LLVM exceptions) and Zstandard (BSD-3-Clause); their licence texts are in
              NVMTLDriver.bundle/Contents/Resources/air-runtime.
+
+video/       Optional codec addon based on mickys/nvenc, Copyright (c) 2026 mickys,
+             https://github.com/mickys/nvenc, MIT (video/nvenc-MIT.txt).
+             The pinned source and Turing changes are in video/nvenc-source.json and
+             video/nvenc-turing.patch. Packages include NVIDIA MIT header notices and
+             WebKit BSD SPI notices under /Library/GPUBundles/nvmtl/video/LICENSES.

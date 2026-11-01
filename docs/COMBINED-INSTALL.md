@@ -1,5 +1,8 @@
 # Native OpenGL and screen-capture driver package
 
+The installer offers [optional Intel laptop panel support](INTEL-PANEL.md),
+defaulting to **No**. This is separate from the normal NVIDIA display driver.
+
 This is a complete fork driver package with an **optional Zink/NVK OpenGL
 renderer**, enabled for Intel **Sequoia 15.5+ and Tahoe 26**. Local hardware
 testing covers **26.7.1 / 25G241**. The Sequoia candidate uses reviewed

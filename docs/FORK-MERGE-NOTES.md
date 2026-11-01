@@ -19,7 +19,56 @@ Before each merge:
 The current upstream base is **2.6.5 at `ceba63c`**, from `upstream/main`, integrated on
 2026-10-31. The preceding 2.6.4 base was `f95f4d2`. The preceding base was 2.6.3 at `190a4d4`, integrated on 2026-10-28.
 
+## Optional Intel laptop panel framebuffer
+
+The complete package builder compiles the real `NMIntelFB` into `Optional/`,
+with source/payload hashes. Keep the virtual variant out of release archives.
+The installer prompts with a default of No; do not infer opt-in from a spoofed
+MacBook model. Preserve an existing opt-in during upgrades, explicit
+`--intel-panel=yes|no`, selected-kext preflight, removal checks, backup/rollback,
+interrupted-install recovery and uninstall handling. A new noninteractive
+installation skips the kext unless explicitly selected.
+
+This is experimental firmware-mode framebuffer support. The accelerator's
+`debug.nvaccel_igpu` path remains disabled by default. Do not claim accelerated
+Intel-panel gameplay or laptop sleep/wake qualification from a kernel link
+check. See [Intel panel setup](INTEL-PANEL.md).
+
+## Additional NVIDIA video codecs
+
+Retain the pinned `video/` codec overlay and `build/build_nvenc.py`. Complete
+future packages pass its verified output as `--video-runtime` to
+`build/stage_package.py`; keep the library in the Metal bundle and the source,
+license and hash record under `nvmtl/video`. Preserve an explicit addon opt-out.
+TU10x adds VP8/VP9 VideoToolbox decoders and keeps the driver's matched H.264/HEVC
+encoders/decoders. Do not register AV1 or VP8/VP9 hardware encoding on Turing.
+Keep PCI display-function filtering, VP8 odd-width chroma and malformed-frame
+checks, and qualify application codec selection separately from API decoding.
+The overlay is built against pinned NVIDIA/WebKit headers; it does not change
+the driver kernel, renderer, Zink or Wine interfaces. See [codec setup](../video/INSTALL.md).
+Preserve Ada's upstream H.264/HEVC/AV1 encoders and decoder selection, TU117's
+H.264/HEVC encoders and decoders, and Ampere's VP9/AV1 decoders alongside the
+driver's H.264/HEVC encoders. Turing must not narrow these existing paths.
+
+Keep decoder-owned pixel pools based on the negotiated output attributes,
+including IOSurface backing and Metal compatibility, even when the client
+requests only a pixel format. Copying only that minimal client dictionary
+produces heap-backed frames and crashes Chromium's GPU process during VP9
+playback. Preserve the direct-pool optimization and format/size conversion
+fallback. The native regression must require IOSurface-backed output for both
+minimal and explicit requests; retain the live Edge 2160p60 qualification in
+[browser validation](BROWSER-VIDEO-DECODING.md).
+
 ## Capture import reuse and planar GPU copies
+
+Preserve the Photo Booth follow-up to upstream PR #433: request an actual
+storage view before importing eligible non-framebuffer-only app drawables.
+If a linear alias drops requested storage usage, release it and use the private
+fallback; never advertise a nonexistent writable view. Keep WindowServer's
+requested usage unchanged. Also retain Photo Booth's preview-only orientation
+adapter, gated by process/bundle identity and actual NVMTL CAMetalLayer
+drawables. Do not disable Zink, change camera buffers/saved photos, or globally
+invert Core Image/Metal coordinates. See [validation and scope](PHOTOBOOTH-PREVIEW.md).
 
 Preserve the installer/uninstaller permanent-path repair: recover obsolete
 temporary collection references only through an unambiguous installed bundle
@@ -316,8 +365,12 @@ ZZZ and Honkai: Star Rail Global D3D11 gameplay are user-confirmed on RTX 2060
 SUPER / Tahoe 26.7.1 with YAAGL Wine 11.0-1, including scenery, characters and UI.
 HSR uses its Jadeite route with the required `--` separator; Steam Patch and the
 timeout fix default off for HSR/GI and on for ZZZ. Preserve these game-specific
-defaults. GI, CN gameplay, commercial CrossOver, other Wine builds and Sequoia
-hardware remain unqualified.
+defaults. A 2026-10-31 user report confirms GI startup and in-world rendering on
+RTX 4060 Laptop / native NVK with both Steam Patch and Timeout fix enabled.
+Document that tested GI configuration separately from its current default-off
+settings; do not apply it to HSR. The report did not specify OS/Wine versions.
+CN gameplay, commercial CrossOver, other Wine builds and Sequoia Wine hardware
+remain unqualified.
 Native and Windows Vulkan/D3D11 probes verify correctness, not an FPS improvement.
 D3D12 integration now includes pinned vkd3d-proton 3.1, optional NVIDIA Wine
 NGX/DXVK-NVAPI, and a GPU-copy bitmap HUD. ZZZ D3D12 and DLSS SR Quality were
