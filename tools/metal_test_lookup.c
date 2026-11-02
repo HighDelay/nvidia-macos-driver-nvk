@@ -9,7 +9,9 @@
 extern int gpu_bundle_find_trusted(const char *,char *,size_t);
 static int lookup(const char *name,char *output,size_t bytes) {
     const char *bundle=getenv("NM_TEST_METAL_BUNDLE");
-    if (bundle && (!strcmp(name,"NVMTLDriver") || !strcmp(name,"NVMTLDriver.bundle"))) {
+    // Metal may prefix the registry's relative Library/GPUBundles path.
+    const char *leaf=strrchr(name,'/'); leaf=leaf?leaf+1:name;
+    if (bundle && (!strcmp(leaf,"NVMTLDriver") || !strcmp(leaf,"NVMTLDriver.bundle"))) {
         char path[PATH_MAX];
         if (!realpath(bundle,path) || strlen(path)+1>bytes)return -1;
         memcpy(output,path,strlen(path)+1);

@@ -160,7 +160,7 @@ static int nvmtl_gsub_finish(NVMTLSubmissionPart *part) {
 @end
 /*WS*/
 @implementation NVMTLCommandBuffer
-- (void)nvmtlMarkScheduled { scheduled++; }
+- (void)nvmtlMarkScheduled { assert(begins>finishes && !submitResult); scheduled++; }
 - (void)nvmtlCollectDeviceTiming:(Commands *)commands {}
 - (void)nvmtlFinishExecution:(NSError *)error { _cbError=error; _executionDone=YES; nvmtl_ws_mark_ready(self); }
 """
@@ -201,25 +201,25 @@ int main(void) { @autoreleasepool {
     memset(cpu,31,16); expectedPixel=31; writtenPixel=47; event->expected=47;
     NVMTLCommandBuffer *cb=makeCommand(resources,event);
     assert([cb nvmtlAdvancePart]);
-    assert(cb->_executionDone && !cb->_cbError && waits==1 && uploads==1 && downloads==1 && event->signals==1);
+    assert(cb->_executionDone && !cb->_cbError && begins==1 && finishes==1 && !waits && scheduled==1 && uploads==1 && downloads==1 && event->signals==1);
     // Failed submissions must neither download untrusted bytes nor signal completion.
     submitResult=-1; expectedPixel=61; memset(cpu,61,16);
     cb=makeCommand(resources,event); assert([cb nvmtlAdvancePart]);
-    assert(cb->_cbError && uploads==2 && downloads==1 && event->signals==1 && cpu[0]==61);
+    assert(cb->_cbError && uploads==2 && downloads==1 && event->signals==1 && cpu[0]==61 && scheduled==1);
     submitResult=0; expectedPixel=73; writtenPixel=89; memset(cpu,73,16);
     cb=makeCommand([NSSet setWithObjects:t,v,nil],event); event->expected=89;
     const char *lift=getenv("NVMTL_GSUB_HOSTPTR_LIFT");
     if (!lift) {
         assert(![cb nvmtlSubmitAhead]); // Texture views retain the default host-pointer hold.
-        assert(!begins && uploads==2 && !cb->_nextSubmit);
+        assert(begins==2 && uploads==2 && !cb->_nextSubmit);
     } else {
         allocationFails=YES;
-        assert(![cb nvmtlSubmitAhead] && uploads==2 && !begins && !cb->_nextSubmit);
+        assert(![cb nvmtlSubmitAhead] && uploads==2 && begins==2 && !cb->_nextSubmit);
         allocationFails=NO;
-        assert([cb nvmtlSubmitAhead] && begins==1 && uploads==3 && downloads==1);
+        assert([cb nvmtlSubmitAhead] && begins==3 && uploads==3 && downloads==1);
         memset(cpu,101,16); // Finishing an ahead submission must not upload again.
         assert([cb nvmtlAdvancePart]);
-        assert(finishes==1 && waits==2 && uploads==3 && downloads==2 && cpu[0]==89 && event->signals==2);
+        assert(finishes==2 && !waits && uploads==3 && downloads==2 && cpu[0]==89 && event->signals==2 && scheduled==2);
         assert(cb->_executionDone && !cb->_cbError);
         submitResult=-1; expectedPixel=113; memset(cpu,113,16);
         cb=makeCommand([NSSet setWithObject:v],event);

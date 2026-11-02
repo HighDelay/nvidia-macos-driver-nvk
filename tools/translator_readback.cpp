@@ -1,6 +1,7 @@
 // Bounded, offscreen compute readbacks using a selected built NVMTL plugin.
 // Nothing is installed. Keep this header and the selected plugin at matching revisions.
 #include <mach/mach.h>
+#include <vulkan/vulkan.h>
 extern "C" {
 #include "../plugin/nvmtl_vk.h"
 }

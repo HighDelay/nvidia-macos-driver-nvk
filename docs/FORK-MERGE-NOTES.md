@@ -23,6 +23,46 @@ uses the actual old snapshot as its explicit three-way base and records the
 new upstream head as a parent; do not replay already integrated changes from
 the rewritten history. The preceding 2.6.4 base was `f95f4d2`.
 
+## ANGLE terminal and IOSurface handoff, 2026-11-02
+
+Preserve early immutable resource-object forwarding in the translator's borrowed
+and owned input paths, followed by the existing builder-field pass. Internal
+helpers must be inlined before texture/sampler aliases are modeled. A no-op cast
+of an alloca's base can name its first pointer field when used only for pointer
+loads/stores; whole-object lifetime and escaping uses keep their original address.
+Keep unique-store, type, dominance and escape checks. Previously xterm's ANGLE
+glyph shader compiled successfully with all texture reads replaced by zero;
+forwarding only nonzero fields still lost atlas slot zero. Keep the descriptor
+band/count refusals, sampler specialization and buffer-address guards.
+
+Report scheduled GPU work only after successful submission. For IOSurface handoff,
+check the actual protection of every non-drawable output: shared VRAM alone does
+not order another process's reads. WindowServer's accepted pending marks plus
+early dirty publication retain asynchronous scheduling. Private outputs, refused
+early dirty marks and other unfenced outputs publish before scheduled callbacks.
+Keep explicit scheduling diagnostic overrides, event reservations, submit-ahead,
+resource/quarantine lifetimes, callback order and the serial presentation queue.
+Do not replace this policy with an all-command-buffer completion wait or add the
+global `NVMTL_SCHEDULE_AFTER_SURFACE_WRITES=1` workaround to the shipped config.
+
+Validation: 2,230 library tests and 43 wrapper tests pass; the wrapper's two ignores
+and two unavailable private-fixture exclusions remain. All 16 pages of the actual
+ANGLE glyph shader pass distinct-color GPU readback on RTX 2060 SUPER / Tahoe
+26.7.1. The original VS Code terminal renders with WebGL, ANGLE Metal, Graphite
+and the GPU sandbox enabled. A 64-frame IOSurface handoff probe changes from
+64 stale reads to zero; forcing the old policy on the candidate restores stale
+reads. Callback, queue, publication, resource lifetime and Photo Booth regressions
+pass, including 32 Core Image pixel/orientation frames. The user confirms terminal
+text and no observed flicker after relaunching their apps. A separate 30-second
+Edge capture remains steady on both builds, so it is not an independent flicker
+reproduction or an endurance qualification. Claude and Sequoia remain untested.
+Three broader integration harnesses retain nine failures on both the baseline
+and candidate: four corpus sweeps expect at least 20 fixtures where this checkout
+has five, and five reflection checks omit the existing bindless image-heap binding.
+Do not present those harnesses as passing or weaken their assertions for this fix.
+Only the plugin and translator change; kernel and Zink binaries are reused.
+Keep the current local-test/release hold until the user changes it.
+
 ## PR #5 optimization branch integration, 2026-11-02
 
 PR #5 (`3e28b36`) is integrated into HighDelay `main` at `b240c97`, with

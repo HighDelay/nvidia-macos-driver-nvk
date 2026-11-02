@@ -19,6 +19,8 @@ parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument('--plugin', type=Path, required=True)
 parser.add_argument('--translator', type=Path, required=True)
 parser.add_argument('--tools', type=Path, required=True, help='directory with spirv-val/dis')
+parser.add_argument('--headers', type=Path, default=Path.home() / 'Vulkan-Headers/include',
+                    help='Vulkan headers matching the selected plugin')
 parser.add_argument('--out', type=Path, required=True)
 parser.add_argument('--cases', nargs='+')
 parser.add_argument('--prepare-only', action='store_true')
@@ -178,7 +180,8 @@ translator.nvmtl_translate_set_caps.argtypes = [ctypes.c_uint32]
 translator.nvmtl_translate_set_caps(3)
 binary = args.out / 'translator_readback'
 if not args.prepare_only:
-    subprocess.run(['xcrun', 'clang++', '-std=c++17', '-O1', str(ROOT / 'tools/translator_readback.cpp'), '-o', str(binary)], check=True)
+    subprocess.run(['xcrun', 'clang++', '-std=c++17', '-O1', '-I' + str(args.headers),
+                    str(ROOT / 'tools/translator_readback.cpp'), '-o', str(binary)], check=True)
 results = []
 for mode in args.cases or kernels:
     ll = kernels[mode]
