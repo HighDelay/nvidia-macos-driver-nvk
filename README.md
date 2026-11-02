@@ -29,6 +29,10 @@ kernel collection. Do not also inject these kexts through `EFI/OC/Kexts`.
 `Verify.command` checks the complete package and runs GPU/CGL diagnostics.
 See the [package guide](docs/COMBINED-INSTALL.md).
 
+The installer offers experimental **Intel laptop panel support** (`NMIntelFB`),
+default **No**, for internal screens wired to an unsupported Intel GPU. Existing
+opt-ins survive updates. See [when to enable it](docs/INTEL-PANEL.md).
+
 ## 1401 Mac app
 
 Download the upstream [1401 Mac app](https://github.com/nullmoth/1401/releases),
@@ -72,8 +76,8 @@ Install the Zink-enabled package for **Sequoia 15.5+ or Tahoe**, then launch
 Minecraft with **OpenGL**. No companion mod, mod loader or JVM argument is
 needed. F3/logs should show **zink** and **NVK**; Minecraft's VSync toggle works.
 
-Sequoia 15.8.1 / RTX 2070 SUPER passes all 25 isolated tests; system-wide boot and
-gameplay remain pending. Tahoe Minecraft gameplay is verified.
+Minecraft gameplay is verified on Tahoe and Sequoia 15.8.1 / RTX 2070 SUPER
+with 256 MiB BAR1, including the small-BAR crash and black-window repair.
 [Compatibility, builds and test results](docs/ZINK-OPENGL.md).
 
 ### Official Vulkan renderer with NVK Bridge
@@ -104,8 +108,9 @@ For **ZZZ, Genshin Impact or Honkai: Star Rail**, use
 [YAAGL NVK](https://github.com/HighDelay/yaagl-nvk/releases) and its
 [setup guide](https://github.com/HighDelay/yaagl-nvk/blob/main/docs/NVK.md).
 It downloads Wine and uses this driver's installed graphics runtime.
-ZZZ/HSR Global gameplay and ZZZ D3D12/DLSS SR are verified; GI and commercial CrossOver
-remain unqualified. DLSSG and ray tracing are unqualified.
+ZZZ/HSR Global gameplay, GI in-game rendering and ZZZ D3D12/DLSS SR are verified.
+For GI, enable **Steam Patch** and **Timeout fix**. Commercial CrossOver, DLSSG
+and ray tracing remain unqualified.
 
 ## OBS display capture
 
@@ -113,6 +118,14 @@ OBS compatibility is **enabled automatically for OBS only**: Apple's OpenGL
 renderer plus **8-bit BGRA SDR capture**. Other apps continue using Zink.
 Select your display in **macOS Screen Capture**.
 [Details and opt-out](docs/ZINK-OPENGL.md#obs-display-capture-compatibility).
+
+## Additional video codecs
+
+The codec addon adds **VP8/VP9 hardware decoding on RTX 20**, retaining the
+existing H.264/HEVC encoders. VP9 supports 8-bit and 10-bit VideoToolbox output.
+VP8/VP9 encoding uses software; Turing has no AV1 hardware support.
+Existing Ada/Ampere codec paths are retained.
+[Setup, application limits and builds](video/INSTALL.md).
 
 ## Build from source
 

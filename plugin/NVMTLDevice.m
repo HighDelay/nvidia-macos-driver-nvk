@@ -146,6 +146,7 @@ static void nvmtl_alloc_failed(const char *what) {
 @interface NVMTLDevice : MTLIOAccelDevice <MTLDevice, MTLDeviceSPI>
 @end
 #import "NVMTLObjects.h"
+static void nvmtl_photobooth_install(void);
 void nvmtl_vendor_compile_airs(NSDictionary<NSString *, NSString *> *airs,
                                NSDictionary<NSString *, NSString *> *stages);
 void nvmtl_vendor_attach_sass(id device, id pipelineState, id function);
@@ -585,6 +586,9 @@ static bool nvmtl_process_is_allowed(void)
     }
     fclose(f);
     if (ok) nvlog("  allow-listed: %s", me);
+    // a list that was read but grants nothing to this process said so nowhere, so a field log showed only the final
+    // refusal and could not tell an empty or replaced list from a deny rule
+    else nvlog("  no rule in nvmtl-allow.txt matches %s: no device (the list was read; it needs a '*' or '%s' line)", me, me);
     return ok;
 }
 
@@ -643,6 +647,7 @@ static void nvmtl_install_hw_resource_pools(id dev)
         return nil;
     }
     nvmtl_gl_caps_enable();
+    nvmtl_photobooth_install();
     if (nvmtl_vk_vendor() == 0x10de) {   /* NVDEC/NVENC are NVIDIA engines reached through NVRM */
         nvmtl_nvdec_register();
         nvmtl_nvenc_register();
@@ -758,6 +763,10 @@ static int nvmtl_pixfmt(MTLPixelFormat f, uint32_t *vk, uint32_t *bpp, int *a8)
     *a8 = 0;
     switch (f) {
     case MTLPixelFormatA8Unorm:          *vk = 9  ;               *bpp = 1;  *a8 = 1; return 0;
+    // Apple's private ARGB8 format: AppleMetalOpenGLRenderer asks for it when a GL_RGBA8 texture is uploaded as GL_BGRA +
+    // GL_UNSIGNED_INT_8_8_8_8 (bytes A,R,G,B; Unity 5's ARGB32 textures). Stored as RGBA8, the view swizzle reorders it
+    // (a8 = 2). WAS nil, so the GL texture was "unloadable" and sampled as zero: Homeworld: Deserts of Kharak's UI sprites.
+    case (MTLPixelFormat)84:             *vk = 37 ;         *bpp = 4;  *a8 = 2; return 0;
     case MTLPixelFormatR8Unorm:          *vk = 9  ;               *bpp = 1;  return 0;
     case MTLPixelFormatR8Unorm_sRGB:     *vk = 15 ;                *bpp = 1;  return 0;
     case MTLPixelFormatR8Snorm:          *vk = 10 ;               *bpp = 1;  return 0;
@@ -1113,6 +1122,15 @@ static int nvmtl_surface_image_create(NVMTLTexture *t, IOSurfaceRef surf, NSUInt
             nvk_buffer vb; uint64_t born = 0;
             if (!nvmtl_vram_keep_get(0, surf, 0, row * h, &vb, &born)) {
                 if (!nvmtl_vk_image_create_buffer_alias(w, h, vkf, bpp, a8, stex, 1, &vb, 0, row, &t->_i)) {
+                    // Linear imports may drop storage usage even when the
+                    // optimal format supports it. A writable drawable then
+                    // needs the private-image path, rather than a false usage
+                    // claim or another Core Image nil render destination.
+                    if (stex && !t->_i.storage) {
+                        nvmtl_vk_image_destroy(&t->_i);
+                        nvmtl_vk_buffer_destroy(&vb);
+                        goto private_image;
+                    }
                     t->_vramBorn = born;
                     t->_vramBuf = vb; t->_vramOn = YES; g_surf_vram++;
                     uint32_t seed = IOSurfaceGetSeed(surf);
@@ -1127,6 +1145,7 @@ static int nvmtl_surface_image_create(NVMTLTexture *t, IOSurfaceRef surf, NSUInt
             }
         }
     }
+private_image:
     g_surf_private++;
     // A private image stands for the whole surface: wrappers that read it and wrappers that write it must share ONE image
     // (nvmtlNewSurfaceTexture caches it), or what one writes the other never sees. So it is made writable whenever the
@@ -1142,6 +1161,29 @@ static int nvmtl_surface_image_create(NVMTLTexture *t, IOSurfaceRef surf, NSUInt
     const int rc = nvmtl_vk_image_create_typed(w, h, vkf, bpp, a8, 1, stex, 2u, 1u, &t->_i);
     if (!rc && surf) (void)nvmtl_vram_keep_get(1, surf, plane, 0, &t->_hostPages, &t->_vramBorn);
     return rc;
+}
+
+// A CAMetalLayer drawable with framebufferOnly=NO is, on real Metal, usable as a render target AND a compute/Core Image
+// destination. QuartzCore hands this driver a descriptor whose usage is only ShaderRead for it, so Core Image refuses the
+// texture ("texture usage must include MTLTextureUsageShaderWrite") and Photo Booth's preview stays black. The surface's
+// backing must actually have a storage view, including the shared-VRAM import,
+// before reporting ShaderWrite.
+// WindowServer keeps the usage it asked for: it wraps hundreds of surfaces a second, none of them Core Image targets.
+static BOOL nvmtl_surface_widen_usage(BOOL fbo) {
+    static int ws = -1;
+    if (ws < 0) { const char *me = getprogname(); ws = me && !strcmp(me, "WindowServer"); }
+    return !fbo && !ws;
+}
+static NSUInteger nvmtl_surface_usage(NSUInteger usage, BOOL fbo, BOOL storage) {
+    // Preserve Unknown when writes need an optimal-tiled storage twin. With
+    // real writable backing, eligible app drawables still need explicit bits:
+    // Core Image rejects Photo Booth's Unknown descriptor without ShaderWrite.
+    if (usage == MTLTextureUsageUnknown && !storage) return usage;
+    if (nvmtl_surface_widen_usage(fbo)) {
+        usage |= MTLTextureUsageShaderRead | MTLTextureUsageRenderTarget;
+        if (storage) usage |= MTLTextureUsageShaderWrite;
+    }
+    return usage;
 }
 
 static char nvmtl_surface_cache_key;
@@ -1165,6 +1207,10 @@ static char nvmtl_surface_cache_key;
     uint32_t vkf = 0, bpp = 0; int a8 = 0;
     if (nvmtl_pixfmt(d.pixelFormat, &vkf, &bpp, &a8)) return nil;
     int wantStex = (d.usage & MTLTextureUsageShaderWrite) != 0;
+    // Core Image can receive a ShaderRead-only descriptor for a non-FBO
+    // drawable. Request the real storage view before importing family VRAM;
+    // the private fallback already makes eligible formats writable.
+    if (!wantStex && nvmtl_surface_widen_usage(t->_fbo) && !a8 && nvmtl_vk_format_is_storage(vkf)) wantStex = 1;
     NSArray *key = surf ? @[@(IOSurfaceGetID(surf)), @(plane), @(w), @(h), @(d.pixelFormat), @(t->_ropt), @(t->_fbo)] : nil;
     NVMTLTexture *backing = key ? [cache objectForKey:key] : nil;
     // Failed BAR imports use a private image. Repeated wrappers of the same
@@ -1174,7 +1220,7 @@ static char nvmtl_surface_cache_key;
     if (backing && !backing->_vramOn) {
         NVMTLTexture *alias = (NVMTLTexture *)[backing newTextureViewWithPixelFormat:d.pixelFormat];
         if (alias) {
-            alias->_viewParent = nil; alias->_usage = d.usage; alias->_ropt = t->_ropt; alias->_fbo = t->_fbo;
+            alias->_viewParent = nil; alias->_usage = nvmtl_surface_usage(d.usage, t->_fbo, alias->_stex); alias->_ropt = t->_ropt; alias->_fbo = t->_fbo;
             nvmtl_texture_desc_swizzle(alias, d);
             return alias;
         }
@@ -1186,7 +1232,7 @@ static char nvmtl_surface_cache_key;
     t->_plane = plane;
     t->_fmt = d.pixelFormat;
     t->_stex = t->_i.storage != 0;
-    t->_usage = d.usage;
+    t->_usage = nvmtl_surface_usage(d.usage, t->_fbo, t->_stex);
     nvmtl_texture_desc_swizzle(t, d);
     if (key && !t->_vramOn) [cache setObject:t forKey:key];
     nvlog("newTextureWithDescriptor:iosurface:%p plane:%lu -> %p (%zux%zu fmt %lu)",
@@ -1679,6 +1725,10 @@ void nvmtl_gl_tag_reflection(id refl, MTLRenderPipelineDescriptor *d);
         uint32_t svk = 0, sbpp = 0; int sa8 = 0;
         if (nvmtl_pixfmt(ca.pixelFormat, &svk, &sbpp, &sa8))
             return nvmtl_fail(err, [NSString stringWithFormat:@"pipeline: colour attachment %u pixel format %lu not carried by this driver", i, (unsigned long)ca.pixelFormat]);
+        // ARGB8 (84) is sampled through a reordering view swizzle, which a colour attachment does not get, and the A8
+        // remapping below would treat it as a one-channel target. Refused, as it was before the format was carried.
+        if (sa8 == 2)
+            return nvmtl_fail(err, [NSString stringWithFormat:@"pipeline: colour attachment %u pixel format %lu (ARGB8) is not carried as a render target", i, (unsigned long)ca.pixelFormat]);
         if (nvmtl_blend_from(ca, noFrag, sa8, &rt.blend[i]))
             return nvmtl_fail(err, [NSString stringWithFormat:@"pipeline: colour attachment %u has a blend factor or operation this driver cannot translate (the reason is the preceding \"blend:\" log line)", i]);
         if (sa8) {
@@ -2107,6 +2157,8 @@ static void nvmtl_log_compute_descriptor(MTLComputePipelineDescriptor *d) {
     return [self heapAccelerationStructureSizeAndAlignWithSize:s.accelerationStructureSize];
 }
 - (BOOL)supportsBCTextureCompression { return YES; }
+- (BOOL)supportsRasterizationRateMapWithLayerCount:(NSUInteger)count { return NO; }
+- (id<MTLRasterizationRateMap>)newRasterizationRateMapWithDescriptor:(MTLRasterizationRateMapDescriptor *)descriptor { return nil; }
 - (BOOL)supportsInt64 { return YES; }
 - (BOOL)isQuadDataSharingSupported { return YES; }
 - (BOOL)supportsCounterSampling:(MTLCounterSamplingPoint)p {
@@ -2326,6 +2378,7 @@ static void nvmtl_log_compute_descriptor(MTLComputePipelineDescriptor *d) {
 @end
 
 #import "NVMTLDevice_contract.m"
+#import "NVMTLPhotoBooth.m"
 
 #import "NVMTLObjects.m"
 #import "NVMTLForward.m"

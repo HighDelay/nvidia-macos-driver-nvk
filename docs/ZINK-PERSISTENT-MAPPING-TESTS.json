@@ -1,0 +1,217 @@
+{
+  "baseline_commit": "5c23543da56afe550d2d448d77ad64943456b04b",
+  "report": "https://mclo.gs/ZUBuDRI",
+  "reported_macos": "15.8.1",
+  "reported_gpu": "RTX 2070 SUPER",
+  "reported_bar1_mib": 256,
+  "reported_mod_count": 146,
+  "reported_window": "Entire window black",
+  "failing_maps_in_report": 3,
+  "report_does_not_identify_failed_memory_type": true,
+  "baseline_cases": [
+    {
+      "case": "upload",
+      "returncode": 0,
+      "seconds": 0.734
+    },
+    {
+      "case": "map-failure",
+      "returncode": 0,
+      "seconds": 0.716
+    },
+    {
+      "case": "read-failure",
+      "returncode": 0,
+      "seconds": 0.74
+    },
+    {
+      "case": "full-bar",
+      "returncode": 0,
+      "seconds": 0.621
+    },
+    {
+      "case": "persistent",
+      "returncode": 1,
+      "seconds": 0.593
+    },
+    {
+      "case": "persistent-coherent",
+      "returncode": 0,
+      "seconds": 0.715
+    },
+    {
+      "case": "full-bar-persistent",
+      "returncode": 0,
+      "seconds": 0.645
+    }
+  ],
+  "candidate_cases": [
+    {
+      "case": "upload",
+      "returncode": 0,
+      "seconds": 0.703
+    },
+    {
+      "case": "map-failure",
+      "returncode": 0,
+      "seconds": 0.575
+    },
+    {
+      "case": "read-failure",
+      "returncode": 0,
+      "seconds": 0.585
+    },
+    {
+      "case": "full-bar",
+      "returncode": 0,
+      "seconds": 0.608
+    },
+    {
+      "case": "persistent",
+      "returncode": 0,
+      "seconds": 0.735
+    },
+    {
+      "case": "persistent-coherent",
+      "returncode": 0,
+      "seconds": 0.677
+    },
+    {
+      "case": "full-bar-persistent",
+      "returncode": 0,
+      "seconds": 0.641
+    },
+    {
+      "case": "hardware",
+      "returncode": 0,
+      "seconds": 0.593
+    },
+    {
+      "case": "hardware-persistent",
+      "returncode": 0,
+      "seconds": 0.536
+    }
+  ],
+  "candidate_gpu_cgl_cases_passed": 31,
+  "local_hardware": "RTX 2060 SUPER / Tahoe 26.7.1 25G241",
+  "candidate_zink_sha256": "799856373fb52eec90a21640f5201a293d8a7a9590cf7a96fe1cc4fa668ff39f",
+  "affected_sequoia_game_retested": false,
+  "published_release_changed": false,
+  "log_sha256": {
+    "baseline/persistent-coherent.log": "41a5c076fa53a99d59523838d79fb9c7b0537dc6bc51945cbf0be26501b30c78",
+    "baseline/full-bar-persistent.log": "3bfd68c6286520c522476fba4667d301588131734b83651af01d20f4e2c7187a",
+    "baseline/map-failure.log": "bd6f4e977ee42dbe720bca5a5f8c54212e4c4ce4b86c1996f97f594ed9133291",
+    "baseline/upload.log": "27d6721de61be173ff9c259ac41ae76f9b4aeb4f39cbd296a433d344cf695c99",
+    "baseline/read-failure.log": "8de2abc338db65709ea3707c8fb8364ac0644a15fe238aede790c3cbb34dc7fe",
+    "baseline/full-bar.log": "65ad2cd725e910da7876eac1314a03ae60f3bb6dcddec252623c0ac8b5041226",
+    "baseline/persistent.log": "f099eed0fc32bb97c11dfa219e82a6c82dd71946feb3706b326ca48a4f63b492",
+    "repaired-mapping/persistent-coherent.log": "739a2641225bb05c8b21fd32f34676f173eac4693d147d037f5c061f8c290e4d",
+    "repaired-mapping/hardware.log": "64afc1c7c23a96025ffac8b3e10becebe428a4de765019ac174548324d6b1593",
+    "repaired-mapping/hardware-persistent.log": "fab457d7641c971ca0ab6de237ed54fa6504ae60de94f61a50e3763b7e810be9",
+    "repaired-mapping/full-bar-persistent.log": "2cc87218c372609bf8541a2bddb6fce379ef7ab4e4e4e97d1348d8fe4bf6d15c",
+    "repaired-mapping/map-failure.log": "d623762be42bb620f3951b4ea32f9313b590b5569436668c5d2d2fdb07d74327",
+    "repaired-mapping/upload.log": "7a459fc5f4c3fc9e00ef00fd215d03c622d2a632be4228924cd175651c65fd55",
+    "repaired-mapping/read-failure.log": "0dcd295e739e0baf314f94633890c18dea12039fc57d7e83e0c8e295dafc544c",
+    "repaired-mapping/full-bar.log": "01ebe81eacaac87f07c5cde1558f871fa48b4af2e53421b3012b7e21b8257be3",
+    "repaired-mapping/persistent.log": "739a2641225bb05c8b21fd32f34676f173eac4693d147d037f5c061f8c290e4d"
+  },
+  "trial_end_to_end": {
+    "installed_cases": [
+      {
+        "runtime": "installed",
+        "case": "upload",
+        "returncode": 0
+      },
+      {
+        "runtime": "installed",
+        "case": "map-failure",
+        "returncode": 0
+      },
+      {
+        "runtime": "installed",
+        "case": "read-failure",
+        "returncode": 0
+      },
+      {
+        "runtime": "installed",
+        "case": "full-bar",
+        "returncode": 0
+      },
+      {
+        "runtime": "installed",
+        "case": "persistent",
+        "returncode": 1
+      },
+      {
+        "runtime": "installed",
+        "case": "persistent-coherent",
+        "returncode": 0
+      },
+      {
+        "runtime": "installed",
+        "case": "full-bar-persistent",
+        "returncode": 0
+      },
+      {
+        "runtime": "installed",
+        "case": "hardware",
+        "returncode": 0
+      },
+      {
+        "runtime": "installed",
+        "case": "hardware-persistent",
+        "returncode": 0
+      }
+    ],
+    "candidate_cases": [
+      {
+        "runtime": "candidate",
+        "case": "upload",
+        "returncode": 0
+      },
+      {
+        "runtime": "candidate",
+        "case": "map-failure",
+        "returncode": 0
+      },
+      {
+        "runtime": "candidate",
+        "case": "read-failure",
+        "returncode": 0
+      },
+      {
+        "runtime": "candidate",
+        "case": "full-bar",
+        "returncode": 0
+      },
+      {
+        "runtime": "candidate",
+        "case": "persistent",
+        "returncode": 0
+      },
+      {
+        "runtime": "candidate",
+        "case": "persistent-coherent",
+        "returncode": 0
+      },
+      {
+        "runtime": "candidate",
+        "case": "full-bar-persistent",
+        "returncode": 0
+      },
+      {
+        "runtime": "candidate",
+        "case": "hardware",
+        "returncode": 0
+      },
+      {
+        "runtime": "candidate",
+        "case": "hardware-persistent",
+        "returncode": 0
+      }
+    ],
+    "candidate_all_passed": true,
+    "trial_library_only_relocated_and_resigned": true
+  },
+  "trial_apply_rollback_unit_cases_passed": 5
+}

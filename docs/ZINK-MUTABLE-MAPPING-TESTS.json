@@ -1,0 +1,510 @@
+{
+  "kind": "Small mutable buffer BAR map regression",
+  "host": "Tahoe 26.7.1, RTX 2060 SUPER, physical full BAR; small BAR simulated by process-local proxy",
+  "remote_report": {
+    "url": "https://mclo.gs/AOcQq7s",
+    "system": "Sequoia 15.8.1 (24H32), RTX 2070 SUPER, 256 MiB BAR1",
+    "mods": "Fresh Fabric and Fabric API only",
+    "v1_library_sha256": "596e157e16ea8c98be053cd1cdd061e7934e62fc8f31aceb4c06fa766c66afa8",
+    "game_result": "entire window black; three 2097152-byte type 1 BAR maps fail",
+    "probe_runs_passed": 18
+  },
+  "baseline_commit": "6d4bbb5a666e32e99ad41fa27fd527238b99b002",
+  "baseline": [
+    {
+      "case": "upload",
+      "returncode": 0,
+      "seconds": 0.819
+    },
+    {
+      "case": "map-failure",
+      "returncode": 0,
+      "seconds": 0.709
+    },
+    {
+      "case": "read-failure",
+      "returncode": 0,
+      "seconds": 0.621
+    },
+    {
+      "case": "full-bar",
+      "returncode": 0,
+      "seconds": 0.614
+    },
+    {
+      "case": "persistent",
+      "returncode": 0,
+      "seconds": 0.614
+    },
+    {
+      "case": "persistent-coherent",
+      "returncode": 0,
+      "seconds": 0.596
+    },
+    {
+      "case": "full-bar-persistent",
+      "returncode": 0,
+      "seconds": 0.609
+    },
+    {
+      "case": "hardware",
+      "returncode": 0,
+      "seconds": 0.551
+    },
+    {
+      "case": "hardware-persistent",
+      "returncode": 0,
+      "seconds": 0.603
+    },
+    {
+      "case": "small-static",
+      "returncode": 1,
+      "seconds": 0.55
+    },
+    {
+      "case": "small-dynamic",
+      "returncode": 1,
+      "seconds": 0.613
+    },
+    {
+      "case": "full-bar-small-static",
+      "returncode": 0,
+      "seconds": 0.616
+    },
+    {
+      "case": "hardware-small-static",
+      "returncode": 0,
+      "seconds": 0.66
+    }
+  ],
+  "candidate": [
+    {
+      "case": "upload",
+      "returncode": 0,
+      "seconds": 0.966
+    },
+    {
+      "case": "map-failure",
+      "returncode": 0,
+      "seconds": 0.936
+    },
+    {
+      "case": "read-failure",
+      "returncode": 0,
+      "seconds": 0.945
+    },
+    {
+      "case": "full-bar",
+      "returncode": 0,
+      "seconds": 0.817
+    },
+    {
+      "case": "persistent",
+      "returncode": 0,
+      "seconds": 0.775
+    },
+    {
+      "case": "persistent-coherent",
+      "returncode": 0,
+      "seconds": 0.788
+    },
+    {
+      "case": "full-bar-persistent",
+      "returncode": 0,
+      "seconds": 0.71
+    },
+    {
+      "case": "hardware",
+      "returncode": 0,
+      "seconds": 0.848
+    },
+    {
+      "case": "hardware-persistent",
+      "returncode": 0,
+      "seconds": 0.63
+    },
+    {
+      "case": "small-static",
+      "returncode": 0,
+      "seconds": 0.642
+    },
+    {
+      "case": "small-dynamic",
+      "returncode": 0,
+      "seconds": 0.676
+    },
+    {
+      "case": "full-bar-small-static",
+      "returncode": 0,
+      "seconds": 0.613
+    },
+    {
+      "case": "hardware-small-static",
+      "returncode": 0,
+      "seconds": 0.655
+    }
+  ],
+  "gpu_cgl_results": [
+    {
+      "case": "mesa-synchronization",
+      "returncode": 0,
+      "seconds": 0.043
+    },
+    {
+      "case": "standalone",
+      "returncode": 0,
+      "seconds": 0.568
+    },
+    {
+      "case": "private-icd-selection",
+      "returncode": 0,
+      "seconds": 0.658
+    },
+    {
+      "case": "core",
+      "returncode": 0,
+      "seconds": 0.853
+    },
+    {
+      "case": "core32",
+      "returncode": 0,
+      "seconds": 0.691
+    },
+    {
+      "case": "legacy",
+      "returncode": 0,
+      "seconds": 0.881
+    },
+    {
+      "case": "gld-core",
+      "returncode": 0,
+      "seconds": 0.75
+    },
+    {
+      "case": "gld-core32",
+      "returncode": 0,
+      "seconds": 0.751
+    },
+    {
+      "case": "gld-legacy",
+      "returncode": 0,
+      "seconds": 0.821
+    },
+    {
+      "case": "gld-apple-iosurface",
+      "returncode": 0,
+      "seconds": 0.509
+    },
+    {
+      "case": "obs-default",
+      "returncode": 0,
+      "seconds": 0.55
+    },
+    {
+      "case": "obs-preference-on",
+      "returncode": 0,
+      "seconds": 0.471
+    },
+    {
+      "case": "obs-preference-off",
+      "returncode": 0,
+      "seconds": 0.753
+    },
+    {
+      "case": "obs-environment-off",
+      "returncode": 0,
+      "seconds": 1.018
+    },
+    {
+      "case": "obs-environment-on",
+      "returncode": 0,
+      "seconds": 0.553
+    },
+    {
+      "case": "obs-invalid-environment",
+      "returncode": 0,
+      "seconds": 0.407
+    },
+    {
+      "case": "gld-window",
+      "returncode": 0,
+      "seconds": 1.505
+    },
+    {
+      "case": "gld-rgbx-worker",
+      "returncode": 0,
+      "seconds": 2.015
+    },
+    {
+      "case": "native-default",
+      "returncode": 0,
+      "seconds": 2.44
+    },
+    {
+      "case": "native-transparent",
+      "returncode": 0,
+      "seconds": 2.499
+    },
+    {
+      "case": "native-worker",
+      "returncode": 0,
+      "seconds": 2.534
+    },
+    {
+      "case": "native-reject",
+      "returncode": 0,
+      "seconds": 2.853
+    },
+    {
+      "case": "native-uncertain",
+      "returncode": 0,
+      "seconds": 2.578
+    },
+    {
+      "case": "native-gld-auto",
+      "returncode": 0,
+      "seconds": 2.569
+    },
+    {
+      "case": "native-gld-worker",
+      "returncode": 0,
+      "seconds": 2.643
+    },
+    {
+      "case": "native-multiple-windows",
+      "returncode": 0,
+      "seconds": 2.894
+    },
+    {
+      "case": "native-swap-interval",
+      "returncode": 0,
+      "seconds": 3.268
+    },
+    {
+      "case": "native-gld-swap-interval",
+      "returncode": 0,
+      "seconds": 3.644
+    },
+    {
+      "case": "native-obs-policy-isolation",
+      "returncode": 0,
+      "seconds": 2.466
+    },
+    {
+      "case": "native-optout-zero",
+      "returncode": 0,
+      "seconds": 2.597
+    },
+    {
+      "case": "native-updated-os-build",
+      "returncode": 0,
+      "seconds": 2.432
+    }
+  ],
+  "trial_helper_tests_passed": 8,
+  "candidate_raw_library_sha256": "161af37d1207e02ff4411e6ce187ff224c297b8defb3ae02b220973d3cd38370",
+  "candidate_relocated_library_sha256": "e7344b127ba790b5565d0224d2ee281dd485edce2b84ab3627265618b1086d9d",
+  "source_patch_sha256": "3caaf9d7ded49bf1d0fd16cbfb464eb9e1d57cdde18a0118b75dc00168bee874",
+  "log_sha256": {
+    "mutable-buffer-baseline/full-bar-persistent.log": "4775e6027a6902f31905e3094db26592eeaeea6bd759558b6af0a0a08213006b",
+    "mutable-buffer-baseline/full-bar-small-static.log": "bab5a5b03f48b839dbbf3191c0d08b652af03bad3588e633db480d4eea33de72",
+    "mutable-buffer-baseline/full-bar.log": "f5eab44555085caba0bc9298b189ca48045f567c2901bb1ce04cef9d97bdfe97",
+    "mutable-buffer-baseline/hardware-persistent.log": "32ff40cdf977bb34ede62129c894dfcdd0a8a73ade218cd6fc36c9d437468e2e",
+    "mutable-buffer-baseline/hardware-small-static.log": "2ab46ea4b6c121298a6fae568f1cf453cf722f886ce99b007fa30697aad4a9c2",
+    "mutable-buffer-baseline/hardware.log": "9328657130685f4eb5db941020fc097998536f8f60a82ad2f602e8651b6ee15c",
+    "mutable-buffer-baseline/map-failure.log": "8964d910498cd72173b0dca74c3367a2137a4eb99bc9dec9761f71b8483865be",
+    "mutable-buffer-baseline/persistent-coherent.log": "2e412ee9cfd39fd23de264356d660641da9d9affda55482e8a68654f6dd4fad5",
+    "mutable-buffer-baseline/persistent.log": "2e412ee9cfd39fd23de264356d660641da9d9affda55482e8a68654f6dd4fad5",
+    "mutable-buffer-baseline/read-failure.log": "0693f6e34a744524a44b6b280423ecf5d606e3d50076eb377f5889fb9f87140b",
+    "mutable-buffer-baseline/small-dynamic.log": "14bfead37a7519f3bd11551d6e7a51b5501aa4dffa7330991bf99da5b173b1d2",
+    "mutable-buffer-baseline/small-static.log": "14bfead37a7519f3bd11551d6e7a51b5501aa4dffa7330991bf99da5b173b1d2",
+    "mutable-buffer-baseline/upload.log": "1977721d5e68186f18812905da7b162f4ac0bb4567980c67b0e17899c4c41ede",
+    "mutable-buffer-repaired/full-bar-persistent.log": "ff0b66bdd7d8d004da55bbfae2de05885bd14ab28225e2a1886405f9753f83fe",
+    "mutable-buffer-repaired/full-bar-small-static.log": "a9d8af3c3d53a964d889a6d36069452f0a1ab4bf5d4d4f3584ceac35e98c6d38",
+    "mutable-buffer-repaired/full-bar.log": "f654dfd4db0bf0ebee3ee856fa4332023e580f24670897a1339de02b25cf08fa",
+    "mutable-buffer-repaired/hardware-persistent.log": "f6cb2c0c3c98434e77a645aff352b9cdb3035a5d3ea5f1b1361a1d389aab21b8",
+    "mutable-buffer-repaired/hardware-small-static.log": "6b4363204673e4961bb0e807415b69756bcc0caeb051fcc03eabbad968634331",
+    "mutable-buffer-repaired/hardware.log": "31c18f9a57fbfdf15f5185f547b0b26de750840e6772c4727930030dcca56a97",
+    "mutable-buffer-repaired/map-failure.log": "3269deee8fe2887224cf35f93e8876786abaea70d268783e1c7e8aacfec17385",
+    "mutable-buffer-repaired/persistent-coherent.log": "5411b47d6f5e6cdd7df68993337dad358f8acb3cdd5fe721b24f915727cfd9e5",
+    "mutable-buffer-repaired/persistent.log": "5411b47d6f5e6cdd7df68993337dad358f8acb3cdd5fe721b24f915727cfd9e5",
+    "mutable-buffer-repaired/read-failure.log": "d428cb4719ed52e10c8d1e0f4676e39fee2bc24bffa53a8d1ef17b7207e866e6",
+    "mutable-buffer-repaired/small-dynamic.log": "aa917c3a16b5249f72338c5ea5e01cca6e70cdf2f93bb7c0d8ae58555fcf6f04",
+    "mutable-buffer-repaired/small-static.log": "aa917c3a16b5249f72338c5ea5e01cca6e70cdf2f93bb7c0d8ae58555fcf6f04",
+    "mutable-buffer-repaired/upload.log": "d7b7db8ce44b35107363f392b7137086bc2c0a7b66b6d1030e12446cbca9c4b3",
+    "runtime-tests-v2/core.log": "c1b0749f83bd7ce8c01c7ae100c9d2e89bfd048cc7084fbe5569710998225d4d",
+    "runtime-tests-v2/core32.log": "c1b0749f83bd7ce8c01c7ae100c9d2e89bfd048cc7084fbe5569710998225d4d",
+    "runtime-tests-v2/gld-apple-iosurface.log": "d1f78ba88d9d9e8dd03325664eb21e918e58ad64c8a13644ffb1f71c5e574726",
+    "runtime-tests-v2/gld-core.log": "5688a88722419d4788624611ce07abd877a06d0123d2273d3bf6b7c5034df420",
+    "runtime-tests-v2/gld-core32.log": "5688a88722419d4788624611ce07abd877a06d0123d2273d3bf6b7c5034df420",
+    "runtime-tests-v2/gld-legacy.log": "ebcb46603c3e7d18884b48b91724e5f3c6dee9e8c6774a24ebfd4204adb4bc8f",
+    "runtime-tests-v2/gld-rgbx-worker.log": "8731d24c0d6967126a8fc08524c1d2471fceeccfe3e19d9272b1632184a8f6b7",
+    "runtime-tests-v2/gld-window.log": "e759b7f0060c28faedae1295ec7d073c29c0ca8dda828566c334d4f2d7eb9fb6",
+    "runtime-tests-v2/legacy.log": "716b09b854f6f6e8942d6a29e5ae077d2fef6e5a80e5c06c706de7a95f79eed2",
+    "runtime-tests-v2/mesa-synchronization.log": "af576d9d04897deccfe5ae12857f0031a5a092b5414ae280bdb4f479b7f0fd5b",
+    "runtime-tests-v2/native-default.log": "dc750f14228e08b6ea5aecc7c2366316a999f27695e86c52871c51b1836c5366",
+    "runtime-tests-v2/native-gld-auto.log": "984909dad47a0b109bb0d48168fb9d1672e2d7c4e8ef19a89f7c770e100236d5",
+    "runtime-tests-v2/native-gld-swap-interval.log": "6c11142fdb085e394afa2ee9d1dd16a81f4e4009258ea3af1afaa550e5b7e482",
+    "runtime-tests-v2/native-gld-worker.log": "d7dbd6fcf1b8faebd1b5f8d3e5be282906691091223018acac856caa06db4f9a",
+    "runtime-tests-v2/native-multiple-windows.log": "4359aa7a7c89ea7020c857ba0a5399a3d67248f225b510dcb2c11e78bf35f3b7",
+    "runtime-tests-v2/native-obs-policy-isolation.log": "984909dad47a0b109bb0d48168fb9d1672e2d7c4e8ef19a89f7c770e100236d5",
+    "runtime-tests-v2/native-optout-zero.log": "984909dad47a0b109bb0d48168fb9d1672e2d7c4e8ef19a89f7c770e100236d5",
+    "runtime-tests-v2/native-reject.log": "100174a835d0df84882f27d118ff177854ac82a9329dc6eaa2e987631186b22f",
+    "runtime-tests-v2/native-swap-interval.log": "424455145cac9b38077d45af032e6d7b23ef38c1d4e6fdc93e89e23bff557351",
+    "runtime-tests-v2/native-transparent.log": "dc750f14228e08b6ea5aecc7c2366316a999f27695e86c52871c51b1836c5366",
+    "runtime-tests-v2/native-uncertain.log": "abb502b367f691bded6d359e2b218a352369431f95312813817401ed4361b8cb",
+    "runtime-tests-v2/native-updated-os-build.log": "4934060fc7f8f1c3e2be90633a559275e60cdd4d6843850176adc696b2172317",
+    "runtime-tests-v2/native-worker.log": "5412eadb4bd494406a3ff098bc63fbfe625af60b868ae28f23fcdf67ad1859a9",
+    "runtime-tests-v2/obs-default.log": "e238d27dddda03e60670f95aa28309be2b4baf8dcd2d0ba7c5d1e1351fa53053",
+    "runtime-tests-v2/obs-environment-off.log": "658aef3f2323db669c1fe31a571de526d65ffe8c4d705307aa51ef027ea3b8ec",
+    "runtime-tests-v2/obs-environment-on.log": "e238d27dddda03e60670f95aa28309be2b4baf8dcd2d0ba7c5d1e1351fa53053",
+    "runtime-tests-v2/obs-invalid-environment.log": "e238d27dddda03e60670f95aa28309be2b4baf8dcd2d0ba7c5d1e1351fa53053",
+    "runtime-tests-v2/obs-preference-off.log": "658aef3f2323db669c1fe31a571de526d65ffe8c4d705307aa51ef027ea3b8ec",
+    "runtime-tests-v2/obs-preference-on.log": "e238d27dddda03e60670f95aa28309be2b4baf8dcd2d0ba7c5d1e1351fa53053",
+    "runtime-tests-v2/private-icd-selection.log": "46400649f112312d89a033edab669d73c5cd645956d2474089af54c1dd88b5c3",
+    "runtime-tests-v2/standalone.log": "ae80f166150d44345095b0c192e7b0fd58db14c178a6d206df5968d520c29c86"
+  },
+  "sequoia_game_with_v2_retested": true,
+  "performance_benchmarked": false,
+  "packaged_comparison_results": [
+    {
+      "runtime": "installed",
+      "case": "upload",
+      "returncode": 0
+    },
+    {
+      "runtime": "installed",
+      "case": "map-failure",
+      "returncode": 0
+    },
+    {
+      "runtime": "installed",
+      "case": "read-failure",
+      "returncode": 0
+    },
+    {
+      "runtime": "installed",
+      "case": "full-bar",
+      "returncode": 0
+    },
+    {
+      "runtime": "installed",
+      "case": "persistent",
+      "returncode": 0
+    },
+    {
+      "runtime": "installed",
+      "case": "persistent-coherent",
+      "returncode": 0
+    },
+    {
+      "runtime": "installed",
+      "case": "full-bar-persistent",
+      "returncode": 0
+    },
+    {
+      "runtime": "installed",
+      "case": "hardware",
+      "returncode": 0
+    },
+    {
+      "runtime": "installed",
+      "case": "hardware-persistent",
+      "returncode": 0
+    },
+    {
+      "runtime": "installed",
+      "case": "small-static",
+      "returncode": 1
+    },
+    {
+      "runtime": "installed",
+      "case": "small-dynamic",
+      "returncode": 1
+    },
+    {
+      "runtime": "installed",
+      "case": "full-bar-small-static",
+      "returncode": 0
+    },
+    {
+      "runtime": "installed",
+      "case": "hardware-small-static",
+      "returncode": 0
+    },
+    {
+      "runtime": "candidate",
+      "case": "upload",
+      "returncode": 0
+    },
+    {
+      "runtime": "candidate",
+      "case": "map-failure",
+      "returncode": 0
+    },
+    {
+      "runtime": "candidate",
+      "case": "read-failure",
+      "returncode": 0
+    },
+    {
+      "runtime": "candidate",
+      "case": "full-bar",
+      "returncode": 0
+    },
+    {
+      "runtime": "candidate",
+      "case": "persistent",
+      "returncode": 0
+    },
+    {
+      "runtime": "candidate",
+      "case": "persistent-coherent",
+      "returncode": 0
+    },
+    {
+      "runtime": "candidate",
+      "case": "full-bar-persistent",
+      "returncode": 0
+    },
+    {
+      "runtime": "candidate",
+      "case": "hardware",
+      "returncode": 0
+    },
+    {
+      "runtime": "candidate",
+      "case": "hardware-persistent",
+      "returncode": 0
+    },
+    {
+      "runtime": "candidate",
+      "case": "small-static",
+      "returncode": 0
+    },
+    {
+      "runtime": "candidate",
+      "case": "small-dynamic",
+      "returncode": 0
+    },
+    {
+      "runtime": "candidate",
+      "case": "full-bar-small-static",
+      "returncode": 0
+    },
+    {
+      "runtime": "candidate",
+      "case": "hardware-small-static",
+      "returncode": 0
+    }
+  ],
+  "packaged_comparison_results_sha256": "ea7aa527f2266442363e1d1b5f6f81d3a1044844c359b060095e5e1bcb816ed1",
+  "sequoia_confirmation": {
+    "date": "2026-10-31",
+    "url": "https://mclo.gs/CbC8KZ0",
+    "log_sha256": "f89e75294cba7230c70e9f66a97b3494a7a6257459ef8e80b8f4501d57ba27c5",
+    "system": "Sequoia 15.8.1 / 24H32, RTX 2070 SUPER, 256 MiB BAR1",
+    "result": "User screenshots confirm rendered menu and single-player world; log confirms native Zink/NVK, world entry, save and exit, with no vkMapMemory failures",
+    "remaining_log_warning": "PERF WARNING: >100 copy boxes; no performance improvement claimed"
+  }
+}

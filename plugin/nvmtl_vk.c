@@ -1943,6 +1943,15 @@ int nvmtl_vk_image_create_typed(uint32_t w, uint32_t h, uint32_t vkfmt, uint32_t
     else { nvmtl_commit_image(&pending); *out = pending; }
     return result;
 }
+// The a8 flag of a pixel format selects a fixed swizzle of its view: 1 = A8Unorm (alpha in the red lane), 2 = Apple's private
+// ARGB8 format 84 (Apple's GL asks for it for GL_BGRA + GL_UNSIGNED_INT_8_8_8_8 uploads: bytes A,R,G,B, stored as RGBA8,
+// so R<-G, G<-B, B<-A, A<-R). 0 = identity.
+static VkComponentMapping nvmtl_a8_mapping(int a8)
+{
+    if (a8 == 1) return (VkComponentMapping){ VK_COMPONENT_SWIZZLE_ZERO, VK_COMPONENT_SWIZZLE_ZERO, VK_COMPONENT_SWIZZLE_ZERO, VK_COMPONENT_SWIZZLE_R };
+    if (a8 == 2) return (VkComponentMapping){ VK_COMPONENT_SWIZZLE_G, VK_COMPONENT_SWIZZLE_B, VK_COMPONENT_SWIZZLE_A, VK_COMPONENT_SWIZZLE_R };
+    return (VkComponentMapping){ 0, 0, 0, 0 };
+}
 static int nvmtl_vk_image_create_typed_lifetime_body(uint32_t w, uint32_t h, uint32_t vkfmt, uint32_t bpp, int a8, uint32_t mips, int storage, uint32_t mtl_type, uint32_t layers, nvk_image *out)
 {
     if (!layers || (mtl_type < 2 && h != 1) || mtl_type == 4 || mtl_type > 7
@@ -1966,8 +1975,7 @@ static int nvmtl_vk_image_create_typed_lifetime_body(uint32_t w, uint32_t h, uin
     VKCK(nvmtl_alloc_opaque_image_mem(&mr, &out->mem, &out->sysmem, "colour"), "vkAllocateMemory(image)");
     out->alloc = mr.size;
     VKCK(pvkBindImageMemory(g_dev, out->img, out->mem, 0), "vkBindImageMemory");
-    VkComponentMapping swz = a8 ? (VkComponentMapping){ VK_COMPONENT_SWIZZLE_ZERO, VK_COMPONENT_SWIZZLE_ZERO, VK_COMPONENT_SWIZZLE_ZERO, VK_COMPONENT_SWIZZLE_R }
-                                : (VkComponentMapping){ 0, 0, 0, 0 };
+    VkComponentMapping swz = nvmtl_a8_mapping(a8);
     VkImageViewType viewType = mtl_type == 0 ? VK_IMAGE_VIEW_TYPE_1D : mtl_type == 1 ? VK_IMAGE_VIEW_TYPE_1D_ARRAY : mtl_type == 3 ? VK_IMAGE_VIEW_TYPE_2D_ARRAY
                              : mtl_type == 5 ? VK_IMAGE_VIEW_TYPE_CUBE : mtl_type == 6 ? VK_IMAGE_VIEW_TYPE_CUBE_ARRAY : mtl_type == 7 ? VK_IMAGE_VIEW_TYPE_3D : VK_IMAGE_VIEW_TYPE_2D;
     VkImageViewCreateInfo vci = { VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO, NULL, 0, out->img, viewType,
@@ -2891,6 +2899,9 @@ static int nvmtl_keep_verdict(uint32_t s)
     if (s == NVMTL_WSEQ_LOST) return -1;
     if (g_state != 1 || g_wit_state <= 0) return -1;
     if (nvmtl_wit_read(s) == s) { __atomic_add_fetch(&g_wit_ok, 1, __ATOMIC_RELAXED); return 1; }
+    // Sequence allocation precedes the submit lock, and pre-submit hooks may submit recursively.
+    // A later sequence in the same slot therefore does not prove that this command ran first.
+    // Require this command's exact witness; uncertain pools retain the existing lost-witness policy.
     static long wait_ms = -1; if (wait_ms < 0) { const char *e = getenv("NVMTL_WIT_WAIT_MS"); wait_ms = e ? atol(e) : 1000; }
     const uint64_t w0 = clock_gettime_nsec_np(CLOCK_MONOTONIC_RAW);
     for (;;) {
@@ -3768,7 +3779,10 @@ static int nvmtl_vk_depth_create_full_lifetime_body(uint32_t w, uint32_t h, uint
     if (!mips) mips = 1;
     if (mtl_type == 5 && layers != 6) layers = 6;
     const int cube = mtl_type == 5 || mtl_type == 6;
-    memset(out, 0, sizeof *out); out->w = w; out->h = h; out->fmt = vkfmt; out->bpp = 4; out->samples = samples > 1 ? samples : 1;
+    memset(out, 0, sizeof *out); out->w = w; out->h = h; out->fmt = vkfmt; out->samples = samples > 1 ? samples : 1;
+    /* bytes per texel of a buffer copy of this aspect: Depth16 2, Stencil8 1, the 32-bit depths (and D24, packed in 32 bits) 4.
+     * WAS: 4 for all, so a buffer upload to a Depth16 texture had its 8-byte rows refused (Dome Keeper's 4x4 Depth16) */
+    out->bpp = vkfmt == VK_FORMAT_D16_UNORM ? 2 : vkfmt == VK_FORMAT_S8_UINT ? 1 : 4;
     out->mtl_type = mtl_type == 3 || cube || mtl_type == 8 ? mtl_type : (samples > 1 ? 4 : 2); out->layers = layers; out->mips = mips;
     VkImageCreateInfo ici = { VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO, NULL, cube ? VK_IMAGE_CREATE_CUBE_COMPATIBLE_BIT : 0, VK_IMAGE_TYPE_2D,
         (VkFormat)vkfmt, { w, h, 1 }, mips, layers, (VkSampleCountFlagBits)out->samples, VK_IMAGE_TILING_OPTIMAL,
@@ -5764,10 +5778,12 @@ int nvmtl_vk_image_view_create_range_swz(nvk_image *img, uint32_t vkfmt, int a8,
     pvkDestroyImageView(g_dev, (VkImageView)v, NULL);
     static const VkComponentSwizzle a8map[6] = { VK_COMPONENT_SWIZZLE_ZERO, VK_COMPONENT_SWIZZLE_ONE, VK_COMPONENT_SWIZZLE_ZERO,
                                                  VK_COMPONENT_SWIZZLE_ZERO, VK_COMPONENT_SWIZZLE_ZERO, VK_COMPONENT_SWIZZLE_R };
+    static const VkComponentSwizzle argbmap[6] = { VK_COMPONENT_SWIZZLE_ZERO, VK_COMPONENT_SWIZZLE_ONE, VK_COMPONENT_SWIZZLE_G,
+                                                   VK_COMPONENT_SWIZZLE_B, VK_COMPONENT_SWIZZLE_A, VK_COMPONENT_SWIZZLE_R };   // a8 == 2: ARGB8
     VkComponentSwizzle m[4];
     for (int i = 0; i < 4; i++) {
         uint8_t s = mtl_swz[i] <= 5 ? mtl_swz[i] : (uint8_t)(2 + i);
-        m[i] = a8 ? a8map[s] : (VkComponentSwizzle)(s + 1);
+        m[i] = a8 == 1 ? a8map[s] : a8 == 2 ? argbmap[s] : (VkComponentSwizzle)(s + 1);
     }
     const uint32_t mips = img->mips ? img->mips : 1, layers = img->layers ? img->layers : 1;
     if (!levelCount) levelCount = mips - baseLevel;
@@ -6571,8 +6587,7 @@ int nvmtl_vk_image_reback(nvk_image *i, int to_sysmem, int a8)
     VkMemoryAllocateInfo mai = { VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO, NULL, mr.size, (uint32_t)mt };
     if (pvkAllocateMemory(g_dev, &mai, NULL, &mem) != VK_SUCCESS) { pvkDestroyImage(g_dev, img, NULL); if (!to_sysmem) g_res1_refused++; return to_sysmem ? -1 : 1; }
     if (pvkBindImageMemory(g_dev, img, mem, 0) != VK_SUCCESS) { pvkFreeMemory(g_dev, mem, NULL); pvkDestroyImage(g_dev, img, NULL); return -1; }
-    VkComponentMapping swz = a8 ? (VkComponentMapping){ VK_COMPONENT_SWIZZLE_ZERO, VK_COMPONENT_SWIZZLE_ZERO, VK_COMPONENT_SWIZZLE_ZERO, VK_COMPONENT_SWIZZLE_R }
-                                : (VkComponentMapping){ 0, 0, 0, 0 };
+    VkComponentMapping swz = nvmtl_a8_mapping(a8);
     VkImageViewType viewType = t == 0 ? VK_IMAGE_VIEW_TYPE_1D : t == 1 ? VK_IMAGE_VIEW_TYPE_1D_ARRAY : t == 3 ? VK_IMAGE_VIEW_TYPE_2D_ARRAY
                              : t == 5 ? VK_IMAGE_VIEW_TYPE_CUBE : t == 6 ? VK_IMAGE_VIEW_TYPE_CUBE_ARRAY : t == 7 ? VK_IMAGE_VIEW_TYPE_3D : VK_IMAGE_VIEW_TYPE_2D;
     VkImageViewCreateInfo vci = { VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO, NULL, 0, img, viewType,
@@ -6649,8 +6664,7 @@ int nvmtl_vk_image_migrate(nvk_image *i, int to_sysmem, int a8, nvk_image *old_o
     VkMemoryAllocateInfo mai = { VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO, NULL, mr.size, (uint32_t)mt };
     if (pvkAllocateMemory(g_dev, &mai, NULL, &mem) != VK_SUCCESS) { pvkDestroyImage(g_dev, img, NULL); return to_sysmem ? -1 : 1; }
     if (pvkBindImageMemory(g_dev, img, mem, 0) != VK_SUCCESS) goto fail;
-    { VkComponentMapping swz = a8 ? (VkComponentMapping){ VK_COMPONENT_SWIZZLE_ZERO, VK_COMPONENT_SWIZZLE_ZERO, VK_COMPONENT_SWIZZLE_ZERO, VK_COMPONENT_SWIZZLE_R }
-                                  : (VkComponentMapping){ 0, 0, 0, 0 };
+    { VkComponentMapping swz = nvmtl_a8_mapping(a8);
       VkImageViewType vt = t == 0 ? VK_IMAGE_VIEW_TYPE_1D : t == 1 ? VK_IMAGE_VIEW_TYPE_1D_ARRAY : t == 3 ? VK_IMAGE_VIEW_TYPE_2D_ARRAY
                          : t == 5 ? VK_IMAGE_VIEW_TYPE_CUBE : t == 6 ? VK_IMAGE_VIEW_TYPE_CUBE_ARRAY : t == 7 ? VK_IMAGE_VIEW_TYPE_3D : VK_IMAGE_VIEW_TYPE_2D;
       VkImageViewCreateInfo vci = { VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO, NULL, 0, img, vt, (VkFormat)i->fmt, swz,
@@ -6875,6 +6889,15 @@ static int nvmtl_host_page_span(void **base, size_t *bytes, size_t bpp, size_t r
     *base = (void *)(b - at); *bytes = span; *offset = at;
     return 0;
 }
+// NVMTL_SURFIN_ORDERED (on by default, =0 off): the surface-in copy is ordered after earlier GPU reads of the image. Its
+// layout transition started from top-of-pipe with no source access, so a composite still sampling the previous frame
+// was not waited for (write-after-read: a possible torn frame).
+static int nvmtl_surfin_ordered_on(void)
+{
+    static int on = -1;
+    if (on < 0) { const char *e = getenv("NVMTL_SURFIN_ORDERED"); on = !(e && e[0] == '0'); nvlog("ordered surface-in %s (NVMTL_SURFIN_ORDERED=%s)", on ? "on" : "off", e ? e : "unset"); }
+    return on;
+}
 int nvmtl_vk_image_write_host(nvk_queue *q, nvk_image *img, void *base, size_t row_bytes, size_t bytes, nvk_buffer *cache)
 {
     const size_t bpp = img->bpp ? img->bpp : 4;
@@ -6886,10 +6909,10 @@ int nvmtl_vk_image_write_host(nvk_queue *q, nvk_image *img, void *base, size_t r
     nvk_cmdbuf c;
     if (nvmtl_vk_cmd_begin(q, &c)) { nvmtl_host_pages_done(cache, hp); return -1; }
     VkImageSubresourceRange range = { nvmtl_barrier_aspect(img), 0, 1, 0, 1 };
-    VkImageMemoryBarrier toDst = { VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER, NULL, 0, VK_ACCESS_TRANSFER_WRITE_BIT,
+    VkImageMemoryBarrier toDst = { VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER, NULL, nvmtl_surfin_ordered_on() ? (VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_SHADER_READ_BIT) : 0, VK_ACCESS_TRANSFER_WRITE_BIT,
         VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
         VK_QUEUE_FAMILY_IGNORED, VK_QUEUE_FAMILY_IGNORED, (VkImage)img->img, range };
-    pvkCmdPipelineBarrier(c.cb, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, NULL, 0, NULL, 1, &toDst);
+    pvkCmdPipelineBarrier(c.cb, nvmtl_surfin_ordered_on() ? VK_PIPELINE_STAGE_ALL_COMMANDS_BIT : VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, NULL, 0, NULL, 1, &toDst);
     VkBufferImageCopy bic = { (VkDeviceSize)at, (uint32_t)(row_bytes / bpp), 0, { nvmtl_copy_aspect(img), 0, 0, 1 }, { 0, 0, 0 }, { img->w, img->h, 1 } };
     pvkCmdCopyBufferToImage(c.cb, (VkBuffer)hb.buf, (VkImage)img->img, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &bic);
     VkImageMemoryBarrier toRead = { VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER, NULL,
@@ -6941,10 +6964,10 @@ int nvmtl_vk_image_write(nvk_queue *q, nvk_image *img, const void *src, size_t r
     nvk_cmdbuf *const c = &sl->cb;
     if (nvmtl_vk_cmd_begin(q, c)) return -1;
     VkImageSubresourceRange range = { nvmtl_barrier_aspect(img), 0, 1, 0, 1 };
-    VkImageMemoryBarrier toDst = { VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER, NULL, 0, VK_ACCESS_TRANSFER_WRITE_BIT,
+    VkImageMemoryBarrier toDst = { VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER, NULL, nvmtl_surfin_ordered_on() ? (VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_SHADER_READ_BIT) : 0, VK_ACCESS_TRANSFER_WRITE_BIT,
         VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
         VK_QUEUE_FAMILY_IGNORED, VK_QUEUE_FAMILY_IGNORED, (VkImage)img->img, range };
-    pvkCmdPipelineBarrier(c->cb, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, NULL, 0, NULL, 1, &toDst);
+    pvkCmdPipelineBarrier(c->cb, nvmtl_surfin_ordered_on() ? VK_PIPELINE_STAGE_ALL_COMMANDS_BIT : VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, NULL, 0, NULL, 1, &toDst);
     VkBufferImageCopy bic = { 0, 0, 0, { nvmtl_copy_aspect(img), 0, 0, 1 }, { 0, 0, 0 }, { img->w, img->h, 1 } };
     pvkCmdCopyBufferToImage(c->cb, (VkBuffer)sl->buf.buf, (VkImage)img->img, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &bic);
     VkImageMemoryBarrier toRead = { VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER, NULL,
@@ -7027,6 +7050,17 @@ int nvmtl_vk_image_read_host(nvk_queue *q, nvk_image *img, void *base, size_t ro
     const int rc = nvmtl_vk_submit_wait_at(&c, "surface readback (imported pages)");
     nvmtl_host_pages_done(cache, hp);
     return rc;
+}
+
+static int nvmtl_copy_has_image(const char *what, const nvk_image *img)
+{
+    if (img && img->img) return 1;
+    static _Atomic unsigned said;   // the first few name the texture; a per-frame copy must not flood the log
+    if (atomic_fetch_add(&said, 1) >= 16) return 0;
+    if (!img) { nvlog("%s: no texture - not copied", what); return 0; }
+    nvlog("%s: texture %ux%u fmt %u type %u layers %u mips %u usage 0x%x placed %d sysmem %u has no VkImage - not copied",
+          what, img->w, img->h, img->fmt, img->mtl_type, img->layers, img->mips, img->usage, img->placed, img->sysmem);
+    return 0;
 }
 
 static void img_to(nvk_cmdbuf *c, nvk_image *img, VkImageLayout to,
@@ -7453,8 +7487,7 @@ int nvmtl_vk_image_view_create_ex(nvk_image *img, uint32_t vkfmt, int a8, uint32
         return -1;
     }
     VkFormat fmt = (VkFormat)vkfmt;
-    VkComponentMapping swz = a8 ? (VkComponentMapping){ VK_COMPONENT_SWIZZLE_ZERO, VK_COMPONENT_SWIZZLE_ZERO, VK_COMPONENT_SWIZZLE_ZERO, VK_COMPONENT_SWIZZLE_R }
-                                : (VkComponentMapping){ 0, 0, 0, 0 };
+    VkComponentMapping swz = nvmtl_a8_mapping(a8);
     VkImageViewCreateInfo vci = { VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO, NULL, 0, (VkImage)img->img,
         nvmtl_vk_view_type_of(img), fmt, swz, { VK_IMAGE_ASPECT_COLOR_BIT, baseLevel, levelCount, 0, nvmtl_vk_view_layers_of(img) } };
     VkImageViewUsageCreateInfo uci;
@@ -7997,6 +8030,10 @@ int nvmtl_vk_cmd_copy_buffer_to_image_level_layer(nvk_cmdbuf *c, nvk_buffer *b, 
 int nvmtl_vk_cmd_copy_buffer_to_image_3d(nvk_cmdbuf *c, nvk_buffer *b, size_t off, uint32_t row_bytes, size_t image_bytes,
                                   nvk_image *img, uint32_t x, uint32_t y, uint32_t w, uint32_t h, uint32_t depth, uint32_t level, uint32_t layer)
 {
+    // A texture with no VkImage reached here from RealityKit's texture setup (Logic Pro, Dolby Atmos mixer): the layout
+    // barrier below handed NVK a null image and the app crashed in nvk_CmdPipelineBarrier2 (read at 0x520). Refuse the
+    // copy and name the texture, so the path that left it without an image can be found from the log.
+    if (!nvmtl_copy_has_image("copy_buffer_to_image", img)) return -1;
     if (level >= (img->mips ? img->mips : 1)) { nvlog("copy_buffer_to_image: level %u — this image has %u", level, img->mips ? img->mips : 1); return -1; }
     const uint32_t lw = nvmtl_lvl(img->w, level), lh = nvmtl_lvl(img->h, level);
     const uint32_t bpp = g_copy_bpp_override ? g_copy_bpp_override : (img->bpp ? img->bpp : 4);
@@ -8042,6 +8079,7 @@ int nvmtl_vk_cmd_copy_image_to_buffer_level_layer(nvk_cmdbuf *c, nvk_image *img,
 int nvmtl_vk_cmd_copy_image_to_buffer_3d(nvk_cmdbuf *c, nvk_image *img, uint32_t x, uint32_t y, uint32_t w, uint32_t h, uint32_t depth,
                                   nvk_buffer *b, size_t off, uint32_t row_bytes, size_t image_bytes, uint32_t level, uint32_t layer)
 {
+    if (!nvmtl_copy_has_image("copy_image_to_buffer", img)) return -1;
     if (level >= (img->mips ? img->mips : 1)) { nvlog("copy_image_to_buffer: level %u — this image has %u", level, img->mips ? img->mips : 1); return -1; }
     const uint32_t lw = nvmtl_lvl(img->w, level), lh = nvmtl_lvl(img->h, level);
     const uint32_t bpp = g_copy_bpp_override ? g_copy_bpp_override : (img->bpp ? img->bpp : 4);
@@ -8332,8 +8370,7 @@ static int nvmtl_vk_image_create_buffer_alias_lifetime_body(uint32_t w, uint32_t
               (unsigned long long)mr.size, (unsigned long long)(mr.size - (b->size - offset)), b->size, offset);
     VKCK(pvkBindImageMemory(g_dev, (VkImage)out->img, (VkDeviceMemory)b->mem, at), "vkBindImageMemory(buffer texture)");
     out->mem = b->mem; out->placed = 1; out->alloc = 0;
-    VkComponentMapping swz = a8 ? (VkComponentMapping){ VK_COMPONENT_SWIZZLE_ZERO, VK_COMPONENT_SWIZZLE_ZERO, VK_COMPONENT_SWIZZLE_ZERO, VK_COMPONENT_SWIZZLE_R }
-                                : (VkComponentMapping){ 0, 0, 0, 0 };
+    VkComponentMapping swz = nvmtl_a8_mapping(a8);
     VkImageViewCreateInfo vci = { VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO, NULL, 0, out->img, VK_IMAGE_VIEW_TYPE_2D,
         (VkFormat)vkfmt, swz, { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 } };
     VKCK(nvmtl_opaque_CreateImageView(g_dev, &vci, NULL, &out->view), "vkCreateImageView(buffer texture)");
@@ -8527,8 +8564,7 @@ static int nvmtl_vk_image_create_typed_placed_lifetime_body(uint32_t w, uint32_t
     if (placed_ok(&mr, heap, offset, "placed image")) { pvkDestroyImage(g_dev, (VkImage)out->img, NULL); memset(out, 0, sizeof *out); return -1; }
     VKCK(pvkBindImageMemory(g_dev, out->img, (VkDeviceMemory)heap->mem, offset), "vkBindImageMemory(placed)");
     out->mem = heap->mem; out->placed = 1; out->alloc = 0;
-    VkComponentMapping swz = a8 ? (VkComponentMapping){ VK_COMPONENT_SWIZZLE_ZERO, VK_COMPONENT_SWIZZLE_ZERO, VK_COMPONENT_SWIZZLE_ZERO, VK_COMPONENT_SWIZZLE_R }
-                                : (VkComponentMapping){ 0, 0, 0, 0 };
+    VkComponentMapping swz = nvmtl_a8_mapping(a8);
     VkImageViewType viewType = mtl_type == 0 ? VK_IMAGE_VIEW_TYPE_1D : mtl_type == 1 ? VK_IMAGE_VIEW_TYPE_1D_ARRAY : mtl_type == 3 ? VK_IMAGE_VIEW_TYPE_2D_ARRAY
                              : mtl_type == 5 ? VK_IMAGE_VIEW_TYPE_CUBE : mtl_type == 6 ? VK_IMAGE_VIEW_TYPE_CUBE_ARRAY : mtl_type == 7 ? VK_IMAGE_VIEW_TYPE_3D : VK_IMAGE_VIEW_TYPE_2D;
     VkImageViewCreateInfo vci = { VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO, NULL, 0, out->img, viewType,
@@ -8663,6 +8699,25 @@ int nvmtl_vk_cmd_copy_image_sub3(nvk_cmdbuf *c, nvk_image *src, uint32_t sl, uin
     }
     const uint32_t sw = nvmtl_lvl(src->w, sl), sh = nvmtl_lvl(src->h, sl);
     const uint32_t dw = nvmtl_lvl(dst->w, dl), dh = nvmtl_lvl(dst->h, dl);
+    {   /* Metal sizes a block-compressed copy in whole blocks: the 1x1 and 2x2 mips of a BC texture are copied as 4x4
+         * (Unity's mip chains, Cult of the Lamb's font atlases). Vulkan wants the extent to end at the mip's edge instead;
+         * clamp a region that runs past the edge by less than one block. WAS: "region outside selected mip extent". */
+        uint32_t bw = 1, bh = 1, bb = 0;
+        if (nvmtl_vk_format_block(src->fmt, &bw, &bh, &bb) && (bw > 1 || bh > 1)) {
+            const uint32_t rw = (sw + bw - 1) / bw * bw, rh = (sh + bh - 1) / bh * bh;
+            const uint32_t rdw = (dw + bw - 1) / bw * bw, rdh = (dh + bh - 1) / bh * bh;
+            if (sx < sw && dx < dw && w <= rw - sx && w <= rdw - dx) { if (w > sw - sx) w = sw - sx; if (w > dw - dx) w = dw - dx; }
+            if (sy < sh && dy < dh && h <= rh - sy && h <= rdh - dy) { if (h > sh - sy) h = sh - sy; if (h > dh - dy) h = dh - dy; }
+            // Cropping at the destination edge must not split a source block. Offsets stay block-aligned;
+            // a partial source block is valid only at the source mip's edge (vkCmdCopyImage-01728/01729).
+            if (sx % bw || dx % bw || sy % bh || dy % bh
+                || (w % bw && (uint64_t)sx + w != sw)
+                || (h % bh && (uint64_t)sy + h != sh)) {
+                nvlog("copy_image_sub: compressed region is not block-aligned or at the source mip edge");
+                return -1;
+            }
+        }
+    }
     if (sx > sw || w > sw - sx || sy > sh || h > sh - sy
         || dx > dw || w > dw - dx || dy > dh || h > dh - dy) {
         nvlog("copy_image_sub: region outside selected mip extent");
@@ -8764,8 +8819,7 @@ int nvmtl_vk_image_view_create_range_aspect(nvk_image *img, uint32_t vkfmt, int 
         case 7: vt = VK_IMAGE_VIEW_TYPE_3D; if (img->mtl_type != 7) { nvlog("image_view_create(range): a 3D view of a non-3D image"); return -1; } layerCount = 1; break;
         default: nvlog("image_view_create(range): view textureType %u is not carried", mtl_view_type); return -1;
     }
-    VkComponentMapping swz = a8 ? (VkComponentMapping){ VK_COMPONENT_SWIZZLE_ZERO, VK_COMPONENT_SWIZZLE_ZERO, VK_COMPONENT_SWIZZLE_ZERO, VK_COMPONENT_SWIZZLE_R }
-                                : (VkComponentMapping){ 0, 0, 0, 0 };
+    VkComponentMapping swz = nvmtl_a8_mapping(a8);
     VkImageViewCreateInfo vci = { VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO, NULL, 0, (VkImage)img->img, vt, (VkFormat)vkfmt, swz,
         { (VkImageAspectFlags)aspect, baseLevel, levelCount, baseLayer, layerCount } };
     VkImageViewUsageCreateInfo uci;

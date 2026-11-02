@@ -1,5 +1,29 @@
 # Changelog
 
+## 2.6.6
+
+- Fork follow-up: restore Photo Booth's preview for default-usage drawables with writable backing while retaining upstream's no-storage-view handling. The user confirmed a moving, upright preview with Zink enabled.
+- Fork integration retains native Zink/Minecraft/Wine, DXVK/vkd3d/DLSS, browser VP8/VP9, display/cursor repairs and the all-app ANGLE Metal default. See [merge notes](docs/FORK-MERGE-NOTES.md#upstream-266-integration).
+- Launchpad and Chrome icons are no longer black. 2.6.5 changed how textures made from an IOSurface with no stated use were set up, and shader writes to them went nowhere (PR #461, thanks Geek).
+- Logic Pro no longer crashes when it opens the Dolby Atmos mixer. A texture upload reached the GPU with no image behind it; the copy is now refused, and the log names the texture so the cause can be found.
+- QQ: avatars keep their colour (a clear that finished late could wipe a new upload, PR #458, thanks Geek) and SVG toolbar icons draw (the shader translator refused ANGLE shaders with an empty inline-assembly statement, PR #457, thanks GeekAudio).
+- Hades menu text draws: the shader translator kept a pointer read through a branch merge (PR #466, thanks mickys).
+- Games that ask for rasterization-rate-map coordinates, such as Darkest Dungeon II, get their shaders: the driver reports that it has no rate maps and the translator passes those coordinates through unchanged (PR #469, thanks mickys and Geek).
+- A failed buffer-to-texture copy names its format, sizes and region in the log (PR #465, thanks mickys).
+- The installer notes when the boot-args have no AMFI argument. Without one, WindowServer refuses the Metal driver and the desktop comes up with no Metal device.
+- Tahoe PCs whose integrated GPU drives a screen no longer stop at a black screen with a cursor: a GPU macOS no longer accelerates does not count as the one showing the desktop, so WindowServer starts.
+- Upstream's base Vulkan library targets Sequoia 15.0 again. This complete NVK/Zink fork package still requires **15.5+** for its retained native runtimes.
+- Security: upstream's Mac app requires a valid NullMoth package signature; fork packages use their included installer. An installer rollback no longer reuses a firmware folder another account could have placed in /Users/Shared.
+
+## 2.6.5
+
+- WebGL pages with shadow-casting lights draw their shadows: when a page's shadow helper read its sampler through ANGLE's texture table, the shader translator refused the shader, and a second light's shadow map was read as empty (#449, thanks Luminous418).
+- WindowServer does less work per frame: compositor draws no longer rewrite descriptors for the framebuffer-fetch set (PR #439), and command buffers whose completion slot was reused are recognised instead of shutting down the pool (PR #446). Drawables are presented on their own queue, which ends a white-window hang with the Metal HUD on (PR #445). Screen recordings keep their frames in order (PR #438). Thanks GeekAudio (mickys).
+- Photo Booth's preview is no longer black (PR #433, thanks daggersinmybackk).
+- Vivaldi, Opera and Arc get Metal through ANGLE, found by the libraries the process loads (PR #450, thanks SameerAlSahab).
+- Shader translator: depth gather-compare (Civ VI shadows, PR #447), sampler choices across compare chains (PR #448), cube samples through 2D-array views (Stellaris, PR #434), Apple's GL helpers inlined (PR #435). Thanks GeekAudio (mickys).
+- Plugin: Apple's ARGB8 texture format for sampling and uploads (Homeworld, PR #440), depth texture types and sizes reported correctly (Northgard, Dome Keeper, PRs #441 and #432), array lengths kept in struct reflection and encoders return their command buffer (Hades, PRs #437 and #436), block-aligned compressed mip copies (Cult of the Lamb, PR #444), uploads ordered after GPU reads (PR #442), and a trace-ID lock conflict removed (Soulstone Survivors, PR #443). Thanks GeekAudio (mickys).
+
 ## Fork installer permanent-path repair
 
 - Recover stale kernel-collection paths by matching the installed extension's bundle ID and recorded version. Stop on missing, mismatched or ambiguous replacements.

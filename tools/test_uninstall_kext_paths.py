@@ -105,6 +105,29 @@ class UninstallPaths(fixture.Install):
         self.assertIn('CHECK PASS',result.stdout)
         for path,data in self.old.items():self.assertEqual(path.read_bytes(),data)
 
+    def panel(self):
+        panel=self.bundle('Library/Extensions/NMIntelFB.kext','com.nullmoth.NMIntelFB','0.1')
+        binary=panel/'Contents/MacOS/NMIntelFB';binary.parent.mkdir();binary.write_bytes(b'old-panel')
+        for path in panel.rglob('*'):
+            if path.is_file():self.old[path]=path.read_bytes()
+        self.entries.append(['com.nullmoth.NMIntelFB','0.1',str(panel)]);self.cache()
+        return panel
+
+    def test_optional_intel_panel_is_removed_with_the_driver(self):
+        panel=self.panel();result=self.run_remove()
+        self.assertEqual(result.returncode,0,result.stdout+result.stderr)
+        self.assertFalse(panel.exists())
+        self.assertNotIn('com.nullmoth.NMIntelFB',self.kc.read_text())
+
+    def test_failed_removal_restores_optional_panel(self):
+        self.panel();self.external();result=self.run_remove(FAKE_REMOVE_LIVE_DROP='org.test.External')
+        self.assert_restored(result)
+
+    def test_check_only_preserves_optional_panel(self):
+        self.panel();result=self.run_remove(CHECK='1')
+        self.assertEqual(result.returncode,0,result.stdout+result.stderr)
+        for path,data in self.old.items():self.assertEqual(path.read_bytes(),data)
+
     def test_external_only_collection_is_rebuilt_instead_of_removed(self):
         external=self.external();shutil.rmtree(self.keep);shutil.rmtree(self.root/'Library/Extensions/NVMeFix.kext')
         self.entries=self.entries[1:];self.cache()

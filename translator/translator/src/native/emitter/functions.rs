@@ -206,6 +206,7 @@ pub(in crate::native::emitter) fn is_air_texture_operation(callee: &str) -> bool
         || callee.starts_with("air.sample_compare_depth")
         || callee.starts_with("air.gather_texture")
         || callee.starts_with("air.gather_depth")
+        || callee.starts_with("air.gather_compare_depth")
         || callee.starts_with("air.read_texture")
         || callee.starts_with("air.read_depth")
         || callee.starts_with("air.write_texture")
@@ -391,6 +392,7 @@ impl Emitter {
         self.vector_word_roots.clear();
         self.vector_word_pointers.clear();
         self.local_pointer_fields.clear();
+        self.unresolved_local_field_loads.clear();
         self.pointer_forward_values.clear();
         self.raw_memcpy_shadows.clear();
         self.dynamic_pointer_tables.clear();

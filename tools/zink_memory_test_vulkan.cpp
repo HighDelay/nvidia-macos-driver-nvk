@@ -33,6 +33,7 @@ static void initialize()
 
 static void constrain_bar(VkPhysicalDeviceMemoryProperties *p)
 {
+   if (std::getenv("ZINK_TEST_NATIVE_MEMORY")) { properties = *p; return; }
    if (std::getenv("ZINK_TEST_FULL_BAR")) {
       VkDeviceSize vram = 0;
       for (unsigned i = 0; i < p->memoryHeapCount; ++i)

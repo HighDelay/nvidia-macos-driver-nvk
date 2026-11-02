@@ -137,6 +137,66 @@ def replace_file(source, destination):
     shutil.copy2(source, destination)
 
 
+def validate_video_runtime(root):
+    """A separately built, signed codec addon with pinned source provenance."""
+    root = root.resolve(strict=True)
+    regular(root / "NVENC-BUILD.json")
+    fields = json.loads((root / "NVENC-BUILD.json").read_text())
+    pin = json.loads((REPO / "video/nvenc-source.json").read_text())
+    require(fields.get("schema_version") == 1 and fields.get("kind") == "nvenc-codecs", "invalid codec runtime schema")
+    require(fields.get("source") == pin["source"] and fields.get("dependencies") == pin["dependencies"],
+            "codec runtime source/dependencies do not match this checkout")
+    require(fields.get("overlay_sha256") == digest(REPO / "video" / pin["overlay"]), "codec source overlay mismatch")
+    require(fields.get("target") == {"os": "macos", "arch": "x86_64", "minimum_macos": "15.0"}, "incompatible codec platform")
+    require(fields.get("turing_defaults") == {"additional_decoders": ["vp08", "vp09"], "replace_stock_encoders": False, "av1": False},
+            "incompatible Turing codec selection")
+    require(fields.get("installation") == {"library": "/Library/GPUBundles/NVMTLDriver.bundle/Contents/MacOS/libnvencvt.dylib",
+                                          "records": "/Library/GPUBundles/nvmtl/video"}, "unexpected codec installation paths")
+    expected = {"libnvencvt.dylib", "source-changes.patch", "INSTALL.md", "LICENSES/nvenc-MIT.txt", "LICENSES/NVIDIA-MIT.txt", "LICENSES/WebKit-BSD.txt"}
+    files = fields.get("files", {})
+    require(set(files) == expected, "incomplete or unexpected codec payload")
+    actual = {p.relative_to(root).as_posix() for p in root.rglob("*") if p.is_file() or p.is_symlink()}
+    require(actual == expected | {"NVENC-BUILD.json"}, "unrecorded codec runtime files")
+    for name in sorted(expected):
+        path = root / name
+        regular(path)
+        require(inside(path.resolve(strict=True), root), "codec file escapes its runtime")
+        require(re.fullmatch(r"[0-9a-f]{64}", files[name]) is not None and digest(path) == files[name], "codec runtime hash mismatch: " + name)
+    require(digest(root / "source-changes.patch") == fields["overlay_sha256"], "packaged codec overlay mismatch")
+    require(digest(root / "LICENSES/nvenc-MIT.txt") == digest(REPO / "video/nvenc-MIT.txt"), "codec source license mismatch")
+    run("lipo", root / "libnvencvt.dylib", "-verify_arch", "x86_64")
+    run("codesign", "--verify", "--strict", root / "libnvencvt.dylib")
+    version = run("vtool", "-show-build", root / "libnvencvt.dylib").stdout
+    require(re.search(r"\bminos 15\.0\b", version) is not None, "codec deployment target mismatch")
+    return tuple(root / name for name in sorted(expected | {"NVENC-BUILD.json"}))
+
+
+def video_default_config(text):
+    # An explicit opt-out or process selection survives an update.
+    if re.search(r"^\s*NVMTL_NVENCVT\s*=", text, re.M):
+        return text
+    return text.rstrip("\n") + "\n\n# Bundled additional NVIDIA video codecs; 0 disables the addon.\nNVMTL_NVENCVT=1\n"
+
+
+def stage_video_runtime(root, video, files):
+    video = video.resolve(strict=True)
+    records = root / RUNTIME / "video"
+    require(not records.is_symlink(), "codec record directory is a symlink")
+    if records.exists():
+        shutil.rmtree(records)
+    for source in files:
+        relative = source.relative_to(video)
+        target = root / PLUGIN / "Contents/MacOS/libnvencvt.dylib" if relative == Path("libnvencvt.dylib") else records / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        replace_file(source, target)
+    conf = root / RUNTIME / "nvrm610.conf"
+    require(not conf.is_symlink(), "codec config is a symlink")
+    conf.write_text(video_default_config(conf.read_text() if conf.exists() else ""))
+    conf.chmod(0o644)
+    run("codesign", "--force", "--sign", "-", "--timestamp=none", root / PLUGIN)
+    run("codesign", "--verify", "--strict", root / PLUGIN)
+
+
 def validate_minecraft_runtime(root, checker):
     require(root.is_dir() and not root.is_symlink(), "missing Minecraft runtime directory")
     validate_links(root.resolve())
@@ -293,6 +353,10 @@ def stage(args):
     minecraft_files = validate_minecraft_runtime(minecraft, base / "nullmoth-runtime-check") if minecraft else ()
     wine = getattr(args, "wine_runtime", None)
     wine_files = validate_wine_runtime(wine, base / "nullmoth-runtime-check") if wine else ()
+    video = getattr(args, "video_runtime", None)
+    if video:
+        video = video.resolve(strict=True)
+    video_files = validate_video_runtime(video) if video else ()
     for source, _ in replacements:
         run("lipo", source, "-verify_arch", "x86_64")
 
@@ -356,6 +420,8 @@ def stage(args):
                     "bundled translator link must point to the canonical nvmtl translator")
         elif bundled.exists():
             replace_file(work / TRANSLATOR, bundled)
+        if video:
+            stage_video_runtime(work, video, video_files)
         # install.sh chooses the OS variant. Refresh only replaced variants.
         for major, accelerator in accelerators.items():
             if accelerator:
@@ -372,6 +438,8 @@ def stage(args):
           + "".join(", macOS " + major + " NVAccel" for major, source in accelerators.items() if source)
           + (", Minecraft native NVK runtime" if minecraft else "")
           + (", Wine native NVK provider and DXVK" if wine else ""))
+    if video:
+        print("Included: pinned additional NVIDIA video codecs; existing explicit codec settings preserved.")
     print("SHA256SUMS verified. Install on Sequoia or Tahoe using install.sh.")
     return output
 
@@ -389,6 +457,7 @@ def main():
     parser.add_argument("--accel-15", type=Path, help="optional complete rebuilt Sequoia NVAccel.kext")
     parser.add_argument("--minecraft-runtime", type=Path, help="optional native Minecraft runtime built by nvk/native-macos/build.py")
     parser.add_argument("--wine-runtime", type=Path, help="optional compact Wine/NVK provider built by nvk/wine-macos/provider.py")
+    parser.add_argument("--video-runtime", type=Path, help="signed codec runtime built by build/build_nvenc.py")
     try:
         stage(parser.parse_args())
     except (OSError, ValueError, RuntimeError, plistlib.InvalidFileException) as error:

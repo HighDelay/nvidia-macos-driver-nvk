@@ -41,6 +41,10 @@ int setenv(const char *k, const char *v, int) {
     return 0;
 }
 static void syslog(int, const char *, ...) { g_logs++; }
+// the images dyld reports as loaded; empty = none of ANGLE's
+static const char *g_images[4] = {nullptr};
+uint32_t _dyld_image_count(void) { uint32_t n = 0; while (n < 4 && g_images[n]) n++; return n; }
+const char *_dyld_get_image_name(uint32_t i) { return i < 4 ? g_images[i] : nullptr; }
 
 """ + region + r"""
 

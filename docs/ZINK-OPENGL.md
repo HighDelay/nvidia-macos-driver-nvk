@@ -71,11 +71,13 @@ worker threads, multiple windows, VSync toggles and failed-work quarantine.
 This validates the adapter's complete lifecycle, including the GLD state-to-GLI
 relation, in those probe processes. A subsequent Minecraft startup selected
 Zink successfully but exposed a separate upload-buffer mapping crash. Small-BAR
-upload heaps now prefer system memory, and failed maps return an OpenGL memory
+CPU-visible buffers now prefer system memory, and failed maps return an OpenGL memory
 error instead of dereferencing an unset transfer. This repair applies to both
 Sequoia and Tahoe; see the [mapping investigation](ZINK-BUFFER-MAPPING.md).
-Minecraft gameplay on that Sequoia machine still needs retesting. The local
-Tahoe machine has 8 GiB BAR1.
+On 2026-10-31, the same user confirmed menus and single-player world rendering
+with the completed repair; the [game log](https://mclo.gs/CbC8KZ0) has no failed
+Vulkan maps. The local Tahoe machine currently has 8 GiB BAR1; the maintainer
+also previously confirmed Minecraft with a 256 MiB BAR1 configuration.
 
 The adapter covers core 3.2/4.1 and legacy compatibility CGL contexts through the
 entrypoints exposed by the current Apple SDK/framework. Mesa reporting OpenGL
@@ -252,13 +254,20 @@ Arbitrary overlays of installed `/Library` contents are rejected.
 ```sh
 python3 build/package_zink.py --base /path/to/verified/pkgroot \
   --zink /path/to/zink-out --stage /path/to/new/pkgroot \
-  --archive /path/to/new/nvidia-macos-driver-2.6.4-zink-nvk.tar.gz --native-gld
+  --archive /path/to/new/nvidia-macos-driver-2.6.6-nvk.tar.gz \
+  --build-records /path/to/new/build-records --native-gld
 ```
 
 The archive has one top-level `pkgroot/`. It preserves existing runtimes and
 version metadata, adds Zink in its own subdirectory and selects `NVKZinkGLDriver`
 for both Sequoia and Tahoe accelerators. `--native-gld` is the default. `--explicit-cgl-only` is a developer option
 for attachment tests without system OpenGL selection.
+
+The package has a short `READ-ME.md`, one current `PACKAGE-IDENTITY.json` and
+setup guides in `Guides/`. Detailed build identities, validation reports and
+review notes go to `--build-records`, outside the archive. If omitted, that
+directory defaults to the stage path with `-build-records` appended. Runtime
+manifests, licenses and signed resources retain their required locations.
 
 Read the packaged [local installation guide](COMBINED-INSTALL.md) first. Run
 `Verify.command` with the kernel driver already active, then install using

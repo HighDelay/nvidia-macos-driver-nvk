@@ -1,0 +1,90 @@
+{
+  "upstream_commit": "ceba63c",
+  "fork_parent": "fc5ada19d29d8be65c7b8fed53a31f76a27d4273",
+  "library_tests": 2226,
+  "host_tests": [
+    {
+      "test": "angle_chrome_family",
+      "returncode": 0
+    },
+    {
+      "test": "angle_optin",
+      "returncode": 0
+    },
+    {
+      "test": "bc_small_mips",
+      "returncode": 0
+    },
+    {
+      "test": "opengl_perf",
+      "returncode": 0
+    },
+    {
+      "test": "surface_publication",
+      "returncode": 0
+    },
+    {
+      "test": "submission_copies",
+      "returncode": 0
+    },
+    {
+      "test": "resset_seal",
+      "returncode": 0
+    },
+    {
+      "test": "resset_lifetime",
+      "returncode": 0
+    },
+    {
+      "test": "render_sampler_cache",
+      "returncode": 0
+    },
+    {
+      "test": "graphics_bindings",
+      "returncode": 0
+    },
+    {
+      "test": "surface_host_span",
+      "returncode": 0
+    },
+    {
+      "test": "surface_import_reuse",
+      "returncode": 0
+    },
+    {
+      "test": "surface_queue",
+      "returncode": 0
+    },
+    {
+      "test": "surface_alloc_bound",
+      "returncode": 0
+    },
+    {
+      "test": "gl_resource_completion",
+      "returncode": 0
+    },
+    {
+      "test": "surface_pending_lifetime",
+      "returncode": 0
+    },
+    {
+      "test": "surface_stream_copy",
+      "returncode": 0
+    }
+  ],
+  "gpu_nv12_pixel_cases": 12,
+  "integration_results": [
+    "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.03s",
+    "test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+    "test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.06s",
+    "test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.07s"
+  ],
+  "kernel_sources_changed": false,
+  "native_runtime_sources_changed": false,
+  "installed_on_host": false,
+  "hardware": "RTX 2060 SUPER / Tahoe 26.7.1; local loaded plugin test, no boot test",
+  "builds": {
+    "NVMTLDriver": "1ec58f0774608d603b17e6934f45feaa90f27394f8b2b1da8ed86fb1146ae86f",
+    "libnvmtl_translate.dylib": "22d28fd0a8f37de5d8bad536d35f469b34c256b6e4ac0f2c768cc40192b98fb5"
+  }
+}

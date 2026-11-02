@@ -360,9 +360,22 @@ static void nvmtl_gpu_uses_lower(NVMTLCommandBuffer *cb) {
     memset(&_c, 0, sizeof(_c));
     part->resources = [(NVMTLResSet *)_resources nvmtlTakeAll]; part->surfaces = [_surfDirty copy];
     // Another process may read an IOSurface once its writer is scheduled, and nothing orders its queue after ours.
-    static int after = -1; if (after < 0) { const char *e = getenv("NVMTL_SCHEDULE_AFTER_SURFACE_WRITES"); after = e && e[0] == '1'; }
+    // A surface whose VRAM is shared is covered by the kernel (a CPU lock's page-off waits for the pending write); one we
+    // write through a private image is copied out only after the GPU has finished, and a CPU lock does not wait for that.
+    // WindowServer hands ScreenCaptureKit clients their frame once its command buffer is scheduled (Apple's IOSurfaceLock
+    // waits for the GPU): a capture client (Parsec's encoder, a screen recorder) read the two-plane NV12 capture surface
+    // before the copy-out, so it got the surface's previous frame, and now and then the new one when the copy-out won the
+    // race: frames out of order. Such a command buffer reports "scheduled" once its writes are published.
+    // NVMTL_SCHEDULE_AFTER_SURFACE_WRITES=3 (default) does it only for two-plane surfaces written through private images (the
+    // NV12 surfaces WindowServer draws captured frames into, so it costs nothing without capture), =2 for every private one,
+    // =1 for every surface write, =0 for none.
+    static int after = -1; if (after < 0) { const char *e = getenv("NVMTL_SCHEDULE_AFTER_SURFACE_WRITES"); after = e && *e ? e[0] - '0' : 3; }
     NVMTLTexture *drawable = _present ? (_present->_parent ?: _present) : nil;
-    for (NVMTLTexture *s in part->surfaces) if (after && s != drawable) _scheduleAfterPublish = YES;
+    for (NVMTLTexture *s in part->surfaces) {
+        if (s == drawable || !after) continue;
+        NVMTLTexture *r = s->_parent ? s->_parent : s;
+        if (after == 1 || (r->_surf && !r->_vramOn && (after != 3 || IOSurfaceGetPlaneCount(r->_surf) > 1))) _scheduleAfterPublish = YES;
+    }
     part->scratch = [_scratch copy]; part->signalEvent = event; part->value = value;
     part->encoders = _nEnc - _nEncSealed; _nEncSealed = _nEnc;
     if (_g79Sig.count) { part->signals = [_g79Sig copy]; [_g79Sig removeAllObjects]; }
@@ -475,8 +488,19 @@ static void nvmtl_gpu_uses_lower(NVMTLCommandBuffer *cb) {
             [nvmtl_quarantined_parts addObject:p];
         }
     }
-    if (!error) {
-        for (dispatch_block_t action in _presentations) action();
+    if (!error && _presentations.count) {
+        // Present on a serial queue of its own, in order, not on the execution queue: -[CAMetalDrawable present] takes the
+        // layer's lock, which -[CAMetalLayer nextDrawable] holds on the app's thread, and a hook inside nextDrawable (the
+        // Metal HUD creating its font texture) waits for a command buffer queued behind this one. WAS: inline here, a
+        // deadlock (No Man's Sky with MetalForceHudEnabled: white window, main thread in waitUntilCompleted, the execution
+        // queue in present). NVMTL_PRESENT_INLINE=1: the old inline presents.
+        static dispatch_queue_t presentQ; static int inl = -1; static dispatch_once_t once;
+        dispatch_once(&once, ^{
+            const char *e = getenv("NVMTL_PRESENT_INLINE"); inl = e && *e && *e != '0';
+            presentQ = dispatch_queue_create("nvmtl.present", dispatch_queue_attr_make_with_qos_class(DISPATCH_QUEUE_SERIAL, QOS_CLASS_USER_INTERACTIVE, 0));
+        });
+        if (inl) { for (dispatch_block_t action in _presentations) action(); }
+        else { NSArray *actions = [_presentations copy]; dispatch_async(presentQ, ^{ for (dispatch_block_t action in actions) action(); }); }
     }
     [_presentations removeAllObjects]; _present = nil;
     double deviceStart = 0, deviceEnd = 0;

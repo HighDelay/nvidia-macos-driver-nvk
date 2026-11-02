@@ -43,11 +43,18 @@ def main():
                  'NVK_BAR_VRAM', 'NVK_LOCAL_MAP_SYSMEM'):
         env.pop(name, None)
     results = []
-    for case in ('upload', 'map-failure', 'read-failure', 'full-bar'):
-        if case == 'full-bar':
+    for case in ('upload', 'map-failure', 'read-failure', 'full-bar',
+                 'persistent', 'persistent-coherent', 'full-bar-persistent',
+                 'hardware', 'hardware-persistent', 'small-static', 'small-dynamic',
+                 'full-bar-small-static', 'hardware-small-static'):
+        if case.startswith('full-bar'):
             env['ZINK_TEST_FULL_BAR'] = '1'
         else:
             env.pop('ZINK_TEST_FULL_BAR', None)
+        if case.startswith('hardware'):
+            env['ZINK_TEST_NATIVE_MEMORY'] = '1'
+        else:
+            env.pop('ZINK_TEST_NATIVE_MEMORY', None)
         started = time.monotonic()
         with (output/(case+'.log')).open('w') as log:
             try:

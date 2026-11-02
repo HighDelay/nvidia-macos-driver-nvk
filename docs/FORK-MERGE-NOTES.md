@@ -16,16 +16,156 @@ Before each merge:
 4. Build the affected components and check their behavior, resource lifetime and synchronization.
    Record which fork changes upstream now covers, what remains local and the validation limits.
 
-The current upstream base is **2.6.4 at `f95f4d2`**, from `upstream/main`, integrated on
-2026-10-29. The preceding base was 2.6.3 at `190a4d4`, integrated on 2026-10-28.
+The current upstream base is **2.6.6 at `470e391`**, from `upstream/main`, integrated on
+2026-11-01. Upstream rewrote its history: the old 2.6.5 base `ceba63c` maps to
+`c6f5aa0`, differing only in remote build paths and a tool docstring. This merge
+uses the actual old snapshot as its explicit three-way base and records the
+new upstream head as a parent; do not replay already integrated changes from
+the rewritten history. The preceding 2.6.4 base was `f95f4d2`.
+
+## PR #5 optimization branch integration, 2026-11-02
+
+Merged HighDelay `main` at `b240c970955210cd64fcc76b2fd4c47f3dae3332`
+into `perf/nvmtl-binding-cache`. That revision already contains NullMoth
+`470e391` (2.6.6); retain the merge ancestry rather than replaying rewritten
+upstream history. This updates the optimization branch, not main.
+
+Keep every recording cache and descriptor/resource lifetime repair listed below,
+including the latest vertex/index/sampler caches, buffer-address cache, atomic
+surface-seed publication, empty completion fast path and host query-pool reset.
+Upstream now covers framebuffer-fetch mask exclusion/fallback; use that shared
+implementation once. Resolve the buffer-upload conflict with one bulk 3D copy
+and upstream's detailed failure diagnostics. Missing-image refusal belongs in
+the common 3D copy implementation so both volume and single-plane callers are
+protected. Keep managed initial clears before uploads and transfer ordering.
+
+**Completion-witness exception:** this branch retains exact-match completion.
+The historical 2.6.5 instruction to accept a later lap is superseded here:
+sequence numbers are allocated before the queue submit lock, and pre-submit
+hooks can submit recursively. A later recorded sequence in the same ring slot
+therefore cannot certify an earlier command. Keep missing-witness quarantine
+and the backend-preserving fallback. `tools/test_witness_order.py` runs the
+production verdict and rejects reordered one/two-lap values; HighDelay's
+unmodified verdict fails that negative control. This bounded integration does
+not change submission locking or claim to fix witness-ring exhaustion.
+
+Preserve Photo Booth's real storage backing and Unknown-usage handling, the
+preview-only orientation adapter, two-plane publication and serial presentation
+queue. All Tahoe, native OpenGL/Minecraft, MoltenVK, small-BAR Zink, video,
+Wine/NVK/DXVK and optional-panel policies remain present. Translator, kernel,
+native runtime and installer sources are identical to `b240c97`; reuse their
+verified 2.6.6 release binaries. Only the plugin is rebuilt.
+
+See [merge validation](NVMTL-UPSTREAM-2.6.6.md). Keep this candidate in the
+existing local-test workflow: source updates PR #5; installation/reboot and
+live WindowServer measurements remain pending, and release publication is held.
+
+## Upstream 2.6.6 integration
+
+Two textual conflicts cover the drawable usage helper and remote plugin builder.
+Keep the fork's real-storage-view request and fallback, Photo Booth orientation
+adapter and WindowServer policy. Preserve upstream's `MTLTextureUsageUnknown`
+when no storage view exists, so writes can use an optimal-tiled storage twin.
+When a non-framebuffer-only app surface has real writable backing, expose the
+explicit read/write/render-target usage even for an Unknown descriptor. Core
+Image checks the public ShaderWrite bit; an unconditional early return bypasses
+the fork's drawable repair and makes Photo Booth black. WindowServer and FBO
+usage remain unchanged, and ShaderWrite must never advertise a missing view.
+
+Take ordered initialization clears before managed uploads, missing-VkImage
+copy refusal and bounded diagnostics, empty-assembly parsing, same-local-field
+pointer-phi resolution, and capability-gated rate-map identity. The plugin must
+report no rate-map support before setting translator capability bit 2; generic
+translation still refuses opaque map data. Preserve all existing translator
+pointer, callback, uniform-cbuf, sampler and rounding repairs.
+
+Take the Metal-capable desktop-owner check in both accelerator builds and the
+installer's root-only old-firmware backup/exclusive-create rollback, plus AMFI
+guidance. Keep native GLD installation, optional NMIntelFB default No, external
+kext retention, permanent collection paths, backup/recovery and opt-in handling.
+Remote builders use upstream's environment-selected host/root while retaining
+the fork's rotation headers and release `-O2`.
+
+Native Zink, Minecraft/Wine, DXVK/vkd3d/DLSS, the VP8/VP9 overlay and browser
+IOSurface repair are unchanged. Upstream's 15.0 Vulkan deployment-target change
+does not lower this complete fork package's 15.5 minimum: its retained Zink and
+gaming runtimes still require 15.5. Fork packages do not carry NullMoth's private
+release signature. Build and validation records accompany the local 2.6.6 test
+package; keep those exact assets for a later draft after user approval.
+
+Validation on RTX 2060 SUPER / Tahoe 26.7.1: both accelerator variants and the
+release plugin/translator compile. The library passes 2,227 tests plus 18 focused
+integration tests; the wrapper passes 43, with its two upstream ignores and two
+private-fixture exclusions unchanged. The test-only library copy prunes stale
+workspace lock entries without changing remaining dependency versions/checksums;
+the production dylib uses the tracked wrapper lock with `--locked`.
+All 21 translator GPU readback cases, four unspecified/explicit IOSurface write
+cases, 16 Core Image pixel/orientation frames and the C-ABI rate-map capability
+checks pass. Host regressions retain cursor drain, import lifetime/publication,
+installer rollback/external kexts, native GLD selection and optional panel policy.
+The isolated Tahoe kernel collection links with and without NMIntelFB, leaving
+the installed driver and live collection unchanged. This is not a boot test or
+Sequoia/laptop qualification; local user testing remains pending. Signatures,
+minimum OS, symlinks, runtime manifests and package checksums are verified before
+staging. Unchanged kernel/rendering runtimes retain their previous source records
+and exact hashes; upstream's deployment-target-only NVK replacement is not needed.
+
+The initial merge missed that default-descriptor interaction: its Core Image
+probe used explicit ShaderRead, while the Unknown-descriptor probe dispatched
+Metal directly and missed Core Image's stricter usage check. The follow-up
+reproduces both failures on the merged plugin and passes 32 Core Image
+pixel/orientation frames across Unknown/ShaderRead, RGBA/BGRA and shared/private
+backing. Keep that coverage alongside the no-storage/WindowServer/FBO host
+cases and Unknown RGBA16Unorm GPU writes. The user confirmed the normal Photo
+Booth preview is visible, moving and upright on Tahoe 26.7.1 after updating
+only the plugin; Zink, codecs, translator and kernel remain unchanged.
+
+## Optional Intel laptop panel framebuffer
+
+The complete package builder compiles the real `NMIntelFB` into `Optional/`,
+with source/payload hashes. Keep the virtual variant out of release archives.
+The installer prompts with a default of No; do not infer opt-in from a spoofed
+MacBook model. Preserve an existing opt-in during upgrades, explicit
+`--intel-panel=yes|no`, selected-kext preflight, removal checks, backup/rollback,
+interrupted-install recovery and uninstall handling. A new noninteractive
+installation skips the kext unless explicitly selected.
+
+This is experimental firmware-mode framebuffer support. The accelerator's
+`debug.nvaccel_igpu` path remains disabled by default. Do not claim accelerated
+Intel-panel gameplay or laptop sleep/wake qualification from a kernel link
+check. See [Intel panel setup](INTEL-PANEL.md).
+
+## Additional NVIDIA video codecs
+
+Retain the pinned `video/` codec overlay and `build/build_nvenc.py`. Complete
+future packages pass its verified output as `--video-runtime` to
+`build/stage_package.py`; keep the library in the Metal bundle and the source,
+license and hash record under `nvmtl/video`. Preserve an explicit addon opt-out.
+TU10x adds VP8/VP9 VideoToolbox decoders and keeps the driver's matched H.264/HEVC
+encoders/decoders. Do not register AV1 or VP8/VP9 hardware encoding on Turing.
+Keep PCI display-function filtering, VP8 odd-width chroma and malformed-frame
+checks, and qualify application codec selection separately from API decoding.
+The overlay is built against pinned NVIDIA/WebKit headers; it does not change
+the driver kernel, renderer, Zink or Wine interfaces. See [codec setup](../video/INSTALL.md).
+Preserve Ada's upstream H.264/HEVC/AV1 encoders and decoder selection, TU117's
+H.264/HEVC encoders and decoders, and Ampere's VP9/AV1 decoders alongside the
+driver's H.264/HEVC encoders. Turing must not narrow these existing paths.
+
+Keep decoder-owned pixel pools based on the negotiated output attributes,
+including IOSurface backing and Metal compatibility, even when the client
+requests only a pixel format. Copying only that minimal client dictionary
+produces heap-backed frames and crashes Chromium's GPU process during VP9
+playback. Preserve the direct-pool optimization and format/size conversion
+fallback. The native regression must require IOSurface-backed output for both
+minimal and explicit requests; retain the live Edge 2160p60 qualification in
+[browser validation](BROWSER-VIDEO-DECODING.md).
 
 ## NVMTL command recording caches
 
-The local framebuffer-fetch test candidate also carries v2.6.5 commits
-`4a377d9` and `8784c0b`: exclude separately bound set 3 from stage descriptor
-masks and fall back to older valid masks when new masks are unavailable.
-Retain the existing fetch barriers and bindings. This is not a complete v2.6.5
-merge; the upstream base above is unchanged. See
+The framebuffer-fetch optimization originated in v2.6.5 commits `4a377d9`
+and `8784c0b` and is now shared with the integrated upstream: exclude separately
+bound set 3 from stage descriptor masks and fall back to older valid masks when
+new masks are unavailable. Retain the existing fetch barriers and bindings. See
 [fetch-mask validation and deferred witness review](NVMTL-FRAMEBUFFER-FETCH-MASKS.md).
 
 Retain the per-recording, per-stage texture-index cache used by address-table
@@ -52,6 +192,15 @@ early exits must not leak. Keep the existing backend VkSampler interning and
 independent Metal wrappers. See [command cache validation](NVMTL-COMMAND-CACHES.md).
 
 ## Capture import reuse and planar GPU copies
+
+Preserve the Photo Booth follow-up to upstream PR #433: request an actual
+storage view before importing eligible non-framebuffer-only app drawables.
+If a linear alias drops requested storage usage, release it and use the private
+fallback; never advertise a nonexistent writable view. Keep WindowServer's
+requested usage unchanged. Also retain Photo Booth's preview-only orientation
+adapter, gated by process/bundle identity and actual NVMTL CAMetalLayer
+drawables. Do not disable Zink, change camera buffers/saved photos, or globally
+invert Core Image/Metal coordinates. See [validation and scope](PHOTOBOOTH-PREVIEW.md).
 
 Preserve the installer/uninstaller permanent-path repair: recover obsolete
 temporary collection references only through an unambiguous installed bundle
@@ -94,7 +243,10 @@ Retain the [static ABI review](ZINK-SEQUOIA-ABI.json) and distinguish that evide
 from application/boot qualification. The Sequoia RTX 2070 SUPER / 256 MiB BAR1
 machine subsequently passed all 25 isolated tests (native pixel copies, core/
 legacy contexts, sharing, resize, workers, windows, VSync and quarantine).
-Sequoia installation, kernel linking, reboot and gameplay remain untested.
+The user subsequently confirmed Minecraft 26.3 menus and single-player world
+rendering on this Sequoia machine after the small-BAR mapping repair; see
+[mapping evidence](ZINK-BUFFER-MAPPING.md). This does not qualify a fresh
+Sequoia kernel-collection build or every application.
 The shared adapter
 continues targeting macOS 15.5; do not copy Apple binaries into the runtime.
 The Zink package builder selects the GLD by default. Keep the original complete
@@ -112,6 +264,13 @@ Keep the Zink batch condition-variable and Darwin barrier repairs; the latter
 must have one serial return only after every other waiter leaves. Compare an
 equivalent upstream fix before removing either repair. Preserve the descriptor-
 set, staging-upload and bounded texture-worker fixes in the pinned overlay.
+
+Preserve the small-BAR CPU-visible buffer allocation policy, including both
+persistent storage and ordinary mutable buffers. Prefer coherent system RAM
+for their backing; retain full-BAR placement and device-only VRAM resources.
+Keep null-transfer handling after failed maps and allocation diagnostics.
+The 8 KiB static/dynamic regression must cover the 2 MiB backing slab, not just
+PBO allocations (which Mesa already classifies as staging).
 
 Keep native display synchronization tied to each context's CGL swap interval,
 including render-thread changes and independent windows. Preserve the explicit
@@ -131,6 +290,30 @@ Preserve native GLD rollback, build provenance and external-kext preservation du
 both preflight and live kernel-collection builds. Do not replace permanent
 external kext paths with disposable preflight paths. See
 [Zink integration review](ZINK-PR2-REVIEW.md) for the review and validation limits.
+
+## Upstream 2.6.5 integration
+
+Five files conflicted: CHANGELOG, NVMTLDevice, NVMTLObjects, nvmtl_vk and the
+ANGLE regression fixture. Retain both changelog histories and the fork's all-app
+ANGLE default: upstream's loaded-library detection is unnecessary for that
+broader policy. Retain the richer AIR texture component/access reflection already
+in this fork instead of duplicating upstream's narrower implementation.
+
+Combine upstream's ordered surface upload barrier with the fork's checked
+page-span calculation and nonzero plane offset. Preserve released-import reuse,
+VRAM publication tags, pending-write tracking and uncertain-work quarantine.
+Take upstream's two-plane private-image schedule-after-publication default,
+serial presentation queue, completion-witness reuse, descriptor-mask fallback,
+ARGB8 sampling (but rejected colour attachments), compressed mip copy checks,
+array reflection and shader translation improvements. These affect Metal and
+OpenGL-over-Metal clients; native Zink/Minecraft/Wine renderer sources and all
+kernel sources are unchanged. Preserve the qualified small-BAR Zink repair.
+
+Build and test records are under `out/upstream-2.6.5-review/`. The merged plugin
+and translator require new binaries; reuse unchanged kernel, native runtime,
+DXVK/vkd3d and CGL components only with verified prior-release hashes. Previous
+Sequoia Minecraft confirmation qualifies the unchanged Zink library, not a new
+boot or capture test of the 2.6.5 plugin.
 
 ## Upstream 2.6.4 integration
 
@@ -314,8 +497,12 @@ ZZZ and Honkai: Star Rail Global D3D11 gameplay are user-confirmed on RTX 2060
 SUPER / Tahoe 26.7.1 with YAAGL Wine 11.0-1, including scenery, characters and UI.
 HSR uses its Jadeite route with the required `--` separator; Steam Patch and the
 timeout fix default off for HSR/GI and on for ZZZ. Preserve these game-specific
-defaults. GI, CN gameplay, commercial CrossOver, other Wine builds and Sequoia
-hardware remain unqualified.
+defaults. A 2026-10-31 user report confirms GI startup and in-world rendering on
+RTX 4060 Laptop / native NVK with both Steam Patch and Timeout fix enabled.
+Document that tested GI configuration separately from its current default-off
+settings; do not apply it to HSR. The report did not specify OS/Wine versions.
+CN gameplay, commercial CrossOver, other Wine builds and Sequoia Wine hardware
+remain unqualified.
 Native and Windows Vulkan/D3D11 probes verify correctness, not an FPS improvement.
 D3D12 integration now includes pinned vkd3d-proton 3.1, optional NVIDIA Wine
 NGX/DXVK-NVAPI, and a GPU-copy bitmap HUD. ZZZ D3D12 and DLSS SR Quality were

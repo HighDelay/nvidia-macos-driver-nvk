@@ -73,7 +73,9 @@ uint64_t nvmtl_resid_for_sampler(id s);
 @interface NVMTLTextureReferenceType : NVMTLType { @public MTLDataType _texDataType; MTLTextureType _texType; MTLBindingAccess _access; BOOL _depth; } @end
 @interface NVMTLStructType : NVMTLType { @public NSArray *_members; } @end
 @interface NVMTLPointerType : NVMTLType { @public MTLDataType _elem; MTLBindingAccess _access; NSUInteger _align, _size; BOOL _isArgBuf; NVMTLStructType *_elemStruct; } @end
-@interface NVMTLStructMember : NSObject { @public NSString *_name; NSUInteger _offset; MTLDataType _dataType; NSUInteger _argIndex;
+// an array member of a reflected struct (MTLArrayType): element type, length and stride from the AIR struct_type_info
+@interface NVMTLArrayType : NVMTLType { @public MTLDataType _elem; NSUInteger _len, _stride; } @end
+@interface NVMTLStructMember : NSObject { @public NSString *_name; NSUInteger _offset; MTLDataType _dataType; NSUInteger _argIndex; NVMTLArrayType *_arr;
   NVMTLStructType *_struct; NVMTLTextureReferenceType *_texRef; NVMTLPointerType *_ptr; } @end
 @interface NVMTLArgument : NSObject { @public NSString *_name; MTLArgumentType _type; MTLBindingAccess _access; NSUInteger _index; BOOL _active;
   NSUInteger _arrayLength, _bufAlign, _bufSize; MTLDataType _bufDataType; NVMTLStructType *_bufStruct; NVMTLPointerType *_bufPtr;
@@ -189,9 +191,9 @@ extern id gNVMTLMainDevice;
   NSMutableSet *_resources;
   NSMutableDictionary *_sassTextures, *_sassSamplers;   // by Metal index, for kernels run from machine code
 } @end
-@interface NVMTLBlitCommandEncoder : NSObject <MTLBlitCommandEncoder> { @public NVMTLCommandBuffer *_cb; } @end
+@interface NVMTLBlitCommandEncoder : NSObject <MTLBlitCommandEncoder> { @public NVMTLCommandBuffer *_cb; __weak NVMTLCommandBuffer *_owner; } @end
 @interface NVMTLAccelerationStructure : NVMTLBuffer <MTLAccelerationStructure> { @public nvk_accel _as; nvk_buffer _uid; uint32_t _iftAdd; } @end
-@interface NVMTLAccelerationStructureCommandEncoder : NSObject <MTLAccelerationStructureCommandEncoder> { @public NVMTLCommandBuffer *_cb; } @end
+@interface NVMTLAccelerationStructureCommandEncoder : NSObject <MTLAccelerationStructureCommandEncoder> { @public NVMTLCommandBuffer *_cb; __weak NVMTLCommandBuffer *_owner; } @end
 uint32_t nvmtl_geoms_from_descriptor(id desc, nvmtl_geom *out, uint32_t max, int *instance, uint32_t *instance_count, NSMutableSet *track);
 #define NVMTL_NBUFAT 32   /* buffer argument indices an encoder tracks (Metal has 31) */
 @interface NVMTLRenderCommandEncoder : NSObject <MTLRenderCommandEncoder> {

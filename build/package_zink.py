@@ -14,6 +14,7 @@ import tempfile
 import stage_package as base_tools
 from record_zink_runtime import COMPONENTS
 from prepare_zink import MESA_COMMIT
+from package_layout import organize
 
 ROOT = Path(__file__).resolve().parents[1]
 BASE_RUNTIME = Path('Library/GPUBundles/nvmtl')
@@ -52,7 +53,7 @@ def copy_file(source, destination):
     destination.chmod(source.stat().st_mode & 0o777)
 
 
-def stage(base, zink, output, components=None, native_gld=False):
+def stage(base, zink, output, components=None, native_gld=False, records=None):
     if components is not None:
         raise ValueError("Stage matched driver components with build/stage_package.py first; arbitrary Library overlays are unsupported")
     base = base.resolve(strict=True)
@@ -60,6 +61,9 @@ def stage(base, zink, output, components=None, native_gld=False):
     output = output.absolute()
     if output.exists() or output.is_symlink() or base_tools.inside(output.resolve(), base):
         raise ValueError('Output must be new and outside the base package')
+    records = Path(records).absolute() if records is not None else output.with_name(output.name + '-build-records')
+    if records.exists() or records.is_symlink() or base_tools.inside(records.resolve(), output.resolve()) or base_tools.inside(records.resolve(), base):
+        raise ValueError('Build records must be new and outside the input/output package')
     base_tools.verify_manifest(base)
     base_tools.validate_links(base)
     for name in ('install.sh', 'uninstall.sh', 'nullmoth-runtime-check.sh', 'nullmoth-runtime-check', 'VERSION'):
@@ -108,6 +112,24 @@ def stage(base, zink, output, components=None, native_gld=False):
     with tempfile.TemporaryDirectory(prefix='.zink-package-', dir=output.parent) as temp:
         payload = Path(temp) / 'pkgroot'
         copy_bundle(base, payload)
+        # Always bundle the real framebuffer, outside Library/Extensions. Only
+        # an explicit installer choice copies it into the system repositories.
+        panel_build = Path(temp) / 'intel-panel'
+        run('/bin/bash', ROOT/'build/build_intel_panel.sh', panel_build)
+        panel = payload/'Optional/NMIntelFB.kext'
+        copy_bundle(panel_build/'NMIntelFB.kext', panel)
+        run('codesign', '--verify', '--strict', panel)
+        panel_identity = {
+            'source_commit': run('git', '-C', ROOT, 'rev-parse', 'HEAD').strip(),
+            'source_sha256': {str(p.relative_to(ROOT)): base_tools.digest(p) for p in
+                [ROOT/'build/build_intel_panel.sh', *sorted((ROOT/'kexts/NMIntelFB').glob('*'))]
+                if p.is_file()},
+            'files': {str(p.relative_to(panel)): base_tools.digest(p) for p in panel.rglob('*') if p.is_file()},
+            'installation': 'optional installer prompt; default no; retain an existing opt-in',
+            'nvidia_intel_panel_acceleration_enabled_by_default': False,
+        }
+        (payload/'Optional/INTEL-PANEL-BUILD.json').write_text(json.dumps(panel_identity, indent=2)+'\n')
+        shutil.copy2(ROOT/'docs/INTEL-PANEL.md', payload/'Optional/README.md')
         replacements = {}
         # Verify the firmware version from the actual NVRM image, not stale text
         # in release manifests. Every referenced mandatory firmware must exist.
@@ -170,7 +192,8 @@ def stage(base, zink, output, components=None, native_gld=False):
         shutil.copy2(ROOT / 'docs/ZINK-SEQUOIA-ABI.json', runtime / 'CGL-ABI-EVIDENCE.json')
         shutil.copy2(ROOT / 'docs/ZINK-SEQUOIA-TESTS.json', runtime / 'CGL-SEQUOIA-TESTS.json')
         for name in ('ZINK-PR2-REVIEW.md','COMBINED-INSTALL.md',
-                     'ZINK-BUFFER-MAPPING.md','ZINK-BUFFER-MAPPING-TESTS.json'):
+                     'ZINK-BUFFER-MAPPING.md','ZINK-BUFFER-MAPPING-TESTS.json',
+                     'ZINK-PERSISTENT-MAPPING-TESTS.json','ZINK-MUTABLE-MAPPING-TESTS.json'):
             shutil.copy2(ROOT / 'docs' / name,runtime / name)
         source_dir = runtime / 'zink-source'
         if source_dir.exists(): shutil.rmtree(source_dir)
@@ -214,35 +237,39 @@ def stage(base, zink, output, components=None, native_gld=False):
             'PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY '
             'CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, '
             'OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.\n')
-        identity = {'base': str(base), 'base_manifest_sha256': base_tools.digest(base / 'SHA256SUMS'),
+        version = (payload / 'VERSION').read_text().strip()
+        identity = {'schema_version': 1, 'repository': 'https://github.com/HighDelay/nvidia-macos-driver-nvk',
+                    'package_version': version, 'release_tag': 'v' + version + '-nvk', 'runtime_minimum_macos': '15.5',
+                    'base': str(base), 'base_manifest_sha256': base_tools.digest(base / 'SHA256SUMS'),
                     'source_commit': run('git', '-C', ROOT, 'rev-parse', 'HEAD').strip(),
-                    'source_dirty': bool(run('git', '-C', ROOT, 'status', '--porcelain').strip()),
+                    'source_dirty': bool(run('git', '-C', ROOT, 'status', '--porcelain', '--untracked-files=no').strip()),
                     'component_replacements': replacements, 'firmware': sorted(firmware_paths),
+                    'optional_intel_panel': panel_identity,
                     'zink_sha256': base_tools.digest(runtime / 'libnvk_zink.dylib'),
                     'cgl_sha256': base_tools.digest(runtime / 'libnvk_cgl.dylib'),
                     'gld_sha256': (base_tools.digest(payload / 'Library/GPUBundles/NVKZinkGLDriver.bundle/Contents/MacOS/NVKZinkGLDriver')
                                    if native_gld else None),
                     'zink_source_sha256': {p.name: base_tools.digest(p) for p in sorted(source_dir.iterdir()) if p.is_file()},
-                    'native_cgl': ('automatic GLD proxy for Intel Sequoia 15.5+ and Tahoe; Sequoia 15.8.1 passes 25 isolated probes, boot/gameplay tests pending'
+                    'native_cgl': ('automatic GLD proxy for Intel Sequoia 15.5+ and Tahoe; Minecraft 26.3 gameplay confirmed on Sequoia 15.8.1 / RTX 2070 SUPER / 256 MiB BAR1'
                                    if native_gld else 'explicit application attachment; GLD bundle is not included'),
                     'native_cgl_macos_majors': ['15','26'] if native_gld else [],
                     'native_cgl_abi_evidence_sha256': base_tools.digest(ROOT/'docs/ZINK-SEQUOIA-ABI.json'),
                     'private_vulkan_build': provenance,
                     'component_builds': components_record,
                     'native_cgl_os_build': (runtime / 'cgl-os-build.txt').read_text().strip()}
-        (payload / 'PACKAGE-IDENTITY.json').write_text(json.dumps(identity, indent=2) + '\n')
-        shutil.copy2(ROOT / 'docs/COMBINED-INSTALL.md', payload / 'READ-ME.md')
-        shutil.copy2(ROOT / 'docs/CAPTURE-PR3-REVIEW.md', payload / 'CAPTURE-REVIEW.md')
+        # Keep detailed source/validation records outside the installable tree.
+        organized = Path(temp) / 'build-records'
+        organize(payload, organized, identity)
         for major in ('15', '26'):
             plist = plistlib.loads((payload / 'Library/NullMoth/kexts' / major / 'NVAccel.kext/Contents/Info.plist').read_bytes())
             if plist.get('IOKitPersonalities', {}).get('NVAccel', {}).get('IOGLBundleName') == 'NVKZinkGLDriver' and not native_gld:
                 raise ValueError('The incomplete diagnostic GLD must not be activated')
             base_tools.write_manifest(payload / 'Library/NullMoth/kexts' / major)
-        names = sorted(p.relative_to(payload).as_posix() for p in payload.rglob('*') if p.is_file() or p.is_symlink())
-        (payload / 'MANIFEST.txt').write_text('\n'.join(n for n in names if n != 'SHA256SUMS') + '\n')
         base_tools.validate_links(payload)
         base_tools.write_manifest(payload)
         run('/bin/bash', payload / 'nullmoth-runtime-check.sh', payload, run('sw_vers', '-productVersion').strip())
+        records.parent.mkdir(parents=True, exist_ok=True)
+        os.rename(organized, records)
         os.rename(payload, output)
     return output
 
@@ -261,11 +288,12 @@ def main():
     ap.add_argument('--components', type=Path, help='Deprecated; use build/stage_package.py to prepare matched components first')
     ap.add_argument('--stage', required=True, type=Path)
     ap.add_argument('--archive', required=True, type=Path)
+    ap.add_argument('--build-records', type=Path, help='New external build-record directory (default: <stage>-build-records)')
     ap.add_argument('--native-gld', action='store_true', default=True, help='Select native Zink OpenGL for applications (default; Intel Sequoia/Tahoe accelerators)')
     ap.add_argument('--explicit-cgl-only', action='store_false', dest='native_gld', help='Developer-only package: do not select a system GLD')
     args = ap.parse_args()
     if args.archive.exists(): raise SystemExit('Archive already exists')
-    payload = stage(args.base, args.zink, args.stage, args.components, args.native_gld)
+    payload = stage(args.base, args.zink, args.stage, args.components, args.native_gld, args.build_records)
     args.archive.parent.mkdir(parents=True, exist_ok=True)
     temporary = args.archive.with_name('.' + args.archive.name + '.tmp')
     try:

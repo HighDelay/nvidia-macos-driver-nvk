@@ -1,0 +1,62 @@
+{
+  "date": "2026-10-31",
+  "scope": "Optional NMIntelFB real variant; installer and packaging only; no kernel implementation changes",
+  "test_suites": [
+    {
+      "test": "intel_panel_install",
+      "passed": 13
+    },
+    {
+      "test": "primary_gpu_install",
+      "passed": 9
+    },
+    {
+      "test": "native_gld_install",
+      "passed": 16
+    },
+    {
+      "test": "install_private_copy",
+      "passed": 10
+    },
+    {
+      "test": "install_acl",
+      "passed": 5
+    },
+    {
+      "test": "uninstall_kext_paths",
+      "passed": 10
+    },
+    {
+      "test": "install_keeps_my_settings",
+      "passed": 5
+    },
+    {
+      "test": "install_kmutil_blocker",
+      "passed": 4
+    },
+    {
+      "test": "package_zink",
+      "passed": 18
+    }
+  ],
+  "test_count": 90,
+  "kernel_link": {
+    "passed": true,
+    "host": "Tahoe",
+    "five_kexts_present": true,
+    "live_files_unchanged": true,
+    "installed": false,
+    "sequoia_kernel_link_tested": false,
+    "laptop_boot_tested": false,
+    "optional_kext_sha256": "2415e7ef83107cfdde1bcfa89b2dbfe1d853d8570bfce9067ce28251fde7fdf6",
+    "temporary_collection_bytes": 18907136
+  },
+  "physical_laptop_boot_tested": false,
+  "intel_panel_acceleration_enabled": false,
+  "private_virtual_variant_in_release": false,
+  "optional_path": "Optional/NMIntelFB.kext",
+  "default_choice": "No",
+  "reused_driver_release": "v2.6.5-nvk",
+  "base_sha256": "11b6031cc295c1a5bf4a1008fbe8b8703a3256cd2a8647f4a4d5069e4a264322",
+  "real_bundle_signed_sha256": "2415e7ef83107cfdde1bcfa89b2dbfe1d853d8570bfce9067ce28251fde7fdf6"
+}

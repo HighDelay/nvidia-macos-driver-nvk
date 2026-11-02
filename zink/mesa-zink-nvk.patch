@@ -114,6 +114,30 @@
  #include "MoltenVK/mvk_vulkan.h"
  // Source of MVK_VERSION
  #include "MoltenVK/mvk_config.h"
+@@ -1048,6 +1048,23 @@
+    mai.pNext = NULL;
+    mai.allocationSize = reqs->size;
+    enum zink_heap heap = zink_heap_from_domain_flags(alloc_info->flags, alloc_info->aflags);
++#if defined(NVK_ZINK_NVK)
++   if (obj->is_buffer &&
++       ((alloc_info->flags & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT) ||
++        (templ->flags & PIPE_RESOURCE_FLAG_MAP_PERSISTENT)) &&
++       zink_driverid(screen) == VK_DRIVER_ID_MESA_NVK && !screen->resizable_bar) {
++      /* Allocating BAR-backed memory can succeed while mapping its slab
++       * fails later. Persistent maps cannot use transient staging, and
++       * ordinary mutable buffers can also map directly (an 8 KiB buffer
++       * maps a 2 MiB slab). Keep CPU-mappable backing in coherent system
++       * RAM; the host-visible heap ordering selects a non-device-local
++       * type first. Device-only buffers and images keep their VRAM heaps.
++       */
++      alloc_info->flags &= ~VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT;
++      alloc_info->flags |= VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
++      heap = zink_heap_from_domain_flags(alloc_info->flags, alloc_info->aflags);
++   }
++#endif
+    if (templ->flags & PIPE_RESOURCE_FLAG_MAP_COHERENT) {
+       if (!(vk_domain_from_heap(heap) & VK_MEMORY_PROPERTY_HOST_COHERENT_BIT))
+          heap = zink_heap_from_domain_flags(alloc_info->flags & ~VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, alloc_info->aflags);
 --- a/src/gallium/meson.build
 +++ b/src/gallium/meson.build
 @@ -260,3 +260,8 @@
@@ -305,3 +329,19 @@
     uint64_t sequence;
     mtx_t mutex;
     cnd_t condvar;
+--- a/src/gallium/drivers/zink/zink_bo.c
++++ b/src/gallium/drivers/zink/zink_bo.c
+@@ -674,7 +674,12 @@
+       if (!cpu) {
+          VkResult result = VKSCR(MapMemory)(screen->dev, real->mem, 0, real->base.size, 0, &cpu);
+          if (result != VK_SUCCESS) {
+-            mesa_loge("ZINK: vkMapMemory failed (%s)", vk_Result_to_str(result));
++            unsigned type = real->base.placement;
++            VkMemoryType props = screen->info.mem_props.memoryTypes[type];
++            mesa_loge("ZINK: vkMapMemory failed (%s; allocation=%"PRIu64" bytes, type=%u, flags=%#x, heap=%u, heap_size=%"PRIu64" bytes)",
++                      vk_Result_to_str(result), (uint64_t)real->base.size,
++                      type, props.propertyFlags, props.heapIndex,
++                      (uint64_t)screen->info.mem_props.memoryHeaps[props.heapIndex].size);
+             simple_mtx_unlock(&real->lock);
+             p_atomic_dec(&real->u.real.map_count);
+             return NULL;

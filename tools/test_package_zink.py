@@ -16,6 +16,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / 'build'))
 import package_zink as pkg
 from record_zink_runtime import record
+from package_layout import ZINK_REPORTS
 
 
 class PackageZinkTests(unittest.TestCase):
@@ -73,6 +74,8 @@ class PackageZinkTests(unittest.TestCase):
 
     def fake_run(self, *args):
         self.commands.append(tuple(str(a) for a in args))
+        if args[0] == '/bin/bash' and str(args[1]).endswith('build_intel_panel.sh'):
+            self.bundle(Path(args[2])/'NMIntelFB.kext', 'NMIntelFB')
         if args[0] == 'strings': return self.firmware
         if args[0] == 'git': return 'test-commit\n'
         if args[0] == 'otool': return 'cmd LC_RPATH\n cmdsize 40\n path /Library/GPUBundles/nvmtl (offset 12)\n'
@@ -96,6 +99,12 @@ class PackageZinkTests(unittest.TestCase):
         self.assertEqual((self.out / 'licenses/base-notice.txt').read_bytes(), b'keep this notice')
         self.assertEqual(json.loads((self.out / pkg.RUNTIME / 'nvk_icd.json').read_text())['ICD']['library_path'], './libnvk_renderer.dylib')
         self.assertEqual((self.out / pkg.BASE_RUNTIME / 'nvk_icd.json').read_bytes(), (self.base / pkg.BASE_RUNTIME / 'nvk_icd.json').read_bytes())
+        self.assertTrue((self.out/'Optional/NMIntelFB.kext/Contents/MacOS/NMIntelFB').is_file())
+        self.assertFalse((self.out/'Library/Extensions/NMIntelFB.kext').exists())
+        self.assertFalse(list(self.out.rglob('NMIntelFBVirtual.kext')))
+        identity = json.loads((self.out.with_name(self.out.name+'-build-records')/'Optional/INTEL-PANEL-BUILD.json').read_text())
+        for name, sha in identity['files'].items():
+            self.assertEqual(pkg.base_tools.digest(self.out/'Optional/NMIntelFB.kext'/name), sha)
         for command in ('Install.command', 'Verify.command', 'Uninstall.command'):
             self.assertTrue((self.out / command).stat().st_mode & 0o111)
         entries = {}
@@ -113,6 +122,51 @@ class PackageZinkTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'SHA256SUMS mismatch'):
             self.stage()
         self.assertFalse(self.out.exists())
+
+    def test_old_reports_leave_archive_but_runtime_manifests_and_signed_json_stay(self):
+        reports = ['BASELINE-IDENTITY.json', 'BASE-RELEASE-IDENTITY.json',
+                   'RELEASE-IDENTITY.json', 'MERGE-VALIDATION.json',
+                   'CAPTURE-REVIEW.md', 'LOCAL-TEST.md', 'MANIFEST.txt']
+        for name in reports:
+            self.put(self.base/name,b'historical report')
+        self.put(self.base/'provenance/old-build.json',b'older build')
+        for name in ZINK_REPORTS:
+            self.put(self.base/pkg.RUNTIME/name,b'old Zink report')
+        signed = Path('Library/GPUBundles/NVMTLDriver.bundle/Contents/Resources/sass/seed.json')
+        manifests = [pkg.BASE_RUNTIME/'wine/nvk-wine-runtime.json',
+                     pkg.BASE_RUNTIME/'wine/DXVK-BUILD.json',
+                     pkg.BASE_RUNTIME/'video/NVENC-BUILD.json',signed]
+        for name in manifests:
+            self.put(self.base/name,b'component contract')
+        self.put(self.base/'WINE-NVK.md',b'# Wine setup\n')
+        pkg.base_tools.write_manifest(self.base)
+        self.original = self.snapshot(self.base)
+        self.stage(); self.unchanged()
+        records = self.out.with_name(self.out.name+'-build-records')
+        for name in reports:
+            self.assertFalse((self.out/name).exists())
+            self.assertEqual((records/name).read_bytes(),b'historical report')
+        self.assertEqual((records/'provenance/old-build.json').read_bytes(),b'older build')
+        for name in ZINK_REPORTS:
+            self.assertFalse((self.out/pkg.RUNTIME/name).exists())
+            self.assertTrue((records/pkg.RUNTIME/name).is_file())
+        for name in manifests:
+            self.assertEqual((self.out/name).read_bytes(),b'component contract')
+        self.assertEqual((self.out/'Guides/Wine-CrossOver.md').read_bytes(),b'# Wine setup\n')
+        self.assertEqual({p.name for p in self.out.glob('*.json')},{'PACKAGE-IDENTITY.json'})
+        self.assertEqual({p.name for p in self.out.glob('*.md')},{'READ-ME.md'})
+        compact = json.loads((self.out/'PACKAGE-IDENTITY.json').read_text())
+        self.assertEqual(compact['detailed_build_record_sha256'],pkg.base_tools.digest(records/'PACKAGE-IDENTITY.json'))
+        pkg.base_tools.verify_manifest(self.out)
+
+    def test_existing_external_records_are_not_overwritten(self):
+        records=self.out.with_name(self.out.name+'-build-records')
+        self.put(records/'keep',b'existing records')
+        with self.assertRaisesRegex(ValueError,'Build records must be new'):
+            self.stage()
+        self.assertFalse(self.out.exists())
+        self.assertEqual((records/'keep').read_bytes(),b'existing records')
+        self.unchanged()
 
     def test_signed_shader_resources_survive_transient_cache_filter(self):
         signed = Path('Library/GPUBundles/NVMTLDriver.bundle/Contents/Resources/sass/seed.bin')
