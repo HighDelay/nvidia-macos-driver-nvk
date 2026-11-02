@@ -60,6 +60,18 @@ See [merge validation](NVMTL-UPSTREAM-2.6.6.md). Keep this candidate in the
 existing local-test workflow: source updates PR #5; installation/reboot and
 live WindowServer measurements remain pending, and release publication is held.
 
+## Native Zink resize follow-up, 2026-11-02
+
+The PR #5 follow-up also retains the native Zink presentation fallback described
+in [resize validation](NVMTL-RESIZE-20261102.md). A full small BAR1 aperture can
+refuse a new drawable's family VRAM even though the game continues rendering.
+After an invalid external VRAM import, copy into aligned, bounded IOSurface
+system pages on the same Zink device. Keep the write lock until confirmed GPU
+completion and publish its seed; do not publish a family-VRAM dirty/tag marker
+for this path. Preserve failed-import cleanup and uncertain-work quarantine.
+The native Minecraft Vulkan/Wine frontend remains a separate implementation;
+this fallback changes native Zink only.
+
 ## Upstream 2.6.6 integration
 
 Two textual conflicts cover the drawable usage helper and remote plugin builder.

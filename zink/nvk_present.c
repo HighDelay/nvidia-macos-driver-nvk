@@ -30,6 +30,7 @@ struct copy_frame {
    VkDeviceMemory memory;
    VkCommandPool pool;
    VkFence fence;
+   bool host_locked;
 };
 static pthread_mutex_t quarantine_lock = PTHREAD_MUTEX_INITIALIZER;
 static struct copy_frame *quarantine;
@@ -47,6 +48,7 @@ static void release_frame(struct zink_screen *screen, struct copy_frame *frame)
    if (frame->fence) screen->vk.DestroyFence(screen->dev, frame->fence, NULL);
    if (frame->buffer) screen->vk.DestroyBuffer(screen->dev, frame->buffer, NULL);
    if (frame->memory) screen->vk.FreeMemory(screen->dev, frame->memory, NULL);
+   if (frame->host_locked) IOSurfaceUnlock(frame->surface, 0, NULL);
    pipe_resource_reference(&frame->image, NULL);
    if (frame->surface) CFRelease(frame->surface);
    if (frame->renderer) dlclose(frame->renderer);
@@ -103,7 +105,9 @@ int nvk_zink_copy_vram(struct pipe_screen *pscreen, struct pipe_resource *image,
       goto failed;
    frame->surface = (IOSurfaceRef)CFRetain(surface);
    pipe_resource_reference(&frame->image, image);
-   VkBufferCreateInfo buffer = { .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
+   VkExternalMemoryBufferCreateInfo external = { .sType = VK_STRUCTURE_TYPE_EXTERNAL_MEMORY_BUFFER_CREATE_INFO,
+      .handleTypes = VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_FD_BIT };
+   VkBufferCreateInfo buffer = { .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO, .pNext = &external,
       .size = row * image->height0, .usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
       .sharingMode = VK_SHARING_MODE_EXCLUSIVE };
    if (screen->vk.CreateBuffer(screen->dev, &buffer, NULL, &frame->buffer) != VK_SUCCESS) goto failed;
@@ -125,7 +129,41 @@ int nvk_zink_copy_vram(struct pipe_screen *pscreen, struct pipe_resource *image,
    stage(&record);
    VkResult result = screen->vk.AllocateMemory(screen->dev, &allocation, NULL, &frame->memory);
    stage(NULL); /* Clear thread-local staged imports on every allocation result. */
-   if (result != VK_SUCCESS) { close(fd); goto failed; }
+   if (result != VK_SUCCESS) {
+      close(fd);
+      /* A small BAR1 aperture can be full while ordinary GPU memory remains
+       * available. Copy directly into the IOSurface's imported system pages
+       * in that case. No CPU reads or copies of game pixels are involved.
+       * IOSurface locking/seed publication replaces the family-VRAM tag. */
+      if (result != VK_ERROR_INVALID_EXTERNAL_HANDLE || !screen->info.have_EXT_external_memory_host)
+         goto failed;
+      size_t align = screen->info.ext_host_mem_props.minImportedHostPointerAlignment;
+      if (!align || (align & (align - 1)) || requirements.size > SIZE_MAX - (align - 1)) goto failed;
+      if (IOSurfaceLock(surface, 0, NULL) != kIOReturnSuccess) goto failed;
+      frame->host_locked = true;
+      void *base = IOSurfaceGetBaseAddress(surface);
+      if (!base || (uintptr_t)base % align) goto failed;
+      screen->vk.DestroyBuffer(screen->dev, frame->buffer, NULL); frame->buffer = VK_NULL_HANDLE;
+      external.handleTypes = VK_EXTERNAL_MEMORY_HANDLE_TYPE_HOST_ALLOCATION_BIT_EXT;
+      if (screen->vk.CreateBuffer(screen->dev, &buffer, NULL, &frame->buffer) != VK_SUCCESS) goto failed;
+      screen->vk.GetBufferMemoryRequirements(screen->dev, frame->buffer, &requirements);
+      if (requirements.size > SIZE_MAX - (align - 1)) goto failed;
+      size_t bytes = (requirements.size + align - 1) & ~(align - 1);
+      if (bytes > size) goto failed;
+      VkMemoryHostPointerPropertiesEXT properties = { .sType = VK_STRUCTURE_TYPE_MEMORY_HOST_POINTER_PROPERTIES_EXT };
+      if (screen->vk.GetMemoryHostPointerPropertiesEXT(screen->dev, external.handleTypes, base, &properties) != VK_SUCCESS)
+         goto failed;
+      for (type = 0; type < screen->info.mem_props.memoryTypeCount; ++type)
+         if ((requirements.memoryTypeBits & properties.memoryTypeBits & (1u << type)) &&
+             (screen->info.mem_props.memoryTypes[type].propertyFlags &
+              (VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT)) ==
+             (VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT)) break;
+      if (type == screen->info.mem_props.memoryTypeCount) goto failed;
+      VkImportMemoryHostPointerInfoEXT host = { .sType = VK_STRUCTURE_TYPE_IMPORT_MEMORY_HOST_POINTER_INFO_EXT,
+         .handleType = external.handleTypes, .pHostPointer = base };
+      allocation.pNext = &host; allocation.allocationSize = bytes; allocation.memoryTypeIndex = type;
+      if (screen->vk.AllocateMemory(screen->dev, &allocation, NULL, &frame->memory) != VK_SUCCESS) goto failed;
+   }
    if (screen->vk.BindBufferMemory(screen->dev, frame->buffer, frame->memory, 0) != VK_SUCCESS) goto failed;
    VkCommandPoolCreateInfo pool = { .sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO,
       .queueFamilyIndex = screen->gfx_queue };
@@ -152,6 +190,12 @@ int nvk_zink_copy_vram(struct pipe_screen *pscreen, struct pipe_resource *image,
       .imageExtent = {image->width0, image->height0, 1} };
    screen->vk.CmdCopyImageToBuffer(command, resource->obj->image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
                                   frame->buffer, 1, &region);
+   if (frame->host_locked) {
+      VkMemoryBarrier host = { .sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER,
+         .srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT, .dstAccessMask = VK_ACCESS_HOST_READ_BIT };
+      screen->vk.CmdPipelineBarrier(command, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_HOST_BIT,
+                                    0, 1, &host, 0, NULL, 0, NULL);
+   }
    /* Restore the tracked layout. The application never observes our scratch
     * image, and subsequent Gallium operations retain their normal state. */
    barrier.srcAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
@@ -181,7 +225,8 @@ int nvk_zink_copy_vram(struct pipe_screen *pscreen, struct pipe_resource *image,
              (VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT)) host_types |= 1u << i;
       const struct nvk_zink_present_event event = {
          (void *)screen->vk_GetDeviceProcAddr, (void *)screen->dev, (void *)screen->queue,
-         (uint64_t)frame->buffer, (uint32_t)row, image->width0, image->height0, screen->gfx_queue, host_types};
+         (uint64_t)frame->buffer, (uint32_t)row, image->width0, image->height0, screen->gfx_queue, host_types,
+         frame->host_locked};
       simple_mtx_lock(screen->queue_lock);
       observed = observer(&event);
       simple_mtx_unlock(screen->queue_lock);
@@ -192,7 +237,14 @@ int nvk_zink_copy_vram(struct pipe_screen *pscreen, struct pipe_resource *image,
       pthread_mutex_unlock(&quarantine_lock);
       return -1; /* No destruction or drawable publication after uncertain work. */
    }
-   int published = observed && dirty(screen->dev, IOSurfaceGetID(surface), 0) == 0 && publish_tag(surface);
+   int published;
+   if (frame->host_locked) {
+      published = IOSurfaceUnlock(surface, 0, NULL) == kIOReturnSuccess;
+      frame->host_locked = false;
+      published = observed && published;
+   } else {
+      published = observed && dirty(screen->dev, IOSurfaceGetID(surface), 0) == 0 && publish_tag(surface);
+   }
    release_frame(screen, frame);
    return published;
 failed:

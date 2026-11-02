@@ -13,9 +13,11 @@
 #include <cstring>
 #include <initializer_list>
 #include <chrono>
+#include <vector>
 #include <sys/sysctl.h>
 
 static unsigned verified;
+static unsigned host_verified;
 static unsigned red = 255, green_value = 255;
 static bool transparent;
 static int reject(const nvk_zink_present_event *) { return 0; }
@@ -108,7 +110,9 @@ static int observe(const nvk_zink_present_event *event)
       DestroyBuffer(device, target, nullptr); FreeMemory(device, memory, nullptr);
       require(!mismatches, "Native drawable copy has incorrect pixels/orientation/alpha");
       ++verified;
-      printf("PASS native copy %u: %ux%u pitch=%u, all pixels verified\n", verified,event->width,event->height,event->row);
+      host_verified += event->host_backing != 0;
+      printf("PASS native copy %u: %ux%u pitch=%u backing=%s, all pixels verified\n",
+             verified,event->width,event->height,event->row,event->host_backing ? "system pages" : "VRAM");
       return 1;
    } catch (const std::exception &error) {
       fprintf(stderr, "Native copy diagnostic: %s\n", error.what());
@@ -119,10 +123,10 @@ static int observe(const nvk_zink_present_event *event)
 int main(int argc, char **argv)
 {
    @autoreleasepool { try {
-      require(argc >= 3, "usage: native-probe libnvk_cgl.dylib nvk_icd.json [transparent] [automatic] [worker] [reject|uncertain] [default] [windows] [swap-interval] [pacing]");
+      require(argc >= 3, "usage: native-probe libnvk_cgl.dylib nvk_icd.json [transparent] [automatic] [worker] [reject|uncertain] [default] [windows] [swap-interval] [pacing] [large-resize]");
       setvbuf(stdout, nullptr, _IOLBF, 0);
       bool automatic = false, worker = false, defaults = false, windows = false;
-      bool swap_interval = false, pacing = false;
+      bool swap_interval = false, pacing = false, large_resize = false;
       int failure = 0;
       for (int i = 3; i < argc; ++i) {
          if (!strcmp(argv[i], "transparent")) transparent = true;
@@ -134,6 +138,7 @@ int main(int argc, char **argv)
          else if (!strcmp(argv[i], "windows")) windows = true;
          else if (!strcmp(argv[i], "swap-interval")) swap_interval = true;
          else if (!strcmp(argv[i], "pacing")) { pacing = true; swap_interval = true; }
+         else if (!strcmp(argv[i], "large-resize")) large_resize = true;
          else require(false, "Unknown option");
       }
       if (defaults) unsetenv("NVKZINK_PRESENT"); else setenv("NVKZINK_PRESENT", "native", 1);
@@ -168,19 +173,26 @@ int main(int argc, char **argv)
       if (!automatic) require(attach(cgl,128,128), error());
       printf("Native test renderer: %s\n", glGetString(GL_RENDERER));
       auto present = (int(*)(CGLContextObj))dlsym(library,"nvk_cgl_present"); require(present,"Present API");
-      for (const NSSize size : {NSMakeSize(128,128),NSMakeSize(64,96),NSMakeSize(192,160),NSMakeSize(640,480)}) {
+      std::vector<NSSize> sizes = {NSMakeSize(128,128),NSMakeSize(64,96),NSMakeSize(192,160),NSMakeSize(640,480)};
+      if (large_resize) sizes = {NSMakeSize(128,128),NSMakeSize(854,480),NSMakeSize(1920,960),
+         NSMakeSize(854,480),NSMakeSize(1920,1080),NSMakeSize(1280,720),
+         NSMakeSize(1920,960),NSMakeSize(640,480)};
+      for (const NSSize size : sizes) {
          [window setContentSize:size]; [context update];
          for (unsigned i=0;i<3;++i) {
             [[NSRunLoop currentRunLoop] runUntilDate:[NSDate dateWithTimeIntervalSinceNow:0.05]];
             NSRect backing = view.wantsBestResolutionOpenGLSurface ? [view convertRectToBacking:view.bounds] : view.bounds;
             unsigned width=backing.size.width,height=backing.size.height;
-            require(resize(cgl,width,height),error()); draw_pattern(width,height);
+            /* Automatic mode must pick up AppKit's new size itself. Calling
+             * the bridge resize API here would hide a broken update hook. */
+            if (!(large_resize && automatic)) require(resize(cgl,width,height),error());
+            draw_pattern(width,height);
             require(!glGetError(), "GL draw");
             if (i & 1) require(present(cgl),error());
             else require(!CGLFlushDrawable(cgl), "CGL swap"); require(!strcmp(error(),"none"),error());
          }
       }
-      require(verified==12,"Every native frame must be verified");
+      require(verified==sizes.size()*3,"Every native frame must be verified");
       if (swap_interval) {
          check_swap_interval(view,cgl,initial_interval);
          for (GLint interval : {0,1,0}) {
@@ -284,6 +296,8 @@ int main(int argc, char **argv)
          printf("PASS: %s presentation does not publish or reuse uncertain resources\n", failure<0?"uncertain":"rejected");
       }
       observer(nullptr); require(detach(cgl),error());
+      if (getenv("ZINK_TEST_NO_FAMILY_VRAM"))
+         require(host_verified==verified,"Every frame must use the GPU system-page fallback under injected VRAM refusal");
       [NSOpenGLContext clearCurrentContext]; [window orderOut:nil];
       puts("PASS: native drawable GPU copy, orientation, opacity and resize; no Apple GL presentation blit");
       return 0;

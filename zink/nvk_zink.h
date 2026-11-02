@@ -45,6 +45,7 @@ struct nvk_zink_present_event {
    void *get_device_proc_addr, *device, *queue;
    uint64_t buffer;
    uint32_t row, width, height, queue_family, host_coherent_types;
+   uint32_t host_backing; /* GPU copy into IOSurface pages after a VRAM import refusal. */
 };
 typedef int (*nvk_zink_present_observer)(const struct nvk_zink_present_event *);
 void nvk_zink_set_present_observer(nvk_zink_present_observer);

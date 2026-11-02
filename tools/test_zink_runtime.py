@@ -46,6 +46,11 @@ def main():
         ('native-reject','zink_native_present_probe',['reject'],False,'native'),
         ('native-uncertain','zink_native_present_probe',['uncertain'],False,'native'),
         ('native-gld-auto','zink_native_present_probe',['automatic','default'],True,None),
+        ('native-large-resize','zink_native_present_probe',['large-resize','default'],False,None),
+        ('native-gld-large-resize','zink_native_present_probe',['automatic','large-resize','default'],True,None),
+        ('native-no-vram','zink_native_present_probe',['automatic','large-resize','default'],True,None),
+        ('native-no-vram-reject','zink_native_present_probe',['reject'],False,None),
+        ('native-no-vram-uncertain','zink_native_present_probe',['uncertain'],False,None),
         ('native-gld-worker','zink_native_present_probe',['automatic','worker','transparent'],True,'native'),
         ('native-multiple-windows','zink_native_present_probe',['automatic','windows'],True,'native'),
         ('native-swap-interval','zink_native_present_probe',['swap-interval'],False,'native'),
@@ -59,6 +64,8 @@ def main():
         env = dict(os.environ,NVKZINK_REQUIRE_GPU='1')
         env.pop('DYLD_INSERT_LIBRARIES',None);env.pop('NVKZINK_PRESENT',None)
         env.pop('ZINK_TEST_OS_BUILD',None)
+        env.pop('ZINK_TEST_NO_FAMILY_VRAM',None)
+        if name.startswith('native-no-vram'): env['ZINK_TEST_NO_FAMILY_VRAM']='1'
         env.pop('ZINK_TEST_GLD_BUNDLE',None);env.pop('ZINK_TEST_APPLE_GLD',None)
         env.pop('NVKZINK_DISABLE',None)
         env.pop('NVKZINK_OBS_COMPAT',None)

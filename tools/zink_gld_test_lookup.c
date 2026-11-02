@@ -9,6 +9,7 @@
 #include <limits.h>
 #include <sys/sysctl.h>
 #include <errno.h>
+#include <stdint.h>
 #include <CoreFoundation/CoreFoundation.h>
 extern int gpu_bundle_find_trusted(const char *, char *, size_t);
 static int lookup(const char *name, char *output, size_t bytes)
@@ -87,3 +88,31 @@ static Boolean obs_preference(CFStringRef key, CFStringRef domain, Boolean *vali
 }
 __attribute__((used)) static struct { const void *replacement, *original; } preference_hook
 __attribute__((section("__DATA,__interpose"))) = { (const void *)obs_preference, (const void *)CFPreferencesGetAppBooleanValue };
+
+/* Refuse only this process's native Zink presentation imports, before GPU
+ * submission. Keep the real kernel checks and standard host import active. */
+struct test_surface_import { uint32_t version, surface, plane, pad; uint64_t bytes; };
+typedef void (*test_stage_fn)(const struct test_surface_import *);
+static _Thread_local test_stage_fn real_stage;
+static void refuse_family_vram(const struct test_surface_import *record)
+{
+    if (!record) { real_stage(NULL); return; }
+    struct test_surface_import refused = *record;
+    refused.surface = 0;
+    real_stage(&refused);
+}
+static void *find_symbol(void *handle, const char *name)
+{
+    void *symbol = dlsym(handle,name);
+    if (symbol && getenv("ZINK_TEST_NO_FAMILY_VRAM") && !strcmp(name,"nvmtl_nvk_stage_import")) {
+        Dl_info caller = {0};
+        if (dladdr(__builtin_return_address(0),&caller) && caller.dli_fname &&
+            strstr(caller.dli_fname,"/libnvk_zink.dylib")) {
+            real_stage = (test_stage_fn)symbol;
+            return (void *)refuse_family_vram;
+        }
+    }
+    return symbol;
+}
+__attribute__((used)) static struct { const void *replacement, *original; } symbol_hook
+__attribute__((section("__DATA,__interpose"))) = { (const void *)find_symbol, (const void *)dlsym };
