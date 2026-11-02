@@ -67,8 +67,13 @@ def organize(payload, records, identity=None):
     if current.exists():
         move(Path('PACKAGE-IDENTITY.json'), records / 'inherited/PACKAGE-IDENTITY.json')
     for relative, name in GUIDES.items():
-        move(relative, payload / 'Guides' / name)
         guide = payload / 'Guides' / name
+        # A verified base may already use this layout. Keep its old guide with
+        # the build records before installing the component's refreshed guide.
+        if (payload / relative).exists() and (guide.exists() or guide.is_symlink()):
+            integrity.regular(guide)
+            move(guide.relative_to(payload), records / 'inherited/Guides' / name)
+        move(relative, guide)
         if guide.is_file():
             # Source-tree links to reviews/build tools remain useful after the
             # guide moves into an archive that does not contain the repository.

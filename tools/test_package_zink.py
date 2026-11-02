@@ -159,6 +159,17 @@ class PackageZinkTests(unittest.TestCase):
         self.assertEqual(compact['detailed_build_record_sha256'],pkg.base_tools.digest(records/'PACKAGE-IDENTITY.json'))
         pkg.base_tools.verify_manifest(self.out)
 
+    def test_refresh_guide_in_an_already_organized_package(self):
+        guide = Path('Guides/Zink-OpenGL.md')
+        self.put(self.base/guide, b'previous release guide\n')
+        pkg.base_tools.write_manifest(self.base)
+        self.original = self.snapshot(self.base)
+        self.stage(); self.unchanged()
+        self.assertIn('system pages', (self.out/guide).read_text())
+        records = self.out.with_name(self.out.name+'-build-records')
+        self.assertEqual((records/'inherited'/guide).read_bytes(), b'previous release guide\n')
+        pkg.base_tools.verify_manifest(self.out)
+
     def test_existing_external_records_are_not_overwritten(self):
         records=self.out.with_name(self.out.name+'-build-records')
         self.put(records/'keep',b'existing records')

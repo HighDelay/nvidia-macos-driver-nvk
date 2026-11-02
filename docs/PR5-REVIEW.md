@@ -36,6 +36,9 @@ is used once.
   arithmetic on an unallocated list. Exercise untouched lists in the regression.
 - Replace the contributor-specific Vulkan-Headers path in the WindowServer cache
   regression with the current user's home directory.
+- Refresh setup guides when assembling from an already organized release package.
+  A regression reproduces the old guide-name collision; the previous guide stays
+  with external build records, while the new guide goes into the installable tree.
 
 ## Independent validation
 
