@@ -64,6 +64,10 @@ pub(crate) fn materialize_sampler_array_loads(ctx: &mut Ctx, entry_idx: usize) {
         for inst in blk.instructions.drain(..) {
             if let Some(id) = inst.result_id {
                 if let Some(var) = rewrites.remove(&id) {
+                    if let Some(state) = ctx.sampler_states.get(&var).copied() {
+                        ctx.sampler_states.insert(id, state);
+                        ctx.specialized_runtime_sampler_values.insert(id);
+                    }
                     let mut load = inst;
                     load.class.opcode = Op::Load;
                     load.result_type = Some(sty);

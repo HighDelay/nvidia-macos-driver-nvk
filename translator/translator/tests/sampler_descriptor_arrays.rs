@@ -141,6 +141,70 @@ fn a_sampler_descriptor_array_samples_the_element_the_constant_selects() {
     spirv_val(&spv);
 }
 
+fn singleton_fixture() -> String {
+    FIXTURE
+        .replace("[2 x ptr addrspace(2)]", "[1 x ptr addrspace(2)]")
+        .replace("ptr %2, i32 0, i32 1", "ptr %2, i32 0, i32 0")
+        .replace(
+            "!\"air.location_index\", i32 0, i32 2, !\"air.arg_type_name\", !\"array<sampler, 2>\"",
+            "!\"air.location_index\", i32 0, i32 1, !\"air.arg_type_name\", !\"array<sampler, 1>\"",
+        )
+}
+
+#[test]
+fn a_single_element_sampler_array_keeps_its_byval_address_abi() {
+    let single = singleton_fixture();
+    assert!(single.contains("array<sampler, 1>") && single.contains("ptr %2, i32 0, i32 0"));
+    let bytes = translate_sanitized_native(&single, Stage::Vertex, &tmp())
+        .expect("a singleton sampler array must load its element, not treat its address as a sampler");
+    let asm = disassemble(&bytes).expect("disassemble");
+    assert!(asm.contains("OpImageSampleExplicitLod"), "the texture read must survive:\n{asm}");
+    let first = metal2vulkan::reflect::sampler_resource_binding(0).expect("sampler band");
+    assert!(asm.contains(&format!("Binding {first}\n")), "the singleton keeps sampler slot zero:\n{asm}");
+    spirv_val(&bytes);
+}
+
+#[test]
+fn a_singleton_array_keeps_its_runtime_pixel_sampler_state() {
+    use metal2vulkan::reflect::*;
+    let state = RuntimeSamplerState {
+        min_filter: SamplerFilter::Nearest,
+        mag_filter: SamplerFilter::Nearest,
+        mip_filter: SamplerMipFilter::None,
+        address_mode_s: SamplerAddressMode::ClampToEdge,
+        address_mode_t: SamplerAddressMode::ClampToEdge,
+        address_mode_r: SamplerAddressMode::ClampToEdge,
+        coordinates: SamplerCoordinates::Pixel,
+        compare_function: SamplerCompareFunction::None,
+        max_anisotropy: 1,
+        lod_min_clamp: 0.0,
+        lod_max_clamp: 0.0,
+        border_color: SamplerBorderColor::TransparentBlack,
+        reduction: SamplerReduction::WeightedAverage,
+        lod_bias: 0.0,
+    };
+    let options = metal2vulkan::passes::TransformOptions::default()
+        .with_runtime_sampler(0, state).expect("pixel sampler state");
+    let bytes = metal2vulkan::translate_sanitized_native_with_options(
+        &singleton_fixture(), Stage::Vertex, &tmp(), options,
+    ).expect("singleton array with a pixel-coordinate sampler");
+    let asm = disassemble(&bytes).expect("disassemble");
+    assert!(asm.contains("OpImageFetch") && !asm.contains("OpImageSampleExplicitLod"),
+        "pixel coordinates must use the exact sampler state instead of a normalized sample:\n{asm}");
+    spirv_val(&bytes);
+}
+
+#[test]
+fn a_single_descriptor_with_a_larger_byval_array_refuses_the_mismatched_abi() {
+    let mismatched = FIXTURE.replace(
+        "!\"air.location_index\", i32 0, i32 2, !\"air.arg_type_name\", !\"array<sampler, 2>\"",
+        "!\"air.location_index\", i32 0, i32 1, !\"air.arg_type_name\", !\"array<sampler, 1>\"",
+    );
+    let error = translate_sanitized_native(&mismatched, Stage::Vertex, &tmp())
+        .expect_err("a single descriptor cannot cover a two-element byval sampler array");
+    assert!(error.contains("occupies 1 sampler descriptors"), "{error}");
+}
+
 #[test]
 fn a_sampler_descriptor_array_whose_declared_length_contradicts_its_type_fallbacks() {
     // The metadata claims three descriptors, the LLVM type carries two: sizing the descriptor

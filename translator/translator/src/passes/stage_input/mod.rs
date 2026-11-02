@@ -884,12 +884,18 @@ pub(super) fn build_stage_input(
             // variable. One `[N x sampler]` variable at the first binding compiled, but on NVK its
             // element 1 read past that count-1 binding and sampled with the wrong sampler (GPU
             // probe 10-28: linear sampler in slot 1 returned the nearest result).
-            let array_count = declared_count.filter(|count| *count > 1);
+            let pointee = ptr_pointee(&defs, *pty);
+            let llvm_count = pointee.and_then(|ty| array_type(&defs, ty).map(|(_, length)| length));
+            // A one-element byval array still passes an address, unlike a scalar
+            // sampler handle. Descriptor count alone cannot distinguish their ABI.
+            // Metadata stores only counts above one; an omitted count means one,
+            // and the emitted pointee type identifies the byval array form.
+            let array_count = llvm_count.map(|_| declared_count.unwrap_or(1))
+                .or(declared_count.filter(|count| *count > 1));
             if let Some(count) = array_count {
-                let pointee = ptr_pointee(&defs, *pty).ok_or_else(|| {
+                pointee.ok_or_else(|| {
                     format!("sampler array parameter {pid} type {pty} is not a pointer")
                 })?;
-                let llvm_count = array_type(&defs, pointee).map(|(_, length)| length);
                 if llvm_count != Some(count) {
                     return Err(format!(
                         "entry parameter {idx} occupies {count} sampler descriptors per \
@@ -921,6 +927,13 @@ pub(super) fn build_stage_input(
                 ));
                 decorate_binding(&mut ctx.module, var, descriptor_layout.set, binding + element);
                 ctx.interface_buffer_var(var);
+                if array_count.is_some() {
+                    if let Some(state) = ctx.runtime_sampler_states
+                        .get((metal_index + element) as usize).copied().flatten()
+                    {
+                        ctx.sampler_states.insert(var, state.lowering_state());
+                    }
+                }
                 elements.push(var);
             }
             let var = elements[0];

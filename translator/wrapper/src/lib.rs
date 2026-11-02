@@ -760,7 +760,11 @@ pub unsafe extern "C" fn nvmtl_translate_samplers(
         opts=opts.with_a8_render_targets(a8);
         let mut used=0;
         for (idx,state) in states {
-            if reflection.bindings.iter().any(|b| b.kind==metal2vulkan::reflect::ResourceKind::Sampler && b.metal_index==idx) {
+            if reflection.bindings.iter().any(|b| {
+                b.kind == metal2vulkan::reflect::ResourceKind::Sampler
+                    && idx.checked_sub(b.metal_index).is_some_and(|element|
+                        element < b.descriptor.as_ref().map_or(1, |descriptor| descriptor.count))
+            }) {
                 opts=opts.with_runtime_sampler(idx,state)?;used+=1;
             }
         }
@@ -773,6 +777,43 @@ pub unsafe extern "C" fn nvmtl_translate_samplers(
     match result {
         Ok(bytes)=>{let mut b=bytes.into_boxed_slice();*out=b.as_mut_ptr();*out_len=b.len();std::mem::forget(b);0}
         Err(e)=>{if !err.is_null()&&err_len>0{let n=e.len().min(err_len-1);std::ptr::copy_nonoverlapping(e.as_ptr(),err.cast(),n);*err.add(n)=0;}-1}
+    }
+}
+
+#[cfg(test)]
+mod sampler_array_state_tests {
+    use super::*;
+
+    #[test]
+    fn specialization_keeps_the_selected_array_elements_state() {
+        let ll = std::ffi::CString::new(include_str!(
+            "../../translator/tests/fixtures/gl/sampler_array_chosen_by_constant.ll"
+        )).unwrap();
+        let stage = std::ffi::CString::new("vertex").unwrap();
+        let state = serde_json::json!({
+            "min_filter":"Nearest", "mag_filter":"Nearest", "mip_filter":"None",
+            "address_mode_s":"ClampToEdge", "address_mode_t":"ClampToEdge", "address_mode_r":"ClampToEdge",
+            "coordinates":"Pixel", "compare_function":"None", "max_anisotropy":1,
+            "lod_min_clamp":0.0, "lod_max_clamp":0.0, "border_color":"TransparentBlack",
+            "reduction":"WeightedAverage", "lod_bias":0.0
+        });
+        // The shader selects array element 1; reflection names the range at
+        // base index 0. Filtering only for exact base equality dropped this state.
+        let json = std::ffi::CString::new(serde_json::json!({
+            "samplers":{"1":state}, "constants":{}
+        }).to_string()).unwrap();
+        let (mut output, mut len) = (std::ptr::null_mut(), 0);
+        let mut error = [0 as c_char; 2048];
+        let rc = unsafe { nvmtl_translate_samplers(ll.as_ptr(), stage.as_ptr(), json.as_ptr(),
+            &mut output, &mut len, error.as_mut_ptr(), error.len()) };
+        assert_eq!(rc, 0, "{}", unsafe { CStr::from_ptr(error.as_ptr()) }.to_string_lossy());
+        let bytes = unsafe { std::slice::from_raw_parts(output, len) }.to_vec();
+        nvmtl_translate_free(output, len);
+        let module = rspirv::dr::load_bytes(&bytes).expect("load SPIR-V");
+        let operations: Vec<_> = module.functions.iter().flat_map(|f| &f.blocks)
+            .flat_map(|b| &b.instructions).map(|i| i.class.opcode).collect();
+        assert!(operations.contains(&rspirv::spirv::Op::ImageFetch));
+        assert!(!operations.contains(&rspirv::spirv::Op::ImageSampleExplicitLod));
     }
 }
 #[cfg(test)]
