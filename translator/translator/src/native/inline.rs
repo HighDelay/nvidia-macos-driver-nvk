@@ -450,11 +450,14 @@ fn parse_call_args(args_str: &str) -> Option<Vec<String>> {
 
 fn arg_value_token(chunk: &str) -> Option<String> {
     let toks = super::lex::split_top_level_whitespace(chunk);
-    let last = *toks.last()?;
-    if last.starts_with('%') {
-        return Some(last.to_string());
-    }
-    Some(last.to_string())
+    // Types and parameter attributes precede the value. A constant expression
+    // can itself span several tokens (e.g. `splat (float ...)`); keeping only
+    // the last token silently drops its opcode when substituting the argument.
+    // Keep the first complete value suffix, in its original LLVM spelling.
+    (1..toks.len()).find_map(|start| {
+        let value = toks[start..].join(" ");
+        super::parse::parse_value(&value).ok().map(|_| value)
+    })
 }
 
 fn strip_leading_word<'a>(s: &'a str, words: &[&str]) -> &'a str {
@@ -1502,6 +1505,50 @@ define i32 @main(i32 %0, ptr %fp) {
 }
 ";
         assert_eq!(inline_nonrecursive_internal_calls(src), src);
+    }
+
+    #[test]
+    fn call_arguments_preserve_complete_constant_expressions() {
+        for (argument, expected) in [
+            ("<3 x float> splat (float 0x3FA47AE140000000)", "splat (float 0x3FA47AE140000000)"),
+            ("ptr addrspace(1) inttoptr (i64 16 to ptr addrspace(1))", "inttoptr (i64 16 to ptr addrspace(1))"),
+            ("ptr getelementptr inbounds ([4 x i32], ptr @table, i64 0, i64 2)", "getelementptr inbounds ([4 x i32], ptr @table, i64 0, i64 2)"),
+            ("ptr bitcast (ptr @table to ptr)", "bitcast (ptr @table to ptr)"),
+            ("<2 x float> <float 1.0, float 2.0>", "<float 1.0, float 2.0>"),
+            ("ptr addrspace(1) noundef nonnull align 16 dereferenceable(32) %buffer", "%buffer"),
+            ("float noundef 1.000000e+00", "1.000000e+00"),
+            ("[8 x i8] undef", "undef"),
+        ] {
+            assert_eq!(arg_value_token(argument).as_deref(), Some(expected), "{argument}");
+        }
+        assert!(arg_value_token("<3 x float> splat (float invalid)").is_none());
+        assert!(arg_value_token("i32 unknown (i32 1)").is_none());
+    }
+
+    #[test]
+    fn inlined_vector_splat_compiles_without_losing_the_constant() {
+        let src = r#"
+define internal <3 x float> @clearcoat(<3 x float> %color, <3 x float> %f0) {
+entry:
+  %scaled = fmul fast <3 x float> %color, %f0
+  ret <3 x float> %scaled
+}
+define <3 x float> @main(<3 x float> %color) {
+entry:
+  %r = call <3 x float> @clearcoat(<3 x float> %color, <3 x float> splat (float 0x3FA47AE140000000))
+  ret <3 x float> %r
+}
+"#;
+        let out = inline_nonrecursive_internal_calls(src);
+        assert!(!out.contains("call <3 x float> @clearcoat"), "{out}");
+        assert!(out.contains("fmul fast <3 x float> %color, splat (float 0x3FA47AE140000000)"), "{out}");
+        let bytes = crate::native::emit_vulkan_spirv(&out).expect("emit inlined splat");
+        let module = crate::spirv_module::load_bytes(bytes).expect("load SPIR-V");
+        assert!(module.all_inst_iter().any(|i| i.class.opcode == spirv::Op::FMul));
+        assert!(module.types_global_values.iter().any(|i| {
+            i.class.opcode == spirv::Op::Constant
+                && i.operands == [crate::spirv_module::Operand::LiteralBit32(0.04f32.to_bits())]
+        }), "inlining must retain the clearcoat reflectance");
     }
 
     #[test]

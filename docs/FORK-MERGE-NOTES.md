@@ -23,6 +23,36 @@ uses the actual old snapshot as its explicit three-way base and records the
 new upstream head as a parent; do not replay already integrated changes from
 the rewritten history. The preceding 2.6.4 base was `f95f4d2`.
 
+## ANGLE WebGL sampler arrays and inlined constants, 2026-11-02
+
+Preserve the address ABI of a one-element byval sampler array. AIR metadata
+omits descriptor counts of one, so distinguish that array from a scalar sampler
+using the emitted pointee type. Keep count/type consistency checks and the
+stage's sampler binding limit. Carry runtime sampler state through each array
+element's materialized load, and let the C wrapper specialize every used index
+in the reflected array range, including nonzero elements.
+
+When inlining helpers, retain the complete constant-expression argument, rather
+than its last whitespace token. Three.js clearcoat shaders pass a vector `splat`
+constant; losing that opcode corrupts an otherwise supported multiply. Parse a
+complete value suffix in its LLVM spelling, accepting preceding parameter attributes.
+Do not work around these translation failures by disabling ANGLE, Graphite,
+WebGL, browser acceleration or the GPU sandbox.
+
+Validation: 2,232 library tests, seven sampler-array integration tests and 44
+wrapper tests pass; the wrapper's two ignores and two unavailable private
+fixtures remain. Fifteen GPU pixel checks cover scalar, singleton and two-element
+samplers, nonzero binding bases, nearest/linear filtering and pixel coordinates.
+The exact captured clearcoat shader translates and passes SPIR-V validation.
+On RTX 2060 SUPER / Tahoe 26.7.1, the live niemphat.online temple renders with
+ANGLE Metal, Graphite, WebGL and the GPU sandbox enabled, with zero GPU-process
+crashes in the observed run. The user confirms that it stays responsive without
+whiteout. All 21 translator GPU cases and 32 Core Image pixel/orientation frames
+pass. This is bounded host validation, not an endurance or Sequoia qualification.
+Only the translator code changes; plugin machine code, kernels, Zink and the
+gaming/video runtimes retain their preceding verified bytes. Keep the current
+local-test/release hold.
+
 ## ANGLE terminal and IOSurface handoff, 2026-11-02
 
 Preserve early immutable resource-object forwarding in the translator's borrowed
