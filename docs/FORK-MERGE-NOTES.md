@@ -23,7 +23,30 @@ uses the actual old snapshot as its explicit three-way base and records the
 new upstream head as a parent; do not replay already integrated changes from
 the rewritten history. The preceding 2.6.4 base was `f95f4d2`.
 
-## Bounded address-lowering cache, local trial, 2026-11-02
+## Parallels custom-drawable presentation, 2026-11-02
+
+Before recording presentation, supply an empty `addPresentScheduledHandler:`
+block to non-`CAMetalDrawable` drawables that implement that private selector.
+Parallels' `AsyncDrawable` reportedly invokes its stored scheduled-present block
+without a nil check. This covers `presentDrawable:`, `atTime:` and
+`afterMinimumDuration:` through their shared recording method. Skip nil
+drawables and recording after commitment as before. Keep CAMetalDrawable's
+texture/surface path, serial deferred presentation, callbacks and resource
+lifetimes unchanged. The handler must not capture the command buffer or drawable.
+Do not introduce an unsynchronized static selector initialization.
+
+`tools/test_custom_drawable.m` runs against an isolated compiled NVMTL plugin.
+It passes 11 policy/lifetime cases and 64 concurrent custom presentations,
+including all presentation variants, optional-selector absence and a
+CAMetalDrawable with the private selector that must not receive the block.
+The preceding plugin reproduces the unchecked nil-block failure in a separate
+negative-control process. Retained host checks, 15 sampler pixel cases,
+32 Core Image orientation/pixel frames, 64 IOSurface handoffs and 64 frames of
+600 descriptor-reuse draws pass on RTX 2060 SUPER / Tahoe 26.7.1. This models
+the reported custom-drawable failure; a real Parallels VM is not available here.
+The user approved building and publishing this change as `v2.6.6.69-nvk`.
+
+## Bounded address-lowering cache, 2026-11-02
 
 Keep `nvmtl_address_shader_g` within a 128 MiB accounting budget for owned
 input keys, lowered results, guard metadata and an allowance for entry overhead,
@@ -50,9 +73,13 @@ cost about 1.8–2.1 ms per 685 KiB warm lookup on this CPU, so it was not selec
 These synthetic measurements do not establish WindowServer savings or gameplay
 performance. Private RTX 2060 SUPER / Tahoe 26.7.1 GPU probes pass sampler arrays,
 Core Image pixels/orientation, IOSurface handoff, concurrent pipeline creation
-and descriptor reuse. Live WindowServer memory and smoothness remain to be
-qualified after a new login. Source and installation are local-only pending the
-user's test; do not push or prepare a release yet.
+and descriptor reuse. After installing `197ad27` and rebooting, the user reports
+a smoother desktop. WindowServer loaded the expected plugin with normal memory
+pressure and zero swap; an early footprint sample was about 650 MB versus about
+940 MB in the preceding longer session. The user subsequently reports 711 MB.
+These are different session ages and workloads, not a matched memory benchmark
+or proof that all retention is fixed. The source was pushed at the user's
+request; include it in the separately approved `v2.6.6.69-nvk` release.
 
 ## Parallels cache I/O compatibility, PR #4, 2026-11-02
 

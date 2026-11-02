@@ -5249,6 +5249,15 @@ destinationBytesPerImage:(NSUInteger)img options:(MTLBlitOption)opt {
             }
         }
     }
+    // App-defined drawables may expect the private scheduled-present callback
+    // before -present. Parallels' AsyncDrawable reportedly calls its stored
+    // block without a nil check. Supply a non-capturing handler when supported;
+    // CAMetalDrawable retains its existing path and presentation ordering.
+    if (![drawable conformsToProtocol:@protocol(CAMetalDrawable)]) {
+        SEL sel = sel_registerName("addPresentScheduledHandler:");
+        if ([drawable respondsToSelector:sel])
+            ((void (*)(id, SEL, void (^)(id<MTLDrawable>)))objc_msgSend)(drawable, sel, ^(id<MTLDrawable> d) { (void)d; });
+    }
     if ([drawable respondsToSelector:@selector(texture)]) {
         _present = (NVMTLTexture *)[(id<CAMetalDrawable>)drawable texture];
         nvmtl_surf_dirty(self, _present);
