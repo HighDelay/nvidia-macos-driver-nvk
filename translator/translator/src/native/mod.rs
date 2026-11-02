@@ -86,8 +86,8 @@ fn lower_air_text_rest(san_ll: &str) -> std::borrow::Cow<'_, str> {
         }
     };
     match lowered {
-        std::borrow::Cow::Borrowed(borrowed) => inline::forward_builder_pointer_fields(borrowed),
-        std::borrow::Cow::Owned(owned) => match inline::forward_builder_pointer_fields(&owned) {
+        std::borrow::Cow::Borrowed(borrowed) => lower_resource_object_fields(borrowed),
+        std::borrow::Cow::Owned(owned) => match lower_resource_object_fields(&owned) {
             std::borrow::Cow::Borrowed(_) => std::borrow::Cow::Owned(owned),
             std::borrow::Cow::Owned(forwarded) => std::borrow::Cow::Owned(forwarded),
         },
@@ -107,10 +107,31 @@ pub(crate) fn lower_air_text_owned(san_ll: String) -> String {
             },
         )),
     )));
-    match inline::forward_builder_pointer_fields(&lowered) {
+    match lower_resource_object_fields(&lowered) {
         std::borrow::Cow::Borrowed(_) => lowered,
         std::borrow::Cow::Owned(forwarded) => forwarded,
     }
+}
+
+fn lower_resource_object_fields(ll: &str) -> std::borrow::Cow<'_, str> {
+    // Resource handles can reach a sample through immutable fields of a local
+    // object read by an internal helper. Canonicalize those aliases before the
+    // native emitter models opaque handles: otherwise a lost alias can look
+    // like an absent texture and "successfully" compile to constant zero.
+    // The existing scalar replacement checks unique stores, dominance, types
+    // and escaping uses. It is needed even when no later pass reports an error.
+    if (ll.contains("!\"air.texture\"") || ll.contains("!\"air.sampler\""))
+        && ll.contains("alloca ")
+        && ll.contains("store ptr")
+    {
+        if let Some(forwarded) = inline::inline_and_forward_object_fields(ll) {
+            return match inline::forward_builder_pointer_fields(&forwarded) {
+                std::borrow::Cow::Borrowed(_) => std::borrow::Cow::Owned(forwarded),
+                std::borrow::Cow::Owned(builders) => std::borrow::Cow::Owned(builders),
+            };
+        }
+    }
+    inline::forward_builder_pointer_fields(ll)
 }
 pub use diagnostics::{
     cond_other_witness_report, irreducible_region_report, param_pointee_check,

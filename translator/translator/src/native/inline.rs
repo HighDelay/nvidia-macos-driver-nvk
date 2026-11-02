@@ -2159,7 +2159,8 @@ mod b52_equiv_tests {
 /// entry block with a pointer and only read afterwards has each read replaced by that pointer. This is what an optimizer's
 /// scalar replacement does, and what lets the address of a sampler in an argument buffer (Blender stores one per texture in
 /// its MTLShaderFragmentImpl object and reads it in `main`) reach the sample call as the buffer address it is. None when
-/// nothing changes. Only used to retry a module that failed as written.
+/// nothing changes. Resource-bearing local objects need this before modeling opaque handles;
+/// other shapes can also use it when retrying a module that failed as written.
 pub(crate) fn inline_and_forward_object_fields(san_ll: &str) -> Option<String> {
     let inlined = try_inline(san_ll, None).unwrap_or_else(|| san_ll.to_string());
     let mut items = parse_items(&inlined)?;
@@ -2668,8 +2669,8 @@ fn canonicalize_local_field_addresses_in(f: &mut FuncBlock, named: &HashMap<Stri
         let derived = if let Some(cast) = rest.strip_prefix("bitcast ptr ") {
             let Some(base) = cast.strip_suffix(" to ptr").map(str::trim) else { continue };
             let Some(base) = addrs.get(base) else { continue };
-            if base.path.is_empty() {
-                continue; // the object itself, as lifetime markers take it
+            if base.path.is_empty() && !pointer_access_only(&f.body, name) {
+                continue; // keep whole-object addresses used by lifetime markers or escaping uses
             }
             Addr { root: base.root.clone(), root_ty: base.root_ty.clone(), path: base.path.clone(), ty: base.ty.clone(), inbounds: base.inbounds }
         } else {
