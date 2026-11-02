@@ -1,0 +1,390 @@
+{
+  "draws": 1200,
+  "frames": 21,
+  "warmups": 2,
+  "processes_per_variant_case": 5,
+  "rows": [
+    {
+      "case": "fetch-off",
+      "pair": 0,
+      "variant": "baseline",
+      "modes": {
+        "stable-fetch": 1.115321,
+        "uniform-churn": 1.731621,
+        "texture-churn": 4.199363
+      },
+      "log": "metadata-fetch-off-0-baseline.log"
+    },
+    {
+      "case": "fetch-off",
+      "pair": 0,
+      "variant": "empty-metadata",
+      "modes": {
+        "stable-fetch": 0.45629,
+        "uniform-churn": 1.16703,
+        "texture-churn": 3.662302
+      },
+      "log": "metadata-fetch-off-0-empty-metadata.log"
+    },
+    {
+      "case": "fetch-off",
+      "pair": 1,
+      "variant": "empty-metadata",
+      "modes": {
+        "stable-fetch": 0.607161,
+        "uniform-churn": 1.329611,
+        "texture-churn": 4.712343
+      },
+      "log": "metadata-fetch-off-1-empty-metadata.log"
+    },
+    {
+      "case": "fetch-off",
+      "pair": 1,
+      "variant": "baseline",
+      "modes": {
+        "stable-fetch": 1.122031,
+        "uniform-churn": 1.844391,
+        "texture-churn": 4.265603
+      },
+      "log": "metadata-fetch-off-1-baseline.log"
+    },
+    {
+      "case": "fetch-off",
+      "pair": 2,
+      "variant": "baseline",
+      "modes": {
+        "stable-fetch": 1.112141,
+        "uniform-churn": 1.786571,
+        "texture-churn": 5.780464
+      },
+      "log": "metadata-fetch-off-2-baseline.log"
+    },
+    {
+      "case": "fetch-off",
+      "pair": 2,
+      "variant": "empty-metadata",
+      "modes": {
+        "stable-fetch": 0.43706,
+        "uniform-churn": 1.054381,
+        "texture-churn": 3.491963
+      },
+      "log": "metadata-fetch-off-2-empty-metadata.log"
+    },
+    {
+      "case": "fetch-off",
+      "pair": 3,
+      "variant": "empty-metadata",
+      "modes": {
+        "stable-fetch": 0.701631,
+        "uniform-churn": 1.922552,
+        "texture-churn": 4.299323
+      },
+      "log": "metadata-fetch-off-3-empty-metadata.log"
+    },
+    {
+      "case": "fetch-off",
+      "pair": 3,
+      "variant": "baseline",
+      "modes": {
+        "stable-fetch": 1.241771,
+        "uniform-churn": 1.990462,
+        "texture-churn": 5.377844
+      },
+      "log": "metadata-fetch-off-3-baseline.log"
+    },
+    {
+      "case": "fetch-off",
+      "pair": 4,
+      "variant": "baseline",
+      "modes": {
+        "stable-fetch": 1.130061,
+        "uniform-churn": 1.875281,
+        "texture-churn": 4.779233
+      },
+      "log": "metadata-fetch-off-4-baseline.log"
+    },
+    {
+      "case": "fetch-off",
+      "pair": 4,
+      "variant": "empty-metadata",
+      "modes": {
+        "stable-fetch": 0.44493,
+        "uniform-churn": 1.175241,
+        "texture-churn": 4.813583
+      },
+      "log": "metadata-fetch-off-4-empty-metadata.log"
+    },
+    {
+      "case": "fetch-on",
+      "pair": 0,
+      "variant": "baseline",
+      "modes": {
+        "stable-fetch": 1.39353,
+        "uniform-churn": 2.105322,
+        "texture-churn": 4.979374
+      },
+      "log": "metadata-fetch-on-0-baseline.log"
+    },
+    {
+      "case": "fetch-on",
+      "pair": 0,
+      "variant": "empty-metadata",
+      "modes": {
+        "stable-fetch": 0.92097,
+        "uniform-churn": 1.826611,
+        "texture-churn": 4.671034
+      },
+      "log": "metadata-fetch-on-0-empty-metadata.log"
+    },
+    {
+      "case": "fetch-on",
+      "pair": 1,
+      "variant": "empty-metadata",
+      "modes": {
+        "stable-fetch": 0.73897,
+        "uniform-churn": 1.501451,
+        "texture-churn": 4.867584
+      },
+      "log": "metadata-fetch-on-1-empty-metadata.log"
+    },
+    {
+      "case": "fetch-on",
+      "pair": 1,
+      "variant": "baseline",
+      "modes": {
+        "stable-fetch": 1.491461,
+        "uniform-churn": 2.578162,
+        "texture-churn": 6.085374
+      },
+      "log": "metadata-fetch-on-1-baseline.log"
+    },
+    {
+      "case": "fetch-on",
+      "pair": 2,
+      "variant": "baseline",
+      "modes": {
+        "stable-fetch": 1.749721,
+        "uniform-churn": 2.513322,
+        "texture-churn": 5.791235
+      },
+      "log": "metadata-fetch-on-2-baseline.log"
+    },
+    {
+      "case": "fetch-on",
+      "pair": 2,
+      "variant": "empty-metadata",
+      "modes": {
+        "stable-fetch": 0.940381,
+        "uniform-churn": 1.949642,
+        "texture-churn": 4.336543
+      },
+      "log": "metadata-fetch-on-2-empty-metadata.log"
+    },
+    {
+      "case": "fetch-on",
+      "pair": 3,
+      "variant": "empty-metadata",
+      "modes": {
+        "stable-fetch": 0.766801,
+        "uniform-churn": 1.548221,
+        "texture-churn": 4.701764
+      },
+      "log": "metadata-fetch-on-3-empty-metadata.log"
+    },
+    {
+      "case": "fetch-on",
+      "pair": 3,
+      "variant": "baseline",
+      "modes": {
+        "stable-fetch": 1.482051,
+        "uniform-churn": 2.765851,
+        "texture-churn": 4.989103
+      },
+      "log": "metadata-fetch-on-3-baseline.log"
+    },
+    {
+      "case": "fetch-on",
+      "pair": 4,
+      "variant": "baseline",
+      "modes": {
+        "stable-fetch": 1.915812,
+        "uniform-churn": 3.009903,
+        "texture-churn": 5.830874
+      },
+      "log": "metadata-fetch-on-4-baseline.log"
+    },
+    {
+      "case": "fetch-on",
+      "pair": 4,
+      "variant": "empty-metadata",
+      "modes": {
+        "stable-fetch": 0.760601,
+        "uniform-churn": 1.952642,
+        "texture-churn": 4.431492
+      },
+      "log": "metadata-fetch-on-4-empty-metadata.log"
+    }
+  ],
+  "summary": {
+    "fetch-off": {
+      "stable-fetch": {
+        "baseline": 1.144265,
+        "empty-metadata": 0.5294144,
+        "change_percent": -53.733234871292936
+      },
+      "uniform-churn": {
+        "baseline": 1.8456652,
+        "empty-metadata": 1.329763,
+        "change_percent": -27.95210095525451
+      },
+      "texture-churn": {
+        "baseline": 4.8805014,
+        "empty-metadata": 4.1959028,
+        "change_percent": -14.02721859684335
+      }
+    },
+    "fetch-on": {
+      "stable-fetch": {
+        "baseline": 1.606515,
+        "empty-metadata": 0.8255446,
+        "change_percent": -48.61270514125297
+      },
+      "uniform-churn": {
+        "baseline": 2.594512,
+        "empty-metadata": 1.7557134,
+        "change_percent": -32.32972520458567
+      },
+      "texture-churn": {
+        "baseline": 5.535192,
+        "empty-metadata": 4.6016834,
+        "change_percent": -16.864972344229447
+      }
+    }
+  },
+  "source_base": "c28bf916ce08e1843ecb620142327dfd83109cda",
+  "host": {
+    "macos": "26.7.2",
+    "build": "25G332",
+    "arch": "x86_64",
+    "gpu": "NVIDIA GeForce RTX 2060 (NVK TU106-A)"
+  },
+  "builds": {
+    "baseline": {
+      "path": "/Volumes/App/nvmtl-audit-20261031/baseline/NVMTLDriver",
+      "sha256": "17df45a9e4c8990b353ebdd67ec735670c65162bb0008900e4353134a7201052"
+    },
+    "empty-metadata": {
+      "path": "/Volumes/App/nvmtl-audit-20261031/empty-metadata/NVMTLDriver",
+      "sha256": "1ccbdc23965c2faa9becdfdcc9960ae3c9d7e20100ca3ca82c9475c02d4323c2"
+    }
+  },
+  "final_build": {
+    "path": "/Volumes/App/nvmtl-audit-20261031/build/NVMTLDriver",
+    "sha256": "2a3f9d1cbae2ac8bb325eff5df1f82d2ab2ab40577a7f9a978dc14654b6eda67",
+    "additional_fix": "Static samplers use the shader device; empty metadata benchmark code is unchanged."
+  },
+  "source_files": {
+    "plugin/NVMTLObjects.h": "ecd0ec6c2f1b10e14bd593cbbbe6bdd514428a208eb2824d1e4704a5234f31dd",
+    "plugin/NVMTLEmbedded.m": "f1aeafd4be12bf1dfb0ef670f236a3230a17842c99637c7eb09ca8ea3b81c12c"
+  },
+  "profile": "/Volumes/App/nvmtl-audit-20261031/profile-baseline.txt",
+  "host_checks": [
+    {
+      "test": "test_binding_metadata",
+      "exit": 0
+    },
+    {
+      "test": "test_sampler_restore",
+      "exit": 0
+    },
+    {
+      "test": "test_render_sampler_cache",
+      "exit": 0
+    },
+    {
+      "test": "test_sampler_wrapper_lifetime",
+      "exit": 0
+    },
+    {
+      "test": "test_address_snapshots",
+      "exit": 0
+    },
+    {
+      "test": "test_opengl_perf",
+      "exit": 0
+    },
+    {
+      "test": "test_compute_bindings",
+      "exit": 0
+    },
+    {
+      "test": "test_graphics_bindings",
+      "exit": 0
+    },
+    {
+      "test": "test_windowserver_caches",
+      "exit": 0
+    },
+    {
+      "test": "test_nvmtl_callback_lifecycle",
+      "exit": 0
+    },
+    {
+      "test": "test_resset_seal",
+      "exit": 0
+    },
+    {
+      "test": "test_resset_lifetime",
+      "exit": 0,
+      "note": "Archive has no .git; supplied read-only access to repository history for negative controls."
+    },
+    {
+      "test": "test_gl_resource_completion",
+      "exit": 0
+    },
+    {
+      "test": "test_surface_import_reuse",
+      "exit": 0
+    },
+    {
+      "test": "test_surface_publication",
+      "exit": 0
+    },
+    {
+      "test": "test_surface_queue",
+      "exit": 0
+    },
+    {
+      "test": "test_submission_copies",
+      "exit": 0
+    },
+    {
+      "test": "test_surface_pending_lifetime",
+      "exit": 0
+    },
+    {
+      "test": "test_angle_optin",
+      "exit": 0
+    },
+    {
+      "test": "test_bytes_dup_seal",
+      "exit": 0,
+      "note": "Archive has no .git; supplied read-only access to repository history for negative controls."
+    },
+    {
+      "test": "test_witness_keeps_backend",
+      "exit": 0
+    },
+    {
+      "test": "test_static_sampler_device",
+      "exit": 0
+    }
+  ],
+  "limitations": [
+    "Calling-thread command recording only; not live WindowServer CPU, GPU utilization, power or FPS.",
+    "Five alternating processes per build and fetch mode; means of medians after two warmups. Desktop background load was not controlled; texture-churn measurements varied substantially.",
+    "Shaders with static samplers or live embedded argument fields keep the existing binding path.",
+    "No installation/reboot, other-GPU or Sequoia execution qualification; translator dependencies unavailable.",
+    "Concurrent workspace descriptor-recycling edits excluded from the source snapshot and package."
+  ]
+}

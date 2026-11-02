@@ -1,0 +1,255 @@
+{
+  "draws": 1200,
+  "frames": 15,
+  "processes_per_build": 5,
+  "rows": [
+    {
+      "pair": 0,
+      "build": "fetch-mask",
+      "modes": {
+        "stable-fetch": 1.202062,
+        "uniform-churn": 2.042712,
+        "texture-churn": 4.251164
+      },
+      "log": "/Volumes/App/nvmtl-followup-20261031/validation/bench-final-0-fetch-mask.log"
+    },
+    {
+      "pair": 0,
+      "build": "followup",
+      "modes": {
+        "stable-fetch": 1.224891,
+        "uniform-churn": 1.921521,
+        "texture-churn": 4.210844
+      },
+      "log": "/Volumes/App/nvmtl-followup-20261031/validation/bench-final-0-followup.log"
+    },
+    {
+      "pair": 1,
+      "build": "followup",
+      "modes": {
+        "stable-fetch": 1.293331,
+        "uniform-churn": 1.974382,
+        "texture-churn": 4.347724
+      },
+      "log": "/Volumes/App/nvmtl-followup-20261031/validation/bench-final-1-followup.log"
+    },
+    {
+      "pair": 1,
+      "build": "fetch-mask",
+      "modes": {
+        "stable-fetch": 1.184032,
+        "uniform-churn": 2.038362,
+        "texture-churn": 4.222995
+      },
+      "log": "/Volumes/App/nvmtl-followup-20261031/validation/bench-final-1-fetch-mask.log"
+    },
+    {
+      "pair": 2,
+      "build": "fetch-mask",
+      "modes": {
+        "stable-fetch": 1.237201,
+        "uniform-churn": 2.121202,
+        "texture-churn": 4.291924
+      },
+      "log": "/Volumes/App/nvmtl-followup-20261031/validation/bench-final-2-fetch-mask.log"
+    },
+    {
+      "pair": 2,
+      "build": "followup",
+      "modes": {
+        "stable-fetch": 1.219181,
+        "uniform-churn": 1.892092,
+        "texture-churn": 4.224274
+      },
+      "log": "/Volumes/App/nvmtl-followup-20261031/validation/bench-final-2-followup.log"
+    },
+    {
+      "pair": 3,
+      "build": "followup",
+      "modes": {
+        "stable-fetch": 1.195442,
+        "uniform-churn": 1.824651,
+        "texture-churn": 4.108814
+      },
+      "log": "/Volumes/App/nvmtl-followup-20261031/validation/bench-final-3-followup.log"
+    },
+    {
+      "pair": 3,
+      "build": "fetch-mask",
+      "modes": {
+        "stable-fetch": 1.228031,
+        "uniform-churn": 2.175352,
+        "texture-churn": 4.566914
+      },
+      "log": "/Volumes/App/nvmtl-followup-20261031/validation/bench-final-3-fetch-mask.log"
+    },
+    {
+      "pair": 4,
+      "build": "fetch-mask",
+      "modes": {
+        "stable-fetch": 1.279481,
+        "uniform-churn": 2.139312,
+        "texture-churn": 4.397604
+      },
+      "log": "/Volumes/App/nvmtl-followup-20261031/validation/bench-final-4-fetch-mask.log"
+    },
+    {
+      "pair": 4,
+      "build": "followup",
+      "modes": {
+        "stable-fetch": 1.216452,
+        "uniform-churn": 1.849322,
+        "texture-churn": 4.220554
+      },
+      "log": "/Volumes/App/nvmtl-followup-20261031/validation/bench-final-4-followup.log"
+    }
+  ],
+  "summary": {
+    "stable-fetch": {
+      "fetch-mask": 1.2261614,
+      "followup": 1.2298594,
+      "change_percent": 0.30159161754725883
+    },
+    "uniform-churn": {
+      "fetch-mask": 2.103388,
+      "followup": 1.8923936000000001,
+      "change_percent": -10.031168762016318
+    },
+    "texture-churn": {
+      "fetch-mask": 4.3461202,
+      "followup": 4.222442,
+      "change_percent": -2.845715127713211
+    }
+  },
+  "host": {
+    "macos": "26.7.2",
+    "build": "25G332",
+    "arch": "x86_64",
+    "gpu": "NVIDIA GeForce RTX 2060 (NVK TU106-A)",
+    "vram_mib": 6144,
+    "bar1_mib": 8192
+  },
+  "builds": {
+    "fetch-mask": {
+      "path": "/Volumes/App/nvmtl-fetch-20261031/build/NVMTLDriver",
+      "sha256": "ac4696a0a17ed14595b76f24c1bccb965d9a088c5298304e0ef6ac5859ce43d7"
+    },
+    "followup": {
+      "path": "/Volumes/App/nvmtl-followup-20261031/build/NVMTLDriver",
+      "sha256": "02e4c95dc9727723e350a748097bc859c8ec1c67a27541fc6fb2398473a80282"
+    }
+  },
+  "source_base": "e8d0a468b0da46715f5f5e6623d1093bedb3da13",
+  "source_file_sha256": {
+    "plugin/nvmtl_vk.c": "f68a96175226c692c911bcdb248b90e688e82f7c2dc3f257e7857df409c6746e",
+    "plugin/nvmtl_vk.h": "e03e870aafc786a810b246e670736bf403d7d4da2c9a7040a1c61c50d8fef983"
+  },
+  "limitations": [
+    "Calling-thread recording CPU, not live WindowServer CPU or application FPS.",
+    "Stable-binding and texture-churn changes are small and treated as noise.",
+    "Not installed or reboot-tested; other GPUs and long sessions unqualified.",
+    "Separate translator audit requires unavailable Cargo dependencies."
+  ],
+  "host_checks": [
+    {
+      "test": "test_address_snapshots",
+      "exit": 0
+    },
+    {
+      "test": "test_opengl_perf",
+      "exit": 0
+    },
+    {
+      "test": "test_compute_bindings",
+      "exit": 0
+    },
+    {
+      "test": "test_graphics_bindings",
+      "exit": 0
+    },
+    {
+      "test": "test_windowserver_caches",
+      "exit": 0
+    },
+    {
+      "test": "test_nvmtl_callback_lifecycle",
+      "exit": 0
+    },
+    {
+      "test": "test_resset_seal",
+      "exit": 0
+    },
+    {
+      "test": "test_resset_lifetime",
+      "exit": 0
+    },
+    {
+      "test": "test_sampler_wrapper_lifetime",
+      "exit": 0
+    },
+    {
+      "test": "test_render_sampler_cache",
+      "exit": 0
+    },
+    {
+      "test": "test_gl_resource_completion",
+      "exit": 0
+    },
+    {
+      "test": "test_surface_import_reuse",
+      "exit": 0
+    },
+    {
+      "test": "test_surface_publication",
+      "exit": 0
+    },
+    {
+      "test": "test_surface_queue",
+      "exit": 0
+    },
+    {
+      "test": "test_submission_copies",
+      "exit": 0
+    },
+    {
+      "test": "test_surface_pending_lifetime",
+      "exit": 0
+    },
+    {
+      "test": "test_angle_optin",
+      "exit": 0
+    },
+    {
+      "test": "test_bytes_dup_seal",
+      "exit": 0
+    },
+    {
+      "test": "test_sampler_restore",
+      "exit": 0
+    },
+    {
+      "test": "test_witness_keeps_backend",
+      "exit": 0
+    }
+  ],
+  "gpu_storage_bounds": {
+    "storage_slots": [
+      62,
+      63,
+      127
+    ],
+    "bindings": [
+      255,
+      256,
+      320
+    ],
+    "targets_per_slot": 2,
+    "dispatches_per_slot": 4,
+    "result": "PASS: all GPU readbacks matched",
+    "log": "/Volumes/App/nvmtl-followup-20261031/validation/gpu-storage-bounds.log"
+  },
+  "before_fix_ubsan": {
+    "result": "Reproduced out-of-bounds dirty bitmap access at word 4 and adjacent generation corruption",
+    "log": "/Volumes/App/nvmtl-followup-20261031/validation/high-storage-before.log"
+  }
+}

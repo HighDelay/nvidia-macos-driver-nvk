@@ -1,0 +1,199 @@
+{
+  "hardware": "NVIDIA GeForce RTX 2060, TU106-A, 6 GiB VRAM, 256 MiB BAR1",
+  "os": "macOS 26.7.2 (25G332)",
+  "base_commit": "e2f3228fea4ce5037ab7184c7ee51fe9ce635b42",
+  "mesa_commit": "17ca6174dcc6cb22059ac343bc29f8af7800f42e",
+  "mesa_archive_sha256": "79c8a65a5a5cf6968368e0b7338726465fc21444cc5d5583716eaf685ce879cf",
+  "gpu_cases": [
+    {
+      "case": "mesa-synchronization",
+      "returncode": 0,
+      "seconds": 0.036
+    },
+    {
+      "case": "standalone",
+      "returncode": 0,
+      "seconds": 0.531
+    },
+    {
+      "case": "private-icd-selection",
+      "returncode": 0,
+      "seconds": 0.545
+    },
+    {
+      "case": "core",
+      "returncode": 0,
+      "seconds": 0.684
+    },
+    {
+      "case": "core32",
+      "returncode": 0,
+      "seconds": 0.742
+    },
+    {
+      "case": "legacy",
+      "returncode": 0,
+      "seconds": 0.733
+    },
+    {
+      "case": "gld-core",
+      "returncode": 0,
+      "seconds": 0.8
+    },
+    {
+      "case": "gld-core32",
+      "returncode": 0,
+      "seconds": 0.747
+    },
+    {
+      "case": "gld-legacy",
+      "returncode": 0,
+      "seconds": 0.685
+    },
+    {
+      "case": "gld-apple-iosurface",
+      "returncode": 0,
+      "seconds": 0.422
+    },
+    {
+      "case": "obs-default",
+      "returncode": 0,
+      "seconds": 0.483
+    },
+    {
+      "case": "obs-preference-on",
+      "returncode": 0,
+      "seconds": 0.431
+    },
+    {
+      "case": "obs-preference-off",
+      "returncode": 0,
+      "seconds": 0.697
+    },
+    {
+      "case": "obs-environment-off",
+      "returncode": 0,
+      "seconds": 0.697
+    },
+    {
+      "case": "obs-environment-on",
+      "returncode": 0,
+      "seconds": 0.427
+    },
+    {
+      "case": "obs-invalid-environment",
+      "returncode": 0,
+      "seconds": 0.436
+    },
+    {
+      "case": "gld-window",
+      "returncode": 0,
+      "seconds": 1.928
+    },
+    {
+      "case": "gld-rgbx-worker",
+      "returncode": 0,
+      "seconds": 2.007
+    },
+    {
+      "case": "native-default",
+      "returncode": 0,
+      "seconds": 2.569
+    },
+    {
+      "case": "native-transparent",
+      "returncode": 0,
+      "seconds": 2.556
+    },
+    {
+      "case": "native-worker",
+      "returncode": 0,
+      "seconds": 2.81
+    },
+    {
+      "case": "native-reject",
+      "returncode": 0,
+      "seconds": 2.917
+    },
+    {
+      "case": "native-uncertain",
+      "returncode": 0,
+      "seconds": 2.571
+    },
+    {
+      "case": "native-gld-auto",
+      "returncode": 0,
+      "seconds": 2.672
+    },
+    {
+      "case": "native-large-resize",
+      "returncode": 0,
+      "seconds": 25.864
+    },
+    {
+      "case": "native-gld-large-resize",
+      "returncode": 0,
+      "seconds": 25.87
+    },
+    {
+      "case": "native-no-vram",
+      "returncode": 0,
+      "seconds": 30.357
+    },
+    {
+      "case": "native-no-vram-reject",
+      "returncode": 0,
+      "seconds": 3.528
+    },
+    {
+      "case": "native-no-vram-uncertain",
+      "returncode": 0,
+      "seconds": 3.289
+    },
+    {
+      "case": "native-gld-worker",
+      "returncode": 0,
+      "seconds": 3.555
+    },
+    {
+      "case": "native-multiple-windows",
+      "returncode": 0,
+      "seconds": 4.026
+    },
+    {
+      "case": "native-swap-interval",
+      "returncode": 0,
+      "seconds": 4.307
+    },
+    {
+      "case": "native-gld-swap-interval",
+      "returncode": 0,
+      "seconds": 4.812
+    },
+    {
+      "case": "native-obs-policy-isolation",
+      "returncode": 0,
+      "seconds": 3.349
+    },
+    {
+      "case": "native-optout-zero",
+      "returncode": 0,
+      "seconds": 3.355
+    },
+    {
+      "case": "native-updated-os-build",
+      "returncode": 0,
+      "seconds": 3.17
+    }
+  ],
+  "host_checks": {
+    "zink_mapping_trial": 0,
+    "package_zink": 0,
+    "surface_host_span": 0
+  },
+  "visible_window_capture": "unavailable: screencapture could not create image from window",
+  "minecraft_candidate_tested": false,
+  "installation_performed": false,
+  "kernel_changed": false,
+  "release": "held for local testing"
+}

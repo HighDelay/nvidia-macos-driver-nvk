@@ -25,7 +25,8 @@ fixture = r'''
 #include <mach/mach.h>
 #include <vulkan/vulkan.h>
 #include "nvmtl_vk.h"
-static unsigned descriptor_calls, pipeline_calls;
+static unsigned descriptor_calls, pipeline_calls, fetch_calls;
+#define NVMTL_FETCH_SET 3
 enum { NVMTL_SLOT_BUF = 1 };
 typedef struct { unsigned char kind; void *h; size_t off, size; uint64_t address; } nvmtl_slot;
 typedef struct { nvmtl_slot s[2][321]; } nvmtl_bindtable;
@@ -33,7 +34,9 @@ static VkDeviceSize g_cbuf_alignment = 256;
 #define syslog(...) ((void)0)
 static void pvkCmdBindDescriptorSets(VkCommandBuffer cb,VkPipelineBindPoint point,VkPipelineLayout layout,
         unsigned first,unsigned count,const VkDescriptorSet *sets,unsigned ndyn,const unsigned *offsets) {
-    assert(point==VK_PIPELINE_BIND_POINT_GRAPHICS && first==0 && count<=3 && ndyn<=4);
+    assert(point==VK_PIPELINE_BIND_POINT_GRAPHICS && count<=3 && ndyn<=4);
+    if (first==NVMTL_FETCH_SET) { assert(count==1 && ndyn==0); fetch_calls++; return; }
+    assert(first==0);
     descriptor_calls++;
 }
 static void pvkCmdBindPipeline(VkCommandBuffer cb,VkPipelineBindPoint point,VkPipeline pipeline) {
@@ -93,12 +96,32 @@ int main(void) {
     nvmtl_vk_cmd_bind_pipeline(&c,&a); assert(c.graphics_pipeline==optimized.pipe);
     slot->off=4; nvmtl_vk_cmd_bind_pipeline(&c,&a); assert(c.graphics_pipeline==a.pipe);
     slot->off=0; nvmtl_vk_cmd_bind_pipeline(&c,&a); assert(c.graphics_pipeline==optimized.pipe);
+    // Fetch descriptors persist across draws and offset-only updates, but incompatible
+    // lower-set layout binds disturb set 3 even if we later return to its old layout.
+    VkDescriptorSet fetch=(VkDescriptorSet)70;
+    nvmtl_bind_fetch_set(&c,layout,fetch); assert(fetch_calls==1);
+    for(unsigned i=0;i<10000;i++) nvmtl_bind_fetch_set(&c,layout,fetch);
+    assert(fetch_calls==1);
+    offsets[0]+=256;
+    nvmtl_bind_graphics_sets(&c,layout,2,sets,2,offsets);
+    nvmtl_bind_fetch_set(&c,layout,fetch); assert(fetch_calls==1);
+    nvmtl_bind_graphics_sets(&c,(VkPipelineLayout)99,2,sets,2,offsets);
+    nvmtl_bind_graphics_sets(&c,layout,2,sets,2,offsets);
+    nvmtl_bind_fetch_set(&c,layout,fetch); assert(fetch_calls==2);
+    nvmtl_bind_fetch_set(&c,layout,(VkDescriptorSet)71); assert(fetch_calls==3);
+    unsigned before=descriptor_calls;
+    nvmtl_bind_fetch_set(&c,(VkPipelineLayout)99,fetch); assert(fetch_calls==4);
+    nvmtl_bind_graphics_sets(&c,layout,2,sets,2,offsets); assert(descriptor_calls==before+1);
+    nvmtl_bind_fetch_set(&c,layout,fetch); assert(fetch_calls==5);
+    memset(&c,0,sizeof c);
+    nvmtl_bind_fetch_set(&c,layout,fetch); assert(fetch_calls==6);
+    puts("PASS: 10000 repeated fetch bindings elided; view/set changes, incompatible layouts and new recordings rebind");
     puts("PASS: identical bindings skipped; resource sets, heap, layout, both offsets/counts, pipeline changes, new recordings and independent buffers rebind");
 }
 '''
 with tempfile.TemporaryDirectory(prefix='nvmtl-graphics-bindings-') as tmp:
     path=pathlib.Path(tmp)
     (path/'test.c').write_text(fixture)
-    subprocess.run(['xcrun','clang','-O2',str(path/'test.c'),'-I'+str(root/'plugin'),
+    subprocess.run(['xcrun','clang','-O2','-fsanitize=address,undefined',str(path/'test.c'),'-I'+str(root/'plugin'),
                     '-I'+str(pathlib.Path.home()/'Vulkan-Headers/include'),'-o',str(path/'test')],check=True)
     subprocess.run([str(path/'test')],check=True)

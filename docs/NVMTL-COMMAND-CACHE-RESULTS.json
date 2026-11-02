@@ -1,0 +1,253 @@
+{
+  "date": "2026-10-31",
+  "base_commit": "5c23543da56afe550d2d448d77ad64943456b04b",
+  "host": {
+    "macos": "26.7.2",
+    "build": "25G332",
+    "arch": "x86_64",
+    "gpu": "NVIDIA GeForce RTX 2060 (TU106-A)",
+    "vram_mib": 6144,
+    "bar1_mib": 8192
+  },
+  "build": {
+    "clang": "Apple clang 21.0.0 (clang-2100.1.1.101)",
+    "sdk": "26.5",
+    "minimum_macos": "15.0",
+    "options": [
+      "-arch x86_64",
+      "-mmacosx-version-min=15.0",
+      "-bundle",
+      "-fobjc-arc",
+      "-O2",
+      "-DNVMTL_RELEASE=1",
+      "-Werror=unguarded-availability-new"
+    ],
+    "plugin_sha256": "9e1d42773454b39b4d87aba4772418e853c90d9b188f3055605ae9670ebc8ab9",
+    "baseline_plugin_sha256": "71af26759a0ea703322472028ddefe573107745d26d8a92b5a326eafe3d5fe8d",
+    "plugin_source_sha256": {
+      "plugin/.gitignore": "e02859e139035b6fd876d3057c589eb83324b578ccbe860a3327e7511191c6a3",
+      "plugin/NVMTLDevice.m": "6eba6fa17a47000e7e4d685237aeec57de2fbbea2c22c33f6b8c7f8738a5fb6d",
+      "plugin/NVMTLDevice_contract.m": "152683557601a4ee44fb148c5f1b48cebd98417223a949816808fc63db91da03",
+      "plugin/NVMTLEmbedded.m": "10c9e50c8aba95d393c249dc8899f4a41a0d87c96ab5f3bfd1b00781fffeb1e6",
+      "plugin/NVMTLEventSync.m": "bd391e54986fecc794a269198e31bf5533524feb8a2efbfb2766098de3b605d7",
+      "plugin/NVMTLForward.m": "a196e3bd3c0dd0340609a2164dfbca1851786d6bfacdc7885f505808920fb3bd",
+      "plugin/NVMTLGL.m": "35a8bd34ff9116e05d931bb3ec8cf9a62a120c98bf30459b42f04b952cbb460b",
+      "plugin/NVMTLGLVBlank.m": "505d223eadb7a1859f8ee57cf3494991381dbde410aec0a8027f2c0a5c06964e",
+      "plugin/NVMTLLibraryLoad.m": "2b1805a76a9138958d4971ae658943f67ba20f7cb1a2e0e81f4e829aa60e715d",
+      "plugin/NVMTLObjects.h": "2306b6daf0344f389521b7f10cdeeffe45f7ddc5971937a52fbc981897bbd088",
+      "plugin/NVMTLObjects.m": "8ecfd5075c8ef63f81d2e7ae24b2b952a740ed5bf5a9a8a1de48c0436282d4fc",
+      "plugin/NVMTLSass.m": "3df7d8ef2f8e1edd3d1279abd23b1adc0ab1fa70b4d8860a19de2179cb7390c4",
+      "plugin/NVMTLSassLaunch.m": "d815509c0e853a3adb41f9c29e21543f49e6ba3da6c6e4d65a2b0245f184a3f6",
+      "plugin/NVMTLSassResolve.m": "ef275dd8c9b7ca13fc53e17ab358125cf1c60ce7b1431caf6a2db9aac1d7c8d6",
+      "plugin/NVMTLVendorCompiler.m": "33f8d290b8b3fdca3e881905774edf63a3331ec73d35e0bd8c0cb3c0123c309f",
+      "plugin/nvconv.metal": "8b8d604d4a68d8995d84ffa3441ce21b273406dcfac0c5e57c126b9a34f2950e",
+      "plugin/nvconv_lib.h": "ad00db5fab28566cf276c2a17894156ed296cc5b6ef51512b67b05174e5034d3",
+      "plugin/nvmtl_cmd_refusal.h": "6821066d314b3c6d96a02c31e6a96b1638753a6ce8703de8d5050e2349c7dca2",
+      "plugin/nvmtl_fd_token.h": "e1095cab080b6d6cbed02390d569a5946436d1ff7e3484af33aca31deca0825c",
+      "plugin/nvmtl_independent_helpers.h": "389c1770e4058f149a9c5a786fbddd513e39216a9908dd2b1e1118a10ac43f2a",
+      "plugin/nvmtl_log_failure.h": "1f090c4f3c6b36e4b755c9e389a1faf50624a3d1c310a07788e2f724d7fba599",
+      "plugin/nvmtl_physical_bounds.h": "bf3afe460229160d82b6948531d65c6f0f8f53662969f7414646f3c4ab552b5a",
+      "plugin/nvmtl_readonly_metadata.h": "b3b2eb8d0bc675ae67d41ad2403808e4392ad7530809c695b86624ee00265718",
+      "plugin/nvmtl_sample_depth_contract.h": "faf44f6839bfa95c0919c82b31acb451d05bf5583f1f84da69f0fab354576e49",
+      "plugin/nvmtl_sample_positions.h": "ac3d8d6d7e0de5c569b2561fc63244f325df8f12ceb437f14e47cb4b5939c4e1",
+      "plugin/nvmtl_sampler_desc.h": "4cac887dab4f5e1bbf1b8792ed4a3a26a7042f13fb509f82150308a5a249f00c",
+      "plugin/nvmtl_sampler_state.h": "223f23b62c4549529acb6a1f76ea6f878a33886f8f05d6f0581c2495a038f8a9",
+      "plugin/nvmtl_sass_gate.h": "0642cd65086ee19c04c49caf78672384a82354ccc1253aeac7bbe6efb2061a24",
+      "plugin/nvmtl_sass_params.h": "ff15bbb34c45ef3ac916ad08b9eea203bd3b0991aeb1fcb213db0150e182d51e",
+      "plugin/nvmtl_tex_upload.h": "3c46589d1578c9782ccd720bdbae50e16de580a404aa8116c40ae6ab0b4f9c11",
+      "plugin/nvmtl_visibility_sum_spv.h": "978a002c34c91235dac75b7673ac2c49f1114de994f28e9d440332a16618e627",
+      "plugin/nvmtl_vk.c": "c9e2f7d8b62f03d32de38f4b0c639f84f9780c7c663b8c912a1268a4aff55e7f",
+      "plugin/nvmtl_vk.h": "b2b4f2719bc1edf136495945123e9deb0605adc91130fbf12ed27fd3265a4e4c"
+    },
+    "warnings": 333,
+    "new_warning_messages": []
+  },
+  "method": {
+    "benchmark": "tools/bench_command_bindings.m",
+    "dispatches_per_frame": 4000,
+    "measured_frames_per_process": 15,
+    "warmup_frames_per_process": 2,
+    "processes_per_build": 5,
+    "order": [
+      "baseline",
+      "candidate",
+      "candidate",
+      "baseline",
+      "baseline",
+      "candidate",
+      "candidate",
+      "baseline",
+      "baseline",
+      "candidate"
+    ],
+    "clock": "CLOCK_THREAD_CPUTIME_ID",
+    "summary": "median of five process medians, each process has fifteen measured frames; pipeline compilation and submission are outside the timer",
+    "gpu_readback": "all 510 compute command buffers (baseline+candidate) and 30 framebuffer-fetch targets pass; separate candidate dummy-fetch run passes"
+  },
+  "benchmarks": {
+    "repeat": {
+      "median_record_cpu_ms": {
+        "baseline": 10.345491,
+        "candidate": 9.428901
+      },
+      "candidate_change_percent": -8.86,
+      "per_process_medians_ms": {
+        "baseline": [
+          10.003601,
+          10.345491,
+          9.502611,
+          10.366791,
+          10.600501
+        ],
+        "candidate": [
+          7.099011,
+          9.456341,
+          10.262391,
+          8.657341,
+          9.428901
+        ]
+      }
+    },
+    "alternating-tail-offset": {
+      "median_record_cpu_ms": {
+        "baseline": 25.330562,
+        "candidate": 25.508563
+      },
+      "candidate_change_percent": 0.703,
+      "per_process_medians_ms": {
+        "baseline": [
+          24.924812,
+          25.330562,
+          25.706923,
+          28.244402,
+          23.899042
+        ],
+        "candidate": [
+          19.972772,
+          25.508563,
+          29.007143,
+          28.328173,
+          25.317413
+        ]
+      }
+    },
+    "indirect": {
+      "median_record_cpu_ms": {
+        "baseline": 9.55701,
+        "candidate": 8.331531
+      },
+      "candidate_change_percent": -12.823,
+      "per_process_medians_ms": {
+        "baseline": [
+          8.072141,
+          9.880361,
+          10.122711,
+          8.876181,
+          9.55701
+        ],
+        "candidate": [
+          7.239871,
+          8.331531,
+          9.411001,
+          9.878051,
+          7.831871
+        ]
+      }
+    }
+  },
+  "host_tests": [
+    {
+      "test": "tools/test_compute_bindings.py",
+      "returncode": 0,
+      "seconds": 2.142
+    },
+    {
+      "test": "tools/test_graphics_bindings.py",
+      "returncode": 0,
+      "seconds": 1.385
+    },
+    {
+      "test": "tools/test_resset_seal.py",
+      "returncode": 0,
+      "seconds": 21.136
+    },
+    {
+      "test": "tools/test_sampler_wrapper_lifetime.py",
+      "returncode": 0,
+      "seconds": 4.324
+    },
+    {
+      "test": "tools/test_resset_lifetime.py",
+      "returncode": 0,
+      "seconds": 4.816
+    },
+    {
+      "test": "tools/test_render_sampler_cache.py",
+      "returncode": 0,
+      "seconds": 2.043
+    },
+    {
+      "test": "tools/test_sampler_restore.py",
+      "returncode": 0,
+      "seconds": 1.308
+    },
+    {
+      "test": "tools/test_opengl_perf.py",
+      "returncode": 0,
+      "seconds": 3.355
+    },
+    {
+      "test": "tools/test_gl_resource_completion.py",
+      "returncode": 0,
+      "seconds": 1.922
+    },
+    {
+      "test": "tools/test_bytes_dup_seal.py",
+      "returncode": 0,
+      "seconds": 0.592
+    },
+    {
+      "test": "tools/test_submission_copies.py",
+      "returncode": 0,
+      "seconds": 4.532
+    },
+    {
+      "test": "tools/test_surface_import_reuse.py",
+      "returncode": 0,
+      "seconds": 3.6
+    },
+    {
+      "test": "tools/test_surface_publication.py",
+      "returncode": 0,
+      "seconds": 2.57
+    },
+    {
+      "test": "tools/test_angle_optin.py",
+      "returncode": 0,
+      "seconds": 0.584
+    },
+    {
+      "test": "tools/test_stage_package.py",
+      "returncode": 0,
+      "seconds": 6.922
+    },
+    {
+      "test": "tools/test_package_zink.py",
+      "returncode": 0,
+      "seconds": 8.117
+    },
+    {
+      "test": "tools/test_package_licenses.py",
+      "returncode": 0,
+      "seconds": 11.896
+    }
+  ],
+  "limitations": [
+    "Microbenchmark measures calling-thread recording CPU only; no gameplay FPS or whole-system CPU gain established.",
+    "Alternating pipeline/offset/tail workload was 0.7% slower in this run; no improvement claimed there.",
+    "New package has not been installed or reboot-tested. Sequoia, other GPUs and live applications remain unqualified.",
+    "The unchanged base Zink upload proxy failed to initialize a matching NVIDIA Metal device/queue on this host in all four modes before exercising uploads; no new Zink runtime qualification claimed.",
+    "Optional translator audit passed its C descriptor/parser and cursor checks, then stopped because local rspirv/translator build artifacts were unavailable. Translator binary is reused unchanged.",
+    "Full resource enumeration copies O(N) members and releases them on exhaustion; early exits retain them until the surrounding autorelease pool drains."
+  ]
+}

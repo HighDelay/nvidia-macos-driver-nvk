@@ -43,6 +43,8 @@ static unsigned logs, barriers, copies, errors, checks;
 #define nvlog(...) (logs++)
 static uint32_t g_copy_bpp_override, g_copy_aspect_override;
 void nvmtl_vk_cmd_barrier(nvk_cmdbuf *c) {}
+static void nvmtl_xfer_lead(nvk_cmdbuf *c) {}
+static void nvmtl_xfer_end(nvk_cmdbuf *c) {}
 static void img_to(nvk_cmdbuf *c, nvk_image *i, VkImageLayout l,
                    VkAccessFlags a, VkAccessFlags b, VkPipelineStageFlags s, VkPipelineStageFlags t) {
     barriers++; if (!i->img) { fprintf(stderr, "FAIL: a null VkImage reached the layout barrier\n"); errors++; } i->layout = l; }
@@ -56,6 +58,8 @@ static void check(int ok, const char *name) { checks++; printf("%s %s\n", ok ? "
     ('static inline uint32_t nvmtl_lvl(', True),
     ('static inline uint32_t nvmtl_blocks(', True),
     ('static int nvmtl_copy_has_image(', False),
+    ('int nvmtl_vk_cmd_copy_buffer_to_image_3d(', False),
+    ('int nvmtl_vk_cmd_copy_image_to_buffer_3d(', False),
     ('int nvmtl_vk_cmd_copy_buffer_to_image_level_layer(', True),
     ('int nvmtl_vk_cmd_copy_image_to_buffer_level_layer(', True),
 ]) + r'''

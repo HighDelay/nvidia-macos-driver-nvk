@@ -38,6 +38,8 @@ fixture = r'''
 static unsigned calls, errors, checks;
 static VkImageCopy region;
 void nvmtl_vk_cmd_barrier(nvk_cmdbuf *c) {}
+static void nvmtl_xfer_lead(nvk_cmdbuf *c) {}
+static void nvmtl_xfer_end(nvk_cmdbuf *c) {}
 static void img_to(nvk_cmdbuf *c, nvk_image *i, VkImageLayout l,
                   VkAccessFlags a, VkAccessFlags b, VkPipelineStageFlags s, VkPipelineStageFlags t) { i->layout=l; }
 static void pvkCmdCopyImage(VkCommandBuffer cb, VkImage a, VkImageLayout al, VkImage b,

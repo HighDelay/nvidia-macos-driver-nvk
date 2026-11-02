@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Exercise production OpenGL descriptor reuse, encoder defaults and resource-cache lifetime without a GPU."""
 import pathlib
+import os
 import re
 import subprocess
 import tempfile
@@ -38,6 +39,8 @@ enum { NVMTL_SLOT_BUF=1 };
 typedef struct { nvk_buffer buffer; } nvmtl_address_page;
 static nvk_buffer g_dummyBuf;
 static int enabled=1, dynamic=1, snapshots, allocations, copies;
+static uint64_t copied_bindings[NVMTL_BINDING_WORDS];
+static void nvlog(const char *fmt, ...) { (void)fmt; }
 static int nvmtl_enc78_on(int flag) { return enabled; }
 static int nvmtl_table_ubo(void) { return dynamic; }
 static int nvmtl_dirty_only_on(void) { return 1; }
@@ -54,6 +57,8 @@ static VkDescriptorSet nvmtl_snapshot_set_md(nvk_cmdbuf *c, uint32_t which, uint
         const VkDescriptorBufferInfo *uniform) {
     if (uniform) assert(uniform->buffer && uniform->range && uniform->offset==0);
     allocations++; copies += from != VK_NULL_HANDLE;
+    memset(copied_bindings,0,sizeof copied_bindings);
+    if(cm) memcpy(copied_bindings,cm,sizeof copied_bindings);
     c->dyn_out[which]=0; c->tab_out[which]=NULL;
     if (NVMTL_E78_HAS(mask,NVMTL_ADDRESS_BINDING)) {
         VkDescriptorBufferInfo ai; assert(!nvmtl_address_snapshot(c,which,&ai));
@@ -80,6 +85,18 @@ int main(void) {
     assert(!used[0] && used[NVMTL_ADDRESS_BINDING>>6]==(1ull<<(NVMTL_ADDRESS_BINDING&63)));
     spv[16]=0; assert(nvmtl_spirv_bmask(spv,sizeof spv,used) && (used[0]&1));
     spv[5]=0; assert(!nvmtl_spirv_bmask(spv,sizeof spv,used));
+    // Fetch and heap descriptors are bound separately. Neither may invalidate the
+    // stage mask, even when Binding precedes DescriptorSet in the module.
+    uint32_t fetch[]={0x07230203,0x00010500,0,10,0,
+        (4u<<16)|71,7,33,192, (4u<<16)|71,8,33,640,
+        (4u<<16)|71,9,33,0, (4u<<16)|71,7,34,3,
+        (4u<<16)|71,8,34,1, (4u<<16)|71,9,34,2};
+    assert(!nvmtl_spirv_bmask(fetch,sizeof fetch,used));
+    assert(nvmtl_spirv_bmask_x(fetch,sizeof fetch,used,1));
+    assert(!used[0] && used[NVMTL_ADDRESS_BINDING>>6]==(1ull<<(NVMTL_ADDRESS_BINDING&63)));
+    fetch[20]=1; assert(!nvmtl_spirv_bmask_x(fetch,sizeof fetch,used,1)); // 192 in stage set is still invalid
+    fetch[20]=3;
+    fetch[5]=0; assert(!nvmtl_spirv_bmask_x(fetch,sizeof fetch,used,1));
     nvmtl_bindtable table={0}; nvmtl_address_page page={.buffer.buf=(void *)20}; nvk_setref sets[64]={0};
     nvk_cmdbuf c={.table=&table,.sets=sets,.address_pages=&page,.address_count=1};
     nvk_pipeline p={.bmask_ok=1};
@@ -133,6 +150,46 @@ int main(void) {
     nvmtl_snapshot_set_c(&c,0,&p); assert(allocations==13);
     p.gl_uniform_layout=0;
     nvmtl_snapshot_set_c(&c,0,&p); assert(allocations==14);
+    // A real fetch mask permits changing uniform bytes to reuse the descriptor
+    // set. The opt-out keeps the conservative full-mask path.
+    memset(&table,0,sizeof table); c.nsets=0; c.address_count=1;
+    nvk_pipeline fp={.gmask2_ok=1};
+    fp.gmask2[1][NVMTL_ADDRESS_BINDING>>6]=1ull<<(NVMTL_ADDRESS_BINDING&63);
+    VkDescriptorSet first=nvmtl_snapshot_set_c(&c,1,&fp);
+    int before=allocations;
+    for(unsigned i=0;i<100;i++) {
+        table.dirty[1]=1; table.chg[1][0]=1;
+        VkDescriptorSet next=nvmtl_snapshot_set_c(&c,1,&fp);
+        if(nvmtl_desc_mask_on()) assert(next==first);
+        // Keep fixture storage bounded when the opt-out allocates each draw.
+        if(!nvmtl_desc_mask_on()) { assert(next!=first); c.nsets=0; }
+    }
+    assert(allocations==before+(nvmtl_desc_mask_on()?0:100));
+    // Missing new masks must still use the old pipeline mask (all the preceding
+    // GL cases exercise this fallback). New compute masks also stay selective.
+    memset(&table,0,sizeof table); c.nsets=0; c.address_count=1;
+    fp=(nvk_pipeline){.bmask2_ok=1}; fp.bmask2[0]=1;
+    nvmtl_snapshot_set_c(&c,0,&fp);
+    if(nvmtl_desc_mask_on()) assert(table.lastw[0][0]==1 && !table.lastw[0][1]);
+    // High storage bindings share neither dirty bits nor copy-mask storage with
+    // the four-word shader mask. They must never take buffer-offset-only reuse.
+    memset(&table,0,sizeof table); c.nsets=0; c.address_count=1;
+    fp=(nvk_pipeline){.bmask_ok=1,.stex_hi={128,0}};
+    fp.bmask[NVMTL_ADDRESS_BINDING>>6]=1ull<<(NVMTL_ADDRESS_BINDING&63);
+    VkDescriptorSet high=nvmtl_snapshot_set_c(&c,0,&fp);
+    for(unsigned binding=255;binding<NVMTL_NBIND;binding++) {
+        table.dirty[0]=1; table.chg[0][binding>>6]=1ull<<(binding&63);
+        VkDescriptorSet next=nvmtl_snapshot_set_c(&c,0,&fp); assert(next!=high); high=next;
+        c.nsets=1; c.sets[0].set=(void *)high; table.last_idx[0]=0;
+    }
+    // Expanding the shader mask can copy all 128 already initialized storage
+    // descriptors, including bindings 256 through 320, without reading past cm.
+    fp.bmask[0]|=1;
+    nvmtl_snapshot_set_c(&c,0,&fp);
+    for(unsigned binding=NVMTL_STEX_BASE;binding<NVMTL_NBIND;binding++)
+        assert((copied_bindings[binding>>6]>>(binding&63))&1);
+    puts("PASS: high storage changes forbid stale-set reuse and all 128 storage copy bits remain in bounds");
+    puts("PASS: fetch/heap exclusion, malformed/unknown binding refusal, selective graphics/compute masks, old-mask fallback and opt-out");
     puts("PASS: unchanged/offset-only reuse, table-page rollover, texel/image masks, direct buffers, recycled sets, growing masks, opt-out");
 }
 '''
@@ -243,7 +300,13 @@ with tempfile.TemporaryDirectory() as d:
         src.write_text(code)
         executable = path / name
         cmd = ['xcrun', 'clang', '-O2', '-Werror', *includes, str(src), '-o', str(executable)]
+        if name == 'descriptors':
+            cmd += ['-fsanitize=address,undefined']
         if objc:
             cmd += ['-fobjc-arc', '-framework', 'Foundation']
         subprocess.run(cmd, check=True)
-        subprocess.run([str(executable)], check=True)
+        if name == 'descriptors':
+            for enabled_mask in ('1', '0'):
+                subprocess.run([str(executable)], check=True, env={**os.environ, 'NVMTL_DESC_MASK': enabled_mask})
+        else:
+            subprocess.run([str(executable)], check=True)

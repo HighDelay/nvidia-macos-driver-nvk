@@ -22,7 +22,12 @@ For an AppKit window, the default presentation mode copies on the GPU into the
 actual CAMetalLayer drawable's IOSurface VRAM. It uses the same version-3
 IOSurface import, completion fence, dirty notification and generation tag
 protocol as the Minecraft native NVK runtime. It never shares a VkImage across
-Vulkan devices. A GPU scratch image handles channel order and opaque alpha;
+Vulkan devices. When family VRAM import is refused (for example, a full 256 MiB
+BAR1 aperture), native Zink imports the drawable's system pages and copies into
+them on the GPU. It holds an IOSurface write lock through GPU completion and
+publishes the new seed instead of marking nonexistent VRAM current. Unsupported
+host imports still fail safely; uncertain GPU work retains its resources and
+quarantines the share group. A GPU scratch image handles channel order and opaque alpha;
 there is no game-frame CPU readback, CPU row conversion or CPU pixel upload.
 Metal still allocates the drawable and macOS composites it. This is a GPU-copy
 path, not zero-copy scan-out, and it still waits for GPU completion on the CPU.
@@ -99,7 +104,7 @@ the launched application:
 | Value | Presentation |
 | --- | --- |
 | `auto` (default) | Native drawable when available; GPU IOSurface/Apple presentation for other CGL clients |
-| `native` | Require the direct drawable VRAM copy; report unsupported targets as errors |
+| `native` | Require a direct drawable GPU copy, into family VRAM or imported system pages; report unsupported targets as errors |
 | `gpu` | Require shared host-page import plus Apple GL presentation; useful for comparison |
 | `cpu` | Explicit readback/upload diagnostic; slow and not the normal rendering path |
 

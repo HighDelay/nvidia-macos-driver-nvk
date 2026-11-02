@@ -1,0 +1,51 @@
+{
+  "date": "2026-10-31",
+  "host": {
+    "macos": "26.7.2",
+    "build": "25G332",
+    "arch": "x86_64",
+    "gpu": "NVIDIA GeForce RTX 2060 (TU106-A)",
+    "vram_mib": 6144,
+    "bar1_mib": 8192
+  },
+  "benchmark": {
+    "tool": "tools/bench_windowserver_state.m",
+    "draws_per_frame": 1200,
+    "frames_per_process": 9,
+    "processes_per_build": 5,
+    "clock": "CLOCK_THREAD_CPUTIME_ID",
+    "old_build": "/Volumes/App/nvmtl-perf-20261030/build/NVMTLDriver",
+    "new_build": "/Volumes/App/nvmtl-windowserver-20261031/build/NVMTLDriver",
+    "repeated_state_record_cpu_ms": {
+      "old_mean_of_process_medians": 5.5613666,
+      "new_mean_of_process_medians": 5.1388008,
+      "change_percent": -7.598
+    },
+    "varying_state_record_cpu_ms": {
+      "old_mean_of_process_medians": 5.3927086,
+      "new_mean_of_process_medians": 5.5460684,
+      "change_percent": 2.844
+    },
+    "raw_results": "/Volumes/App/nvmtl-windowserver-20261031/validation/bench-windowserver.json"
+  },
+  "validation": [
+    "tools/test_windowserver_caches.py",
+    "tools/test_compute_bindings.py",
+    "tools/test_graphics_bindings.py",
+    "tools/test_nvmtl_callback_lifecycle.py",
+    "tools/test_resset_seal.py",
+    "tools/test_sampler_wrapper_lifetime.py",
+    "tools/test_render_sampler_cache.py",
+    "tools/test_surface_import_reuse.py",
+    "tools/test_surface_publication.py",
+    "tools/test_surface_queue.py",
+    "tools/test_submission_copies.py",
+    "tools/test_surface_pending_lifetime.py"
+  ],
+  "limitations": [
+    "This measures calling-thread command recording only; it is not a whole-system WindowServer CPU measurement.",
+    "The varying-state comparison was 2.844 percent slower; no gain is claimed for state that changes every draw.",
+    "Live WindowServer sampling required privileges unavailable in this session.",
+    "The new plugin has not been installed or reboot-tested; other GPUs and applications remain unqualified."
+  ]
+}

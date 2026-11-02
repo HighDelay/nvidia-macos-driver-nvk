@@ -1,0 +1,294 @@
+{
+  "date": "2026-11-02",
+  "optimization_parent": "b88230b8d8d5c8b8121f60cdc3e70f9f56431322",
+  "merged_main": "b240c970955210cd64fcc76b2fd4c47f3dae3332",
+  "nullmoth_upstream": "470e391e8cf8d7e499cdabfa7f2daadb6e14bcfd",
+  "hardware": {
+    "gpu": "NVIDIA GeForce RTX 2060, TU106-A, 6 GB",
+    "macos": "26.7.2 (25G332)",
+    "bar1": "256 MB"
+  },
+  "plugin_sha256": "5fa57f51477c94298cb3c0a319d57d5e5c62ccf1df51460f8d3eab2621fb156d",
+  "plugin_minimum_macos": "15.0",
+  "package_minimum_macos": "15.5",
+  "base_archive_sha256": "34fe21bc07dbf0cbfeef357c4be768b1a498d559e63d0783bc5ac2c50a417e93",
+  "host_tests": [
+    {
+      "test": "binding_metadata",
+      "exit": 0
+    },
+    {
+      "test": "static_sampler_device",
+      "exit": 0
+    },
+    {
+      "test": "sampler_restore",
+      "exit": 0
+    },
+    {
+      "test": "sampler_wrapper_lifetime",
+      "exit": 0
+    },
+    {
+      "test": "render_sampler_cache",
+      "exit": 0
+    },
+    {
+      "test": "address_snapshots",
+      "exit": 0
+    },
+    {
+      "test": "descriptor_set_recycle",
+      "exit": 0
+    },
+    {
+      "test": "opengl_perf",
+      "exit": 0
+    },
+    {
+      "test": "compute_bindings",
+      "exit": 0
+    },
+    {
+      "test": "graphics_bindings",
+      "exit": 0
+    },
+    {
+      "test": "windowserver_caches",
+      "exit": 0
+    },
+    {
+      "test": "nvmtl_callback_lifecycle",
+      "exit": 0
+    },
+    {
+      "test": "resset_seal",
+      "exit": 0
+    },
+    {
+      "test": "resset_lifetime",
+      "exit": 0
+    },
+    {
+      "test": "gl_resource_completion",
+      "exit": 0
+    },
+    {
+      "test": "surface_import_reuse",
+      "exit": 0
+    },
+    {
+      "test": "surface_publication",
+      "exit": 0
+    },
+    {
+      "test": "surface_queue",
+      "exit": 0
+    },
+    {
+      "test": "submission_copies",
+      "exit": 0
+    },
+    {
+      "test": "surface_pending_lifetime",
+      "exit": 0
+    },
+    {
+      "test": "angle_optin",
+      "exit": 0
+    },
+    {
+      "test": "bytes_dup_seal",
+      "exit": 0
+    },
+    {
+      "test": "witness_keeps_backend",
+      "exit": 0
+    },
+    {
+      "test": "witness_order",
+      "exit": 0
+    },
+    {
+      "test": "bc_small_mips",
+      "exit": 0
+    },
+    {
+      "test": "copy_null_image",
+      "exit": 0
+    },
+    {
+      "test": "raster_rate_caps",
+      "exit": 0
+    },
+    {
+      "test": "photobooth_preview",
+      "exit": 0
+    },
+    {
+      "test": "surface_drawable_usage",
+      "exit": 0
+    },
+    {
+      "test": "headless_metal_owner",
+      "exit": 0
+    },
+    {
+      "test": "install_fwold_planted",
+      "exit": 0
+    },
+    {
+      "test": "install_amfi_note",
+      "exit": 0
+    },
+    {
+      "test": "intel_panel_install",
+      "exit": 0
+    },
+    {
+      "test": "video_codec_policy",
+      "exit": 0
+    },
+    {
+      "test": "video_runtime",
+      "exit": 0
+    },
+    {
+      "test": "zink_mapping_trial",
+      "exit": 0
+    },
+    {
+      "test": "package_zink",
+      "exit": 0
+    },
+    {
+      "test": "uninstall_kext_paths",
+      "exit": 0
+    },
+    {
+      "test": "angle_chrome_family",
+      "exit": 0
+    }
+  ],
+  "gpu_probes": [
+    {
+      "case": "fetch",
+      "exit": 0
+    },
+    {
+      "case": "fetch-off",
+      "exit": 0
+    },
+    {
+      "case": "bindings",
+      "exit": 0
+    },
+    {
+      "case": "bindings-fetch-off",
+      "exit": 0
+    },
+    {
+      "case": "storage",
+      "exit": 0
+    },
+    {
+      "case": "samplers",
+      "exit": 0
+    },
+    {
+      "case": "recycle",
+      "exit": 0
+    },
+    {
+      "case": "render-state",
+      "exit": 0
+    },
+    {
+      "case": "copy-coherence",
+      "exit": 0
+    },
+    {
+      "case": "photobooth",
+      "exit": 0,
+      "lookup_shim": "metal_test_lookup.dylib; exactly one plugin loaded"
+    },
+    {
+      "case": "unknown-storage",
+      "exit": 0
+    },
+    {
+      "case": "volume-blit",
+      "exit": 0
+    }
+  ],
+  "package": {
+    "verified_userland_machos": [
+      "Library/GPUBundles/NVIDIAShared.bundle/Contents/MacOS/NVIDIAShared",
+      "Library/GPUBundles/NVIDIAShared.bundle/Contents/PlugIns/libLLVM.dylib",
+      "Library/GPUBundles/NVIDIAShared.bundle/Contents/PlugIns/libzstd.1.dylib",
+      "Library/GPUBundles/NVIDIAShared.bundle/Contents/PlugIns/nvvmdrive",
+      "Library/GPUBundles/NVKZinkGLDriver.bundle/Contents/MacOS/NVKZinkGLDriver",
+      "Library/GPUBundles/NVMTLDriver.bundle/Contents/MacOS/NVMTLDriver",
+      "Library/GPUBundles/NVMTLDriver.bundle/Contents/MacOS/air-runtime/libLLVM.dylib",
+      "Library/GPUBundles/NVMTLDriver.bundle/Contents/MacOS/air-runtime/libzstd.1.dylib",
+      "Library/GPUBundles/NVMTLDriver.bundle/Contents/MacOS/libnvdec_h264.dylib",
+      "Library/GPUBundles/NVMTLDriver.bundle/Contents/MacOS/libnvdec_h264_t2d.dylib",
+      "Library/GPUBundles/NVMTLDriver.bundle/Contents/MacOS/libnvdec_hevc.dylib",
+      "Library/GPUBundles/NVMTLDriver.bundle/Contents/MacOS/libnvenc_h264.dylib",
+      "Library/GPUBundles/NVMTLDriver.bundle/Contents/MacOS/libnvenc_h264_ga10x.dylib",
+      "Library/GPUBundles/NVMTLDriver.bundle/Contents/MacOS/libnvenc_h264_tu10x.dylib",
+      "Library/GPUBundles/NVMTLDriver.bundle/Contents/MacOS/libnvenc_hevc.dylib",
+      "Library/GPUBundles/NVMTLDriver.bundle/Contents/MacOS/libnvenc_hevc_ga10x.dylib",
+      "Library/GPUBundles/NVMTLDriver.bundle/Contents/MacOS/libnvenc_hevc_tu10x.dylib",
+      "Library/GPUBundles/NVMTLDriver.bundle/Contents/MacOS/libnvencvt.dylib",
+      "Library/GPUBundles/NVMTLDriver.bundle/Contents/MacOS/libnvmtl_translate.dylib",
+      "Library/GPUBundles/nvmtl/air-opt",
+      "Library/GPUBundles/nvmtl/libnvmtl_translate.dylib",
+      "Library/GPUBundles/nvmtl/libvulkan.1.4.362.dylib",
+      "Library/GPUBundles/nvmtl/libvulkan_nouveau.dylib",
+      "Library/GPUBundles/nvmtl/minecraft/lib/libnvk_minecraft.dylib",
+      "Library/GPUBundles/nvmtl/minecraft/lib/libnvk_renderer.dylib",
+      "Library/GPUBundles/nvmtl/wine/bin/nvk-runtime",
+      "Library/GPUBundles/nvmtl/wine/lib/libnvk_renderer.dylib",
+      "Library/GPUBundles/nvmtl/wine/lib/libnvk_wine.dylib",
+      "Library/GPUBundles/nvmtl/zink/cgl_iosurface_probe",
+      "Library/GPUBundles/nvmtl/zink/cgl_renderer_probe",
+      "Library/GPUBundles/nvmtl/zink/cgl_zink_legacy_probe",
+      "Library/GPUBundles/nvmtl/zink/cgl_zink_probe",
+      "Library/GPUBundles/nvmtl/zink/cgl_zink_window_probe",
+      "Library/GPUBundles/nvmtl/zink/gld_bundle_probe",
+      "Library/GPUBundles/nvmtl/zink/libnvk_cgl.dylib",
+      "Library/GPUBundles/nvmtl/zink/libnvk_renderer.dylib",
+      "Library/GPUBundles/nvmtl/zink/libnvk_zink.dylib",
+      "Library/GPUBundles/nvmtl/zink/libnvk_zink_vulkan.dylib",
+      "Library/GPUBundles/nvmtl/zink/obs_zink_policy_probe",
+      "Library/GPUBundles/nvmtl/zink/zink_native_present_probe",
+      "Library/GPUBundles/nvmtl/zink/zink_probe",
+      "Library/GPUBundles/nvmtl/zink/zink_sync_probe"
+    ],
+    "base_files_verified": 180,
+    "changed_base_files": [
+      "Library/GPUBundles/NVMTLDriver.bundle/Contents/MacOS/NVMTLDriver"
+    ],
+    "runtime_versions": [
+      "15.5",
+      "26.7.2"
+    ],
+    "accelerators": [
+      "15",
+      "26"
+    ],
+    "optional_intel_panel": "verified, default No retained",
+    "kernel_link": "not repeated: kernel sources and binaries identical to b240c97 / verified 2.6.6 release",
+    "symlinks": "all preserved and validated"
+  },
+  "witness_negative_control": "Unmodified b240c97 fails the first reordered-lap assertion; merged verdict passes all ten cases under ASan/UBSan.",
+  "limits": [
+    "No installation/reboot, live WindowServer load test, sleep/wake or extended session.",
+    "No Sequoia runtime execution or other GPU qualification.",
+    "Full translator suite and kernel link checks not repeated: corresponding sources/binaries reused unchanged from the verified 2.6.6 release.",
+    "Microbenchmark timings are smoke-test output, not a new performance comparison."
+  ],
+  "logs_directory": "/Volumes/App/nvmtl-upstream-20261102/validation",
+  "package_directory": "/Users/dino/Downloads/nvmtl-upstream-test-20261102"
+}

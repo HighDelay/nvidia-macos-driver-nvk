@@ -23,6 +23,60 @@ uses the actual old snapshot as its explicit three-way base and records the
 new upstream head as a parent; do not replay already integrated changes from
 the rewritten history. The preceding 2.6.4 base was `f95f4d2`.
 
+## PR #5 optimization branch integration, 2026-11-02
+
+PR #5 (`3e28b36`) is integrated into HighDelay `main` at `b240c97`, with
+an empty descriptor-free-list guard and a portable regression-test include path.
+The contributor had already merged `b240c97`, which contains NullMoth
+`470e391` (2.6.6); retain that ancestry rather than replaying rewritten
+upstream history. See [the fork review](PR5-REVIEW.md) for independent validation.
+
+Keep every recording cache and descriptor/resource lifetime repair listed below,
+including the latest vertex/index/sampler caches, buffer-address cache, atomic
+surface-seed publication, empty completion fast path and host query-pool reset.
+Upstream now covers framebuffer-fetch mask exclusion/fallback; use that shared
+implementation once. Resolve the buffer-upload conflict with one bulk 3D copy
+and upstream's detailed failure diagnostics. Missing-image refusal belongs in
+the common 3D copy implementation so both volume and single-plane callers are
+protected. Keep managed initial clears before uploads and transfer ordering.
+
+**Completion-witness exception:** this branch retains exact-match completion.
+The historical 2.6.5 instruction to accept a later lap is superseded here:
+sequence numbers are allocated before the queue submit lock, and pre-submit
+hooks can submit recursively. A later recorded sequence in the same ring slot
+therefore cannot certify an earlier command. Keep missing-witness quarantine
+and the backend-preserving fallback. `tools/test_witness_order.py` runs the
+production verdict and rejects reordered one/two-lap values; HighDelay's
+unmodified verdict fails that negative control. This bounded integration does
+not change submission locking or claim to fix witness-ring exhaustion.
+
+Preserve Photo Booth's real storage backing and Unknown-usage handling, the
+preview-only orientation adapter, two-plane publication and serial presentation
+queue. All Tahoe, native OpenGL/Minecraft, MoltenVK, small-BAR Zink, video,
+Wine/NVK/DXVK and optional-panel policies remain present. Translator, kernel,
+native Vulkan runtime and installer sources are identical to `b240c97`; reuse
+their verified 2.6.6 release binaries. Rebuild the plugin, native Zink library
+and changed diagnostics. Keep the verified CGL/GLD adapter binaries and their
+source identities; changing a diagnostic does not require rebuilding the adapter.
+
+The [contributor's merge validation](NVMTL-UPSTREAM-2.6.6.md) is historical;
+the fork review records this integration's checks separately. Installation/reboot,
+Minecraft gameplay after resizing and live WindowServer measurements remain
+pending. Prepare a draft under the normal release policy; publication requires
+the user's explicit approval.
+
+## Native Zink resize follow-up, 2026-11-02
+
+The PR #5 follow-up also retains the native Zink presentation fallback described
+in [resize validation](NVMTL-RESIZE-20261102.md). A full small BAR1 aperture can
+refuse a new drawable's family VRAM even though the game continues rendering.
+After an invalid external VRAM import, copy into aligned, bounded IOSurface
+system pages on the same Zink device. Keep the write lock until confirmed GPU
+completion and publish its seed; do not publish a family-VRAM dirty/tag marker
+for this path. Preserve failed-import cleanup and uncertain-work quarantine.
+The native Minecraft Vulkan/Wine frontend remains a separate implementation;
+this fallback changes native Zink only.
+
 ## Upstream 2.6.6 integration
 
 Two textual conflicts cover the drawable usage helper and remote plugin builder.
@@ -122,6 +176,37 @@ playback. Preserve the direct-pool optimization and format/size conversion
 fallback. The native regression must require IOSurface-backed output for both
 minimal and explicit requests; retain the live Edge 2160p60 qualification in
 [browser validation](BROWSER-VIDEO-DECODING.md).
+
+## NVMTL command recording caches
+
+The framebuffer-fetch optimization originated in v2.6.5 commits `4a377d9`
+and `8784c0b` and is now shared with the integrated upstream: exclude separately
+bound set 3 from stage descriptor masks and fall back to older valid masks when
+new masks are unavailable. Retain the existing fetch barriers and bindings. See
+[fetch-mask validation and deferred witness review](NVMTL-FRAMEBUFFER-FETCH-MASKS.md).
+
+Retain the per-recording, per-stage texture-index cache used by address-table
+snapshots and the single dummy-address query per snapshot. Invalidate sampled
+texture indices when a view, resource kind or null binding changes; copy them
+into each independently owned GPU snapshot. Buffer addresses and self-pointers
+must use the current page/offset, and no cached array may outlive its bind table.
+See [address snapshot validation](NVMTL-ADDRESS-SNAPSHOTS.md).
+Keep dirty/copy bitmaps sized for all `NVMTL_NBIND` entries, independently of the
+four-word base shader mask. Storage bindings 256–320 must neither overwrite
+adjacent state nor qualify for buffer-offset-only descriptor reuse.
+
+Keep the recording-local compute pipeline/descriptor binding cache, eight-entry
+successful threadgroup-variant cache, and framebuffer-fetch binding cache. Reset
+them on each command recording/event segment; preserve complete handle/layout/
+offset identity, retained pipeline ownership, failed-variant retry, internal
+occlusion pipeline tracking and invalidation before direct SASS hooks. A different
+lower-set layout can disturb the higher framebuffer-fetch set. Retain fetch
+barriers and all push constants even when bindings are unchanged.
+
+Resource-set enumeration uses a synchronized snapshot with a non-null mutation
+sentinel. Normal exhaustion must release resources before the app's pool drains;
+early exits must not leak. Keep the existing backend VkSampler interning and
+independent Metal wrappers. See [command cache validation](NVMTL-COMMAND-CACHES.md).
 
 ## Capture import reuse and planar GPU copies
 
