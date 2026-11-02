@@ -23,6 +23,37 @@ uses the actual old snapshot as its explicit three-way base and records the
 new upstream head as a parent; do not replay already integrated changes from
 the rewritten history. The preceding 2.6.4 base was `f95f4d2`.
 
+## Parallels cache I/O compatibility, PR #4, 2026-11-02
+
+PR #4 (`70056ae`) merges cleanly onto `d2df8bd`. Default shader-cache writes
+and touches to the caller's thread only for the exact `prl_vm_app` process.
+Ordinary clients, including WindowServer and Chromium, keep asynchronous I/O.
+An explicit `NVMTL_CACHE_SYNC_IO` setting wins, including `0` or an empty value;
+retain the existing first-character flag semantics. Initialize this policy with
+`dispatch_once`: the original PR's shared integer allowed concurrent callers
+to observe its temporary off value before process detection completed.
+
+The contributor reports that this policy stopped a Parallels 26.5.0 VM startup
+crash on RTX 2060 / Tahoe 26.7.2, with a run exceeding four minutes. Its cache
+lifetime diagnosis is inferred from the crash report, not proven. Do not claim
+an independently reproduced VM fix or generalize this synchronous policy to
+other applications. Existing captured cache data and file paths already have
+owned lifetimes; this change does not replace their ownership or exit-drain rules.
+
+Validation: 14 policy/override cases pass with 64 concurrent callers per case,
+plus real synchronous/asynchronous dispatch and drain under ASan/UBSan. The
+original PR fails the strengthened concurrency regression. Eleven retained host
+regressions pass. The release plugin builds for macOS 15.0; the translator is
+reused byte-for-byte. Thirty sampler GPU pixel checks pass across ordinary and
+real `prl_vm_app`-named probe processes, along with 32 Core Image frames and
+64 IOSurface handoffs with zero stale reads. These are native probe tests on
+RTX 2060 SUPER / Tahoe 26.7.1, not a Parallels VM test.
+
+The user explicitly requested rebuilding and replacing the existing
+`v2.6.6.1-nvk` package/release for this fix. Record both source identities and
+asset digests externally; this one replacement does not change the normal rule
+to use a new revision for future public updates.
+
 ## ANGLE WebGL sampler arrays and inlined constants, 2026-11-02
 
 Preserve the address ABI of a one-element byval sampler array. AIR metadata
@@ -50,8 +81,8 @@ crashes in the observed run. The user confirms that it stays responsive without
 whiteout. All 21 translator GPU cases and 32 Core Image pixel/orientation frames
 pass. This is bounded host validation, not an endurance or Sequoia qualification.
 Only the translator code changes; plugin machine code, kernels, Zink and the
-gaming/video runtimes retain their preceding verified bytes. Keep the current
-local-test/release hold.
+gaming/video runtimes retain their preceding verified bytes. Included in the
+user-approved `v2.6.6.1-nvk` release.
 
 ## ANGLE terminal and IOSurface handoff, 2026-11-02
 
@@ -91,7 +122,7 @@ and candidate: four corpus sweeps expect at least 20 fixtures where this checkou
 has five, and five reflection checks omit the existing bindless image-heap binding.
 Do not present those harnesses as passing or weaken their assertions for this fix.
 Only the plugin and translator change; kernel and Zink binaries are reused.
-Keep the current local-test/release hold until the user changes it.
+Included in the user-approved `v2.6.6.1-nvk` release.
 
 ## PR #5 optimization branch integration, 2026-11-02
 

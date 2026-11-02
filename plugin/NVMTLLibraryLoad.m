@@ -25,6 +25,7 @@ void nvlog(const char *fmt, ...);
 #import <CommonCrypto/CommonDigest.h>
 #define NVMTL_AIR_OPT   "/Library/GPUBundles/nvmtl/air-opt"
 #include <unistd.h>
+#include <libproc.h>
 static inline const char *nvmtl_pick_ll(const char *staged, const char *dev) {
     return access(staged, R_OK) == 0 ? staged : dev;
 }
@@ -189,8 +190,17 @@ static _Atomic unsigned long gFcMemoHit, gFcLookups;
 // caller, and so does every memo fill, so a process never reads or translates the same thing twice. NVMTL_CACHE_SYNC_IO=1
 // (or nvrm610.conf) runs the work on the caller again, for an A/B.
 static int nvmtl_cache_sync_io(void) {
-    static int on = -1;
-    if (on < 0) { const char *e = getenv("NVMTL_CACHE_SYNC_IO"); on = (e && *e && *e != '0') ? 1 : 0; }
+    static int on;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        const char *e = getenv("NVMTL_CACHE_SYNC_IO");
+        if (e) { on = (*e && *e != '0') ? 1 : 0; return; }
+        /* Parallels has reported startup crashes while reflection-cache I/O
+         * is queued. Default to caller-thread I/O for its graphics process;
+         * ordinary clients keep async writes, and explicit settings win. */
+        char name[64] = {0};
+        on = proc_name(getpid(), name, sizeof name - 1) > 0 && !strcmp(name, "prl_vm_app");
+    });
     return on;
 }
 static dispatch_queue_t gCacheIoQueue;
