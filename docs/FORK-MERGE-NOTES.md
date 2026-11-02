@@ -23,6 +23,37 @@ uses the actual old snapshot as its explicit three-way base and records the
 new upstream head as a parent; do not replay already integrated changes from
 the rewritten history. The preceding 2.6.4 base was `f95f4d2`.
 
+## Bounded address-lowering cache, local trial, 2026-11-02
+
+Keep `nvmtl_address_shader_g` within a 128 MiB accounting budget for owned
+input keys, lowered results, guard metadata and an allowance for entry overhead,
+with the existing 4,096-entry ceiling. Evict least recently used entries instead
+of clearing the whole cache. Oversized results remain usable without being cached.
+Keep byte-exact keys covering both flags and the complete shader input. Share one
+immutable key between the dictionary and LRU, update recency by object identity,
+and freeze growable outputs so their spare capacity is not retained. Concurrent
+misses must reuse the first inserted result and its matching guard metadata
+without counting an entry twice. Retain negative-result caching and caller-owned
+results after eviction.
+
+This changes only retention of lowering results used during pipeline creation.
+Preserve all binding/resource optimizations, compiled-pipeline ownership,
+descriptor recycling, buffer pools, other cache budgets and surface synchronization.
+Eviction may add translation work when a later pipeline needs an old result.
+
+`python3 tools/test_address_shader_cache.py` passes eight ASan/UBSan cases,
+including overlapping concurrent misses; the original cache fails the oversized
+result negative control. The isolated 128-module, 1 MiB-per-module allocation
+probe falls from about 260 MiB to 130 MiB. Three alternating warm-lookup samples
+have medians of 0.088 ms before and 0.085 ms after. A SHA-256-key alternative
+cost about 1.8–2.1 ms per 685 KiB warm lookup on this CPU, so it was not selected.
+These synthetic measurements do not establish WindowServer savings or gameplay
+performance. Private RTX 2060 SUPER / Tahoe 26.7.1 GPU probes pass sampler arrays,
+Core Image pixels/orientation, IOSurface handoff, concurrent pipeline creation
+and descriptor reuse. Live WindowServer memory and smoothness remain to be
+qualified after a new login. Source and installation are local-only pending the
+user's test; do not push or prepare a release yet.
+
 ## Parallels cache I/O compatibility, PR #4, 2026-11-02
 
 PR #4 (`70056ae`) merges cleanly onto `d2df8bd`. Default shader-cache writes

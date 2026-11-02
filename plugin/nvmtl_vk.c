@@ -3854,12 +3854,27 @@ static int nvmtl_spirv_ssbo_table(const void *spv, size_t n)
 static _Atomic unsigned long long g_g1_refused;
 static NSData *nvmtl_address_shader_g0(const void *data, size_t len, uint32_t flags, uint32_t *info);
 static NSData *nvmtl_address_shader_g_uncached(const void *data, size_t len, uint32_t flags, uint32_t *info);
-static NSData *nvmtl_address_shader_g(const void *data, size_t len, uint32_t flags, uint32_t *info) {
-    static NSMutableDictionary *cache; static pthread_mutex_t lk = PTHREAD_MUTEX_INITIALIZER;
+#ifndef NVMTL_ADDRESS_CACHE_BYTES
+#define NVMTL_ADDRESS_CACHE_BYTES (128ull << 20)
+#endif
+static NSData *nvmtl_address_shader_key(const void *data, size_t len, uint32_t flags) {
+    if (!data && len) return nil;
     NSMutableData *key = [NSMutableData dataWithBytes:&flags length:sizeof flags];
     [key appendBytes:data length:len];
+    return key;
+}
+static NSData *nvmtl_address_shader_g(const void *data, size_t len, uint32_t flags, uint32_t *info) {
+    // Keep the existing byte-exact lookup without hashing large shaders on each
+    // pipeline build. Bound both the input keys and lowered results: 4096 large
+    // modules can otherwise keep hundreds of MB alive after compilation.
+    static NSMutableDictionary *cache; static NSMutableArray *lru;
+    static NSUInteger retained;
+    static pthread_mutex_t lk = PTHREAD_MUTEX_INITIALIZER;
+    NSData *key = nvmtl_address_shader_key(data, len, flags);
+    if (!key) { if (info) memset(info, 0, 4 * sizeof *info); return nil; }
     pthread_mutex_lock(&lk);
     NSArray *hit = cache[key];
+    if (hit) { [lru removeObjectIdenticalTo:hit[3]]; [lru addObject:hit[3]]; }
     pthread_mutex_unlock(&lk);
     if (hit) {
         if (info) memcpy(info, [hit[1] bytes], 4 * sizeof *info);
@@ -3868,11 +3883,38 @@ static NSData *nvmtl_address_shader_g(const void *data, size_t len, uint32_t fla
     uint32_t got[4] = {0};
     NSData *d = nvmtl_address_shader_g_uncached(data, len, flags, got);
     if (info) memcpy(info, got, sizeof got);
+    // The byte ceiling covers input keys, lowered data, info and an allowance for
+    // entry bookkeeping. Oversized results remain usable without being cached.
+    const NSUInteger budget = NVMTL_ADDRESS_CACHE_BYTES;
+    const NSUInteger fixed = key.length + sizeof got + 256;
+    if (fixed > budget || d.length > budget - fixed) return d;
+    const NSUInteger cost = fixed + d.length;
+    // Lowering may build a growable NSMutableData. Cache exact immutable bytes
+    // instead of its spare capacity; callers consume the same read-only result.
+    NSData *stored = [d copy];
+    // Share one immutable key between the dictionary and LRU. Retaining the
+    // scratch NSMutableData as well would keep another full input allocation.
+    NSData *ownedKey = [key copy];
+    NSArray *entry = @[stored ?: (id)[NSNull null], [NSData dataWithBytes:got length:sizeof got], @(cost), ownedKey];
     pthread_mutex_lock(&lk);
-    if (!cache || cache.count >= 4096) cache = [NSMutableDictionary new];
-    cache[key] = @[d ?: (id)[NSNull null], [NSData dataWithBytes:got length:sizeof got]];
+    // Another caller can finish the same miss while lowering runs unlocked.
+    // Reuse its result and matching info without charging the entry twice.
+    hit = cache[key];
+    if (hit) {
+        [lru removeObjectIdenticalTo:hit[3]]; [lru addObject:hit[3]];
+        pthread_mutex_unlock(&lk);
+        if (info) memcpy(info, [hit[1] bytes], 4 * sizeof *info);
+        return hit[0] == (id)[NSNull null] ? nil : hit[0];
+    }
+    if (!cache) { cache = [NSMutableDictionary new]; lru = [NSMutableArray new]; }
+    while (lru.count && (cache.count >= 4096 || retained > budget - cost)) {
+        NSData *old = lru.firstObject;
+        retained -= [cache[old][2] unsignedIntegerValue];
+        [cache removeObjectForKey:old]; [lru removeObjectAtIndex:0];
+    }
+    cache[ownedKey] = entry; [lru addObject:ownedKey]; retained += cost;
     pthread_mutex_unlock(&lk);
-    return d;
+    return stored;
 }
 static _Atomic unsigned long long g_g1_descriptors;
 static NSData *nvmtl_address_shader_g_uncached(const void *data, size_t len, uint32_t flags, uint32_t *info) {
