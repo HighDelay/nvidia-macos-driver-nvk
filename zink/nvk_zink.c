@@ -14,6 +14,7 @@
 #include "state_tracker/st_cb_bitmap.h"
 #include "state_tracker/st_util.h"
 #include "main/state.h"
+#include "main/context.h"
 #include <limits.h>
 #include <pthread.h>
 #include <stdlib.h>
@@ -33,6 +34,7 @@ struct nvk_zink_context {
    struct pipe_resource *attachments[ST_ATTACHMENT_COUNT];
    unsigned width, height;
    bool double_buffer;
+   bool front_flush_pending, front_flush_active;
    struct pipe_resource *native_image;
    struct {
       IOSurfaceRef surface;
@@ -71,8 +73,33 @@ static void submit(struct nvk_zink_context *ctx)
 static bool flush_front(struct st_context *st, struct pipe_frontend_drawable *drawable,
                          enum st_attachment_type attachment)
 {
-   /* Presentation is explicit through readback/present_iosurface. */
+   struct nvk_zink_context *ctx = (void *)drawable;
+   /* Mesa calls this while finishing its flush. Defer the native handoff
+    * until the public GL entrypoint returns: presenting here would reenter
+    * Mesa's state validation and flush path. Back-buffer/FBO flushes do not
+    * request a window update. */
+   if (attachment == ST_ATTACHMENT_FRONT_LEFT && !ctx->front_flush_active)
+      ctx->front_flush_pending = true;
    return true;
+}
+
+NVK_EXPORT int nvk_zink_begin_front_flush(struct nvk_zink_context *ctx)
+{
+   if (!ctx || st_api_get_current() != ctx->st || !ctx->front_flush_pending ||
+       ctx->front_flush_active || p_atomic_read(&ctx->screen->uncertain) ||
+       _mesa_inside_begin_end(ctx->st->ctx)) return 0;
+   ctx->front_flush_pending = false;
+   ctx->front_flush_active = true;
+   return 1;
+}
+
+NVK_EXPORT void nvk_zink_end_front_flush(struct nvk_zink_context *ctx, int presented)
+{
+   if (!ctx || !ctx->front_flush_active) return;
+   ctx->front_flush_active = false;
+   /* A failed handoff must remain retryable even though Mesa has already
+    * cleared the front renderbuffer's defined flag. */
+   if (!presented) ctx->front_flush_pending = true;
 }
 
 static int get_param(struct pipe_frontend_screen *fscreen,
@@ -184,7 +211,14 @@ nvk_zink_create_drawable_profile(unsigned width, unsigned height, struct nvk_zin
    ctx->st = st_api_create_context(&ctx->screen->fscreen, &attrs, &error, share ? share->st : NULL);
    pthread_mutex_unlock(&screen_lock);
    if (!ctx->st) { nvk_zink_destroy(ctx); return NULL; }
+   ctx->st->frontend_context = ctx;
    return ctx;
+}
+
+NVK_EXPORT struct nvk_zink_context *nvk_zink_get_current(void)
+{
+   struct st_context *st = st_api_get_current();
+   return st ? st->frontend_context : NULL;
 }
 
 NVK_EXPORT int nvk_zink_make_current(struct nvk_zink_context *ctx)
@@ -235,7 +269,7 @@ NVK_EXPORT int nvk_zink_swap(struct nvk_zink_context *ctx)
 {
    if (!ctx || st_api_get_current() != ctx->st) return 0;
    submit(ctx);
-   if (ctx->double_buffer) {
+   if (ctx->double_buffer && !ctx->front_flush_active) {
       struct pipe_resource *front = ctx->attachments[ST_ATTACHMENT_FRONT_LEFT];
       ctx->attachments[ST_ATTACHMENT_FRONT_LEFT] = ctx->attachments[ST_ATTACHMENT_BACK_LEFT];
       ctx->attachments[ST_ATTACHMENT_BACK_LEFT] = front;
@@ -245,6 +279,7 @@ NVK_EXPORT int nvk_zink_swap(struct nvk_zink_context *ctx)
        * could otherwise write the old front image rather than the new back. */
       st_context_invalidate_state(ctx->st, ST_INVALIDATE_FB_STATE);
    }
+   ctx->front_flush_pending = false;
    return 1;
 }
 
@@ -336,14 +371,15 @@ static int blit_default(struct nvk_zink_context *ctx, struct pipe_resource *imag
    get(GL_READ_FRAMEBUFFER_BINDING, &saved_fb);
    bindfb(GL_READ_FRAMEBUFFER, 0);
    get(GL_READ_BUFFER, &saved_read);
-   readbuf(ctx->double_buffer ? GL_BACK : GL_FRONT);
+   bool back = ctx->double_buffer && !ctx->front_flush_active;
+   readbuf(back ? GL_BACK : GL_FRONT);
    _mesa_update_state(ctx->st->ctx);
    ST_PIPELINE_UPDATE_FB_STATE_MASK(mask);
    st_validate_state(ctx->st, mask);
    st_flush_bitmap_cache(ctx->st);
    readbuf(saved_read);
    bindfb(GL_READ_FRAMEBUFFER, saved_fb);
-   struct pipe_resource *src = ctx->attachments[ctx->double_buffer ?
+   struct pipe_resource *src = ctx->attachments[back ?
       ST_ATTACHMENT_BACK_LEFT : ST_ATTACHMENT_FRONT_LEFT];
    if (!src) return 0;
    struct pipe_context *pipe = ctx->st->pipe;
@@ -500,7 +536,7 @@ static int readback(struct nvk_zink_context *ctx, void *pixels,
    for (unsigned i = 0; i < 6; ++i) get(pack_names[i], &saved_pack[i]);
    bindfb(GL_READ_FRAMEBUFFER, 0);
    get(GL_READ_BUFFER, &saved_read);
-   readbuf(ctx->double_buffer ? GL_BACK : GL_FRONT);
+   readbuf(ctx->double_buffer && !ctx->front_flush_active ? GL_BACK : GL_FRONT);
    bindbuf(GL_PIXEL_PACK_BUFFER, 0);
    for (unsigned i = 0; i < 6; ++i) store(pack_names[i], i ? 0 : 1);
    if (!top_first) store(GL_PACK_ROW_LENGTH, stride / 4);

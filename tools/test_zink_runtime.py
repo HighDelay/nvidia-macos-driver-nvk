@@ -14,6 +14,8 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument('--runtime',type=Path,required=True)
     ap.add_argument('--output',type=Path,required=True)
+    ap.add_argument('--front-buffer',action='store_true',
+                    help='Also capture the probe windows; requires existing screen-recording permission')
     args = ap.parse_args()
     runtime = args.runtime.resolve(strict=True); out = args.output.resolve()
     out.mkdir(parents=True,exist_ok=False)
@@ -59,6 +61,13 @@ def main():
         ('native-optout-zero','zink_native_present_probe',['automatic','default'],True,None),
         ('native-updated-os-build','zink_native_present_probe',['automatic','default'],True,None),
     ]
+    if args.front_buffer:
+        for mode in (None, 'gpu'):
+            for operation in ('flush','finish','flush-apple','finish-apple','double','worker',
+                              'noncurrent','other','apple-other','late-view'):
+                cases.append(('front-'+(mode or 'auto')+'-'+operation,
+                              'cgl_zink_front_probe',[operation],True,mode))
+        cases.append(('front-auto-early-swap','cgl_zink_front_probe',['early-swap'],True,None))
     results = []
     for name,binary,options,automatic,mode in cases:
         env = dict(os.environ,NVKZINK_REQUIRE_GPU='1')
@@ -90,6 +99,7 @@ def main():
         icd = '/nonexistent/zink-test-icd.json' if mode=='invalid-icd' else str(runtime/'nvk_icd.json')
         argv = [str(runtime/binary),str(library),icd]+options
         if binary == 'zink_sync_probe': argv = [str(runtime/binary)]
+        if binary == 'cgl_zink_front_probe': argv = [str(runtime/binary)]+options
         started = time.monotonic()
         with (out/(name+'.log')).open('w') as log:
             process = subprocess.Popen(argv,env=env,stdout=log,stderr=subprocess.STDOUT)

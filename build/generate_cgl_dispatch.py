@@ -134,6 +134,8 @@ def main():
                          f'  if (!nvk_func) {{ missing_entrypoint("{name}");' +
                          (' return; }' if ret == 'void' else ' return 0; }')]
             wrappers += [f'  {"" if ret == "void" else "return "}nvk_func({", ".join(names)});']
+            if set(aliases) & {'glFlush', 'glFinish', 'glFlushRenderAPPLE', 'glFinishRenderAPPLE'}:
+                wrappers += ['  flush_front_buffer(nvk_bridge);']
         wrappers += ['}']
         rows.append(f'  {{"{name}", {slot}, (void *)nvk_{name}}},')
     wrappers += ['static const struct dispatch_entry entries[] = {', *rows, '};']

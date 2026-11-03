@@ -147,9 +147,10 @@ int nvk_native_acquire(CGLContextObj context, uint32_t vendor, uint32_t deviceID
                nvk_native_bind_view(context, (__bridge void *)current.view);
             @synchronized(table) { target = table[[NSValue valueWithPointer:context]]; }
          }
-         if (!target) return 0;
+         if (!target) return NVK_NATIVE_NO_VIEW;
          BOOL setup = NO;
          @synchronized(target) {
+            if (!target.view) return NVK_NATIVE_NO_VIEW;
             if (!target.pending && (!target.layer || target.deviceID != deviceID ||
                                     target.width != width || target.height != height ||
                                     target.opaque != (opaque != 0) || target.displaySync != displaySync)) {

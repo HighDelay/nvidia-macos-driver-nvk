@@ -23,6 +23,56 @@ uses the actual old snapshot as its explicit three-way base and records the
 new upstream head as a parent; do not replay already integrated changes from
 the rewritten history. The preceding 2.6.4 base was `f95f4d2`.
 
+## Zink window presentation and late view attachment, 2026-11-04
+
+Honor `CGLFlushDrawable`/Cocoa `flushBuffer` when the target context is not
+current. The CGL swap dispatch argument identifies that target; it must not be
+looked up as though it were the calling thread's current context. Lock and
+temporarily bind it for presentation, then restore both the CGL and Mesa
+bindings, including an unbound thread or another Apple/Zink context. Preserve
+the current-context fast path used by ordinary game swaps. Do not call CGL
+reference/locking APIs while holding `bridges_lock`, and retain the carrier
+during the slow swap path. The frontend's current-context accessor uses Mesa's
+frontend userdata, initialized when creating each context.
+
+Treat a missing native view as transient. If CGL reports no drawable yet,
+defer the swap before allocating/blitting an Apple fallback. With a valid CGL
+drawable, retain GPU fallback but retry native presentation after AppKit binds
+a view. Preserve explicit `gpu` mode and real unsupported-device/quarantine
+refusals. Do not use surface-backing override dimensions as a drawable test;
+use the public `kCGLCPHasDrawable` query.
+
+Honor Mesa's dirty-front notification after `glFlush`, `glFinish` and Apple's
+render-flush aliases return. Do not present reentrantly from Mesa's callback.
+Use the existing native/IOSurface GPU-copy path and select FRONT during this
+handoff, without rotating double-buffered attachments. Ordinary back-buffer
+and offscreen flushes must not publish. Keep failed or deferred handoffs pending
+so a later flush can retry without another draw; refuse reentry, Begin/End and
+quarantined contexts. Preserve normal swaps, GL state and completion lifetimes.
+
+AnyDesk 9.8.1's remote viewer is white with Zink and renders with Apple GL on
+the RTX 2060 SUPER / Tahoe 26.7.1 host. Its GL trace shows successful texture
+uploads/draws followed by `clearCurrentContext` and a non-current window flush;
+the preceding swap hook drops that frame. An independent window reproduces
+that failure, plus a separate missing single-buffer publication. The preceding
+libraries fail both compositor pixel checks. Twenty-one native/IOSurface cases
+cover three successive frames, both Apple aliases, front/back isolation,
+offscreen rendering, invalid Begin/End flushes, worker setup/retry and
+non-current swaps with binding/state preservation. Non-current cases exercise
+CGL, Cocoa and the public bridge API, checking Mesa restoration before a GL
+adapter could restore it lazily. Late-view cases verify the initial GPU fallback
+and subsequent native copies, preserve forced GPU mode, and flush a context
+before it has any drawable. Pre-repair libraries fail these lifecycle checks.
+The retained suite passes except three large-resize variants: all three also
+fail on the installed preceding runtime with identical pixel mismatches at
+1920x960. Retain that unresolved baseline result rather than claiming a clean
+large-window qualification. After installing the clean matched libraries,
+the user confirms that AnyDesk's remote picture renders and keeps updating
+on a normal launch. Both `NVKZINK_DISABLE` and `NVKZINK_PRESENT` are unset;
+the viewer reports Mesa's compatibility renderer and loads the repaired Zink
+libraries. Temporary tracing is absent from the installed candidate. Sequoia
+and other GPUs are not retested here; no release is prepared for this trial.
+
 ## Parallels custom-drawable presentation, 2026-11-02
 
 Before recording presentation, supply an empty `addPresentScheduledHandler:`

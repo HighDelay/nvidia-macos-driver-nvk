@@ -20,7 +20,7 @@ ROOT = Path(__file__).resolve().parents[1]
 BASE_RUNTIME = Path('Library/GPUBundles/nvmtl')
 RUNTIME = BASE_RUNTIME / 'zink'
 ZINK_FILES = ('libnvk_zink_vulkan.dylib', 'libnvk_renderer.dylib', 'NATIVE-BUILD.json', 'libnvk_zink.dylib', 'libnvk_cgl.dylib', 'nvk_zink.h', 'nvk_cgl.h',
-              'zink_probe', 'zink_sync_probe', 'zink_native_present_probe', 'cgl_renderer_probe', 'cgl_zink_probe', 'cgl_zink_legacy_probe', 'cgl_iosurface_probe', 'obs_zink_policy_probe', 'cgl_zink_window_probe', 'cgl-os-build.txt', 'cgl-dispatch-map.json', 'ZINK-BUILD.json')
+              'zink_probe', 'zink_sync_probe', 'zink_native_present_probe', 'cgl_renderer_probe', 'cgl_zink_probe', 'cgl_zink_legacy_probe', 'cgl_iosurface_probe', 'obs_zink_policy_probe', 'cgl_zink_window_probe', 'cgl_zink_front_probe', 'cgl-os-build.txt', 'cgl-dispatch-map.json', 'ZINK-BUILD.json')
 
 
 def run(*args):

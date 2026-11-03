@@ -40,6 +40,22 @@ currently add multi-refresh pacing. With VSync off, render throughput can exceed
 the monitor's refresh rate; GPU copy completion is still required before a frame
 is published. The display's physical refresh rate does not change.
 
+Window swaps also accept a non-current context, as Apple's `CGLFlushDrawable`
+and Cocoa `flushBuffer` do. The bridge locks and temporarily binds that context,
+presents its GPU-rendered image, and restores the caller's CGL and Mesa bindings.
+This covers clients such as AnyDesk that clear the context before flushing.
+Ordinary swaps with the context already current keep their existing fast path.
+Swaps before any drawable is attached are deferred. Automatic mode can switch
+from its GPU fallback to native presentation when AppKit later attaches a view;
+an explicit `gpu` selection remains in effect. AnyDesk 9.8.1 remote viewing is
+user-confirmed with the default mode on RTX 2060 SUPER / Tahoe 26.7.1.
+
+Single-buffered windows publish dirty front-buffer rendering after `glFlush`
+or `glFinish`, including Apple's render-flush aliases. This uses the same
+GPU-copy path without requiring a buffer swap. Explicit front-buffer draws in
+double-buffered contexts also publish without rotating their back buffer;
+ordinary back-buffer and offscreen flushes do not present a frame.
+
 The private frontend and renderer live under
 `/Library/GPUBundles/nvmtl/zink`. They do not change `VK_DRIVER_FILES`, the default
 ICD, Minecraft's runtime, Wine's provider or their paired DXVK/vkd3d DLLs.
@@ -240,6 +256,13 @@ Its 12,909 file contents match the same pinned Git tree after normalizing those
 checks extracted files against it. Source/build hashes,
 Mesa identity and the private renderer pairing are recorded in `ZINK-BUILD.json`
 and `NATIVE-BUILD.json`; packaging rejects stale or mismatched components.
+
+Add `--front-buffer` to test composited single-buffer windows, render-flush
+aliases, explicit front-buffer drawing, back-buffer isolation, non-current
+CGL/Cocoa swaps and binding/state preservation in both native and IOSurface
+presentation modes. This captures
+only the probe's windows and requires screen-recording permission already
+granted to the test process; the probe exits 77 if permission is unavailable.
 
 The test script briefly opens diagnostic windows. It tests explicit CGL
 attachment and the GLD lifecycle through a **process-local lookup shim**.

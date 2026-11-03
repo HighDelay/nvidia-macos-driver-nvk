@@ -27,7 +27,14 @@ struct nvk_zink_context *nvk_zink_create_drawable_profile(unsigned width, unsign
                                                           int double_buffer, int legacy,
                                                           int has_alpha);
 int nvk_zink_swap(struct nvk_zink_context *ctx);
+/* Consume Mesa's dirty-front notification after glFlush/glFinish return.
+ * While active, presentation copies FRONT without rotating double buffers.
+ * End with presented=0 to retry a failed native handoff on the next flush.
+ * These calls require ctx current and must be paired when begin returns 1. */
+int nvk_zink_begin_front_flush(struct nvk_zink_context *ctx);
+void nvk_zink_end_front_flush(struct nvk_zink_context *ctx, int presented);
 int nvk_zink_make_current(struct nvk_zink_context *ctx);
+struct nvk_zink_context *nvk_zink_get_current(void);
 void nvk_zink_destroy(struct nvk_zink_context *ctx);
 int nvk_zink_resize(struct nvk_zink_context *ctx, unsigned width, unsigned height);
 nvk_zink_proc nvk_zink_get_proc_address(const char *name);

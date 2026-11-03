@@ -21,6 +21,9 @@ int nvk_cgl_resize(CGLContextObj context, unsigned width, unsigned height);
  * drawable retain GPU IOSurface/Apple presentation. =native requires the
  * direct path, =gpu selects Apple presentation, =cpu is explicit readback.
  * GPU failures never silently select CPU transfer or reuse uncertain work. */
+/* Like CGLFlushDrawable, presentation may target a non-current context.
+ * It is locked and bound temporarily; the caller's CGL/Mesa bindings return
+ * unchanged. The application must still serialize use of each context. */
 int nvk_cgl_present(CGLContextObj context);
 const char *nvk_cgl_last_error(void);
 #ifdef __cplusplus

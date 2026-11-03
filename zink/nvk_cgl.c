@@ -67,6 +67,7 @@ static _Thread_local const char *last_error;
 static int materialize(struct nvk_cgl_bridge *b);
 static void release_gpu_present(struct nvk_cgl_bridge *b);
 static void drain_native_cleanups(struct nvk_cgl_bridge *b);
+static int present_drawable(CGLContextObj context);
 void nvk_cgl_install_lwjgl_appkit(void);
 int nvk_cgl_obs_compatibility_enabled(void);
 
@@ -226,6 +227,13 @@ static void missing_entrypoint(const char *name)
    enable(0);
 }
 
+static void flush_front_buffer(struct nvk_cgl_bridge *b)
+{
+   if (!nvk_zink_begin_front_flush(b->zink)) return;
+   int presented = present_drawable(b->context) == 1;
+   nvk_zink_end_front_flush(b->zink, presented);
+}
+
 #include "cgl_dispatch.inc"
 _Static_assert(sizeof(entries) / sizeof(entries[0]) <= MAX_ENTRIES, "adapter inventory too large");
 
@@ -262,8 +270,26 @@ static void use_original(struct nvk_cgl_bridge *b)
 /* CGLFlushDrawable calls a distinct dispatch slot, not public glFlush. */
 static void swap_drawable(void *engine)
 {
-   struct nvk_cgl_bridge *b = bridge_current(engine);
-   if (b) nvk_cgl_present(b->context);
+   CGLContextObj current = CGLGetCurrentContext();
+   if (current && *(void **)current == engine) {
+      /* Keep ordinary game swaps on the cached current-context path. */
+      struct nvk_cgl_bridge *b = bridge_current(engine);
+      if (b) nvk_cgl_present(b->context);
+      return;
+   }
+   /* CGLFlushDrawable accepts a context that is not current. For example,
+    * AnyDesk releases its render context before flushing the Cocoa window. */
+   pthread_mutex_lock(&bridges_lock);
+   struct nvk_cgl_bridge *b = bridges;
+   while (b && b->engine != engine) b = b->next;
+   CGLContextObj context = b ? b->context : NULL;
+   pthread_mutex_unlock(&bridges_lock);
+   if (!context) { fail("Swap requires an attached Zink context"); return; }
+   /* The surrounding CGL flush owns/locks this carrier. Do not acquire a
+    * CGL reference while holding bridges_lock (attachment locks CGL first). */
+   CGLRetainContext(context);
+   nvk_cgl_present(context);
+   CGLReleaseContext(context);
 }
 
 static void use_zink(struct nvk_cgl_bridge *b)
@@ -675,7 +701,8 @@ static int gpu_present(struct nvk_cgl_bridge *b)
    return nvk_zink_swap(b->zink);
 }
 
-EXPORT int nvk_cgl_present(CGLContextObj context)
+/* 2 is a deferred native acquire, rather than a completed publication. */
+static int present_drawable(CGLContextObj context)
 {
    last_error = NULL;
    if (!context || context != CGLGetCurrentContext()) return fail("Present requires the context current");
@@ -697,13 +724,23 @@ EXPORT int nvk_cgl_present(CGLContextObj context)
       if (!nvk_zink_device_info(b->zink, &vendor, &device)) return fail("Native presentation requires an NVK device");
       void *frame = NULL; IOSurfaceRef surface = NULL;
       int acquired = nvk_native_acquire(context, vendor, device, b->width, b->height, opaque_drawable(context), &frame, &surface);
-      if (acquired == 2) return 1; /* Main-thread setup/resize or minimized window. */
-      if (!acquired) {
+      if (acquired == 2) return 2; /* Main-thread setup/resize or minimized window. */
+      if (acquired != 1) {
+         if (acquired == NVK_NATIVE_NO_VIEW) {
+            GLint has_drawable = 0;
+            if (CGLGetParameter(context, kCGLCPHasDrawable, &has_drawable) == kCGLNoError &&
+                !has_drawable)
+               return 2; /* No output yet: do not blit into an unattached Apple FBO. */
+         }
          if (b->native_required) return fail("Native presentation needs an AppKit view and matching NVIDIA drawable");
          /* CGL clients without an NSView retain the GPU IOSurface path.
           * Never fall back after an uncertain submission or to CPU pixels. */
-         nvk_native_remove(context);
-         b->native_present = false;
+         if (acquired != NVK_NATIVE_NO_VIEW) {
+            nvk_native_remove(context);
+            b->native_present = false;
+         }
+         /* Early Cocoa swaps may precede setView/update. Keep auto eligible
+          * for native presentation once that view is attached. */
       } else {
       int copied = nvk_zink_present_native(b->zink, surface, opaque_drawable(context));
       if (copied < 0) {
@@ -765,6 +802,35 @@ EXPORT int nvk_cgl_present(CGLContextObj context)
    use_zink(b);
    if (error != GL_NO_ERROR || swap_error != kCGLNoError) return fail("Apple drawable upload or swap failed");
    return nvk_zink_swap(b->zink);
+}
+
+EXPORT int nvk_cgl_present(CGLContextObj context)
+{
+   if (!context) return fail("Present requires an attached Zink context");
+   CGLContextObj previous = CGLGetCurrentContext();
+   if (context == previous) return present_drawable(context) != 0;
+   if (CGLLockContext(context)) return fail("Cannot lock presentation context");
+   pthread_mutex_lock(&bridges_lock);
+   bool attached = find_bridge(context) != NULL;
+   pthread_mutex_unlock(&bridges_lock);
+   if (!attached) { CGLUnlockContext(context); return fail("Present requires an attached Zink context"); }
+   struct nvk_zink_context *previous_zink = nvk_zink_get_current();
+   if (previous) CGLRetainContext(previous);
+   if (CGLSetCurrentContext(context)) {
+      if (previous) CGLReleaseContext(previous);
+      CGLUnlockContext(context);
+      return fail("Cannot bind presentation context");
+   }
+   int presented = present_drawable(context) != 0;
+   const char *presentation_error = last_error;
+   CGLError restored = CGLSetCurrentContext(previous);
+   int mesa_restored = nvk_zink_make_current(previous_zink);
+   if (!mesa_restored) nvk_zink_make_current(NULL);
+   if (previous) CGLReleaseContext(previous);
+   CGLUnlockContext(context);
+   if (restored || !mesa_restored) return fail("Cannot restore context after presentation");
+   last_error = presentation_error;
+   return presented;
 }
 
 EXPORT int nvk_cgl_detach(CGLContextObj context)
