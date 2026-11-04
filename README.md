@@ -99,6 +99,12 @@ Requires **Minecraft 26.3**, **Java 25**, and **Fabric 0.19.5+** or
 The mod finds the installed runtime automatically; no JVM argument is required.
 [Full setup and custom runtime options](nvk/native-macos/INSTALL.md).
 
+## Other Vulkan applications
+
+MPV and applications with custom Vulkan-provider selection can use the same bridge.
+See the [MPV and custom-library guide](nvk/native-macos/APPLICATIONS.md), including
+the required loader-compatible runtime update after `v2.7.1-nvk`.
+
 ## Wine / CrossOver native Vulkan
 
 The driver bundles native NVK, **DXVK for D3D11**, **vkd3d-proton for D3D12**,

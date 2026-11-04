@@ -211,7 +211,7 @@ class StagePackage(unittest.TestCase):
         self.assertFalse(self.output.exists())
         self.assert_unchanged()
 
-    def minecraft_runtime(self, entry=b"native entry", renderer=b"private renderer"):
+    def minecraft_runtime(self, entry=b"native entry", renderer=b"private renderer", with_icd=True):
         runtime = self.build / "Minecraft runtime"
         self.put(runtime / "lib/libnvk_minecraft.dylib", entry)
         self.put(runtime / "lib/libnvk_renderer.dylib", renderer)
@@ -220,6 +220,11 @@ class StagePackage(unittest.TestCase):
                   "library.path": "lib/libnvk_minecraft.dylib", "library.sha256": hashlib.sha256(entry).hexdigest()}
         self.put(runtime / "nvk-bridge-runtime.properties", "".join(k + "=" + v + "\n" for k, v in fields.items()).encode())
         self.put(runtime / "BUILD.json", b"local build paths must not be packaged")
+        if with_icd:
+            self.put(runtime / "nvk_bridge_icd.json", json.dumps({
+                "file_format_version": "1.0.0",
+                "ICD": {"library_path": "./lib/libnvk_minecraft.dylib", "api_version": "1.4.363"},
+            }).encode())
         self.args.minecraft_runtime = runtime
         self.original_build = self.snapshot(self.build)
         return runtime
@@ -229,10 +234,55 @@ class StagePackage(unittest.TestCase):
         self.stage()
         runtime = self.output / STAGE.MINECRAFT
         self.assertEqual({p.relative_to(runtime).as_posix() for p in runtime.rglob("*") if p.is_file()},
-                         {"lib/libnvk_minecraft.dylib", "lib/libnvk_renderer.dylib", "nvk-bridge-runtime.properties"})
+                         {"lib/libnvk_minecraft.dylib", "lib/libnvk_renderer.dylib",
+                          "nvk-bridge-runtime.properties", "nvk_bridge_icd.json"})
         self.assertEqual((self.output / STAGE.RUNTIME / "libvulkan_nouveau.dylib").read_bytes(), b"old NVK")
         self.assertIn("/Library/GPUBundles/nvmtl/minecraft", (self.output / "MINECRAFT-NVK.md").read_text())
+        self.assertEqual((self.output / "NVK-APPLICATIONS.md").read_bytes(),
+                         (ROOT / "nvk/native-macos/APPLICATIONS.md").read_bytes())
         self.assert_manifest(self.output)
+        self.assert_unchanged()
+
+    def test_legacy_minecraft_runtime_remains_stageable_without_loader_icd(self):
+        self.minecraft_runtime(with_icd=False)
+        self.stage()
+        self.assertFalse((self.output / STAGE.MINECRAFT / "nvk_bridge_icd.json").exists())
+        self.assert_manifest(self.output)
+        self.assert_unchanged()
+
+    def test_native_bridge_icd_cannot_select_another_library_or_api_version(self):
+        runtime = self.minecraft_runtime()
+        for library, version in (("./lib/libnvk_renderer.dylib", "1.4.363"),
+                                 ("../outside.dylib", "1.4.363"),
+                                 ("/Library/GPUBundles/nvmtl/libvulkan_nouveau.dylib", "1.4.363"),
+                                 ("./lib/libnvk_minecraft.dylib", "9.0.0")):
+            with self.subTest(library=library, version=version):
+                (runtime / "nvk_bridge_icd.json").write_text(json.dumps({
+                    "file_format_version": "1.0.0", "ICD": {"library_path": library, "api_version": version},
+                }))
+                self.original_build = self.snapshot(self.build)
+                with self.assertRaisesRegex(ValueError, "native bridge ICD must select"):
+                    self.stage()
+                self.assertFalse(self.output.exists())
+                self.assert_unchanged()
+
+    def test_malformed_native_bridge_icd_is_rejected_before_copying(self):
+        runtime = self.minecraft_runtime()
+        (runtime / "nvk_bridge_icd.json").write_text("{broken")
+        self.original_build = self.snapshot(self.build)
+        with self.assertRaisesRegex(ValueError, "invalid native bridge ICD JSON"):
+            self.stage()
+        self.assertFalse(self.output.exists())
+        self.assert_unchanged()
+
+    def test_native_bridge_icd_symlink_is_not_packaged(self):
+        runtime = self.minecraft_runtime()
+        (runtime / "nvk_bridge_icd.json").rename(runtime / "icd-alias.json")
+        (runtime / "nvk_bridge_icd.json").symlink_to("icd-alias.json")
+        self.original_build = self.snapshot(self.build)
+        with self.assertRaisesRegex(ValueError, "missing regular file"):
+            self.stage()
+        self.assertFalse(self.output.exists())
         self.assert_unchanged()
 
     def test_minecraft_entry_hash_mismatch_is_rejected_before_copying(self):

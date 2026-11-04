@@ -228,7 +228,25 @@ def validate_minecraft_runtime(root, checker):
         run("lipo", binary, "-verify_arch", "x86_64")
         run("codesign", "--verify", "--strict", binary)
         run(checker, SEQUOIA_RUNTIME_MINIMUM, binary)
-    return (manifest, entry, renderer)
+    files = (manifest, entry, renderer)
+    icd = root / "nvk_bridge_icd.json"
+    # Older verified Minecraft runtimes predate loader support. Preserve their
+    # layout; newer runtimes must keep the frontend ICD through staging.
+    if icd.exists() or icd.is_symlink():
+        regular(icd)
+        try:
+            data = json.loads(icd.read_text(encoding="utf-8"))
+        except json.JSONDecodeError as error:
+            raise ValueError("invalid native bridge ICD JSON") from error
+        require(isinstance(data, dict) and data.get("file_format_version") == "1.0.0",
+                "incompatible native bridge ICD format")
+        driver = data.get("ICD")
+        require(isinstance(driver, dict)
+                and driver.get("library_path") == "./lib/libnvk_minecraft.dylib"
+                and driver.get("api_version") == "1.4.363",
+                "native bridge ICD must select the matching presentation frontend")
+        files += (icd,)
+    return files
 
 
 def validate_wine_runtime(root, checker):
@@ -397,6 +415,7 @@ def stage(args):
             for source in minecraft_files:
                 replace_file(source, destination / source.relative_to(minecraft))
             replace_file(REPO / "nvk/native-macos/INSTALL.md", work / "MINECRAFT-NVK.md")
+            replace_file(REPO / "nvk/native-macos/APPLICATIONS.md", work / "NVK-APPLICATIONS.md")
             validate_minecraft_runtime(destination, base / "nullmoth-runtime-check")
         if wine:
             destination = work / WINE

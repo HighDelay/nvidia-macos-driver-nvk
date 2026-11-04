@@ -22,6 +22,19 @@ is `470e391` (2.6.6), so this update uses an ordinary three-way merge. Earlier
 upstream history was rewritten: old 2.6.5 `ceba63c` maps to `c6f5aa0`; do not
 replay already integrated history. The preceding 2.6.4 base was `f95f4d2`.
 
+## Native Vulkan loader support, 2026-11-05
+
+Keep the three `vk_icd*` entry points, loader-interface negotiation at versions
+3–5, and the frontend-owned Metal surface/swapchain path. The generated
+`nvk_bridge_icd.json` selects the presentation frontend, not the raw NVK renderer.
+Preserve it when staging runtimes and keep application selection per process.
+Legacy verified Minecraft runtimes without that manifest remain stageable.
+
+The shared bridge source also feeds Wine and Zink: verify their source identities
+before reusing binaries in a future build. This integration is source-only;
+no binaries, installed runtime or release assets were rebuilt or replaced.
+See [application setup](../nvk/native-macos/APPLICATIONS.md).
+
 ## Upstream 2.7.1 integration, 2026-11-04
 
 Resolve eight textual conflicts: both required local frameworks plus MetalFX,

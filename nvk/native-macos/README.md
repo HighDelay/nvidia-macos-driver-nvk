@@ -16,6 +16,13 @@ The output includes two signed dylibs under `lib/`, the NVK Bridge manifest, sou
 
 This reuses the renderer binary rather than rebuilding Mesa. Its IOSurface import protocol and surface-dirty entry points must match the installed driver. Other applications keep using their existing libraries.
 
+## Other applications
+
+The frontend also exports the Vulkan loader/ICD interface and the builder emits
+`nvk_bridge_icd.json`, selecting `lib/libnvk_minecraft.dylib` for presentation.
+See [MPV and custom Vulkan-library setup](APPLICATIONS.md). This support requires
+a runtime built with these changes; the `v2.7.1-nvk` binaries are unchanged.
+
 ## Include in a driver package
 
 The frontend targets macOS 15.0; the bundled upstream NVK renderer targets 15.5, making the package minimum **Sequoia 15.5**. Tahoe 26 is also supported. Build both accelerator variants with `build/accel_build_all.sh`, then pass `--accel-15`, `--accel-26` and `--minecraft-runtime` to `build/stage_package.py` along with the matching plugin, translator and framebuffer. The helper checks both runtime libraries against macOS 15.5, verifies the entry hash and signatures, and regenerates the replaced accelerators' nested checksums and the root manifest.

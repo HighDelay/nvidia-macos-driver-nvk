@@ -53,6 +53,14 @@ manifest = {
 }
 (out / 'nvk-bridge-runtime.properties').write_text(
     '\n'.join(k + '=' + v for k, v in manifest.items()) + '\n')
+# The same frontend is a complete ICD: it owns Metal surfaces and swapchains,
+# which the raw renderer does not. Standard Vulkan apps (mpv, vkconfig) can use
+# this manifest instead of the surface-less nvk_icd.json.
+icd = {
+    'file_format_version': '1.0.0',
+    'ICD': {'library_path': './lib/libnvk_minecraft.dylib', 'api_version': '1.4.363'},
+}
+(out / 'nvk_bridge_icd.json').write_text(json.dumps(icd, indent=2) + '\n')
 source_names = ['nvk/native-macos/bridge.mm', 'nvk/native-macos/present_hud.h', 'nvk/native-macos/build.py']
 record = {
     'source_commit': subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=repo, text=True).strip(),
@@ -61,7 +69,8 @@ record = {
     'presentation': 'gpu-copy',
     'renderer_source': str(args.renderer),
     'renderer_original_sha256': hashlib.sha256(args.renderer.read_bytes()).hexdigest(),
-    'files': {str(p.relative_to(out)): hashlib.sha256(p.read_bytes()).hexdigest() for p in lib.glob('*.dylib')},
+    'files': {str(p.relative_to(out)): hashlib.sha256(p.read_bytes()).hexdigest()
+              for p in (*lib.glob('*.dylib'), out / 'nvk_bridge_icd.json')},
     'source_files': {name: hashlib.sha256((repo / name).read_bytes()).hexdigest() for name in source_names},
 }
 (out / 'BUILD.json').write_text(json.dumps(record, indent=2) + '\n')

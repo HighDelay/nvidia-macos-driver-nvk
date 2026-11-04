@@ -875,3 +875,25 @@ extern "C" void nvkbridgeGetStats(uint64_t out[7]) {
    out[0]=copies;out[1]=copy_bytes;out[2]=drawable_ns;out[3]=producer_ns;out[4]=import_failures;out[5]=0;out[6]=0;
 }
 extern "C" void nvkbridgeSetPresentObserver(PresentObserver observer) { present_observer=observer; }
+// Loader/ICD interface. The frontend already owns portable surfaces and
+// swapchains, so it must negotiate at least version 3: older interface versions
+// make the loader keep its own opaque surface wrapper and pass that to the ICD.
+extern "C" VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL vk_icdGetInstanceProcAddr(
+   VkInstance instance,const char *name) {
+   return vkGetInstanceProcAddr(instance,name);
+}
+extern "C" VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL vk_icdGetPhysicalDeviceProcAddr(
+   VkInstance instance,const char *name) {
+   if (!instance || !name) return nullptr;
+   if (strncmp(name,"vkGetPhysicalDevice",19) &&
+       strcmp(name,"vkEnumerateDeviceExtensionProperties") &&
+       strcmp(name,"vkEnumerateDeviceLayerProperties")) return nullptr;
+   return vkGetInstanceProcAddr(instance,name);
+}
+extern "C" VKAPI_ATTR VkResult VKAPI_CALL vk_icdNegotiateLoaderICDInterfaceVersion(
+   uint32_t *version) {
+   if (!version) return VK_ERROR_INITIALIZATION_FAILED;
+   if (*version > 5) *version=5;
+   if (*version < 3) return VK_ERROR_INCOMPATIBLE_DRIVER;
+   return VK_SUCCESS;
+}

@@ -106,6 +106,26 @@ class PackageZinkTests(unittest.TestCase):
         pkg.base_tools.write_manifest(self.base)
         return target
 
+    def test_unbundled_application_guide_keeps_its_source_link(self):
+        self.stage()
+        self.assertFalse((self.out/'Guides/Vulkan-Applications.md').exists())
+        readme=(self.out/'READ-ME.md').read_text()
+        self.assertIn('blob/main/nvk/native-macos/APPLICATIONS.md',readme)
+        self.assertNotIn('](Guides/Vulkan-Applications.md)',readme)
+        self.unchanged()
+
+    def test_application_guide_is_grouped_under_guides(self):
+        guide=(ROOT/'nvk/native-macos/APPLICATIONS.md').read_bytes()
+        self.put(self.base/'NVK-APPLICATIONS.md',guide)
+        pkg.base_tools.write_manifest(self.base)
+        self.original=self.snapshot(self.base)
+        self.stage()
+        self.assertFalse((self.out/'NVK-APPLICATIONS.md').exists())
+        self.assertTrue((self.out/'Guides/Vulkan-Applications.md').is_file())
+        self.assertIn('](Guides/Vulkan-Applications.md)',(self.out/'READ-ME.md').read_text())
+        self.assertIn('nvk_bridge_icd.json',(self.out/'Guides/Vulkan-Applications.md').read_text())
+        self.unchanged()
+
     def test_audio_is_relocated_without_changing_binary_or_signature(self):
         audio=self.add_audio();before=self.snapshot(audio)
         self.stage()

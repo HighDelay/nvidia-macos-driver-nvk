@@ -1,5 +1,7 @@
 # Minecraft native NVK runtime
 
+For MPV and other Vulkan applications, see the [custom-library guide](APPLICATIONS.md).
+
 This package carries separate NVAccel builds for macOS Sequoia 15 and Tahoe 26. The bundled upstream NVK renderer requires **Sequoia 15.5 or newer**, or Tahoe 26. The installer selects the matching accelerator automatically. The native Minecraft runtime is installed with the existing userland runtime at:
 
 ```text

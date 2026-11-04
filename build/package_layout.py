@@ -13,12 +13,14 @@ GITHUB_FILES = 'https://github.com/HighDelay/nvidia-macos-driver-nvk/blob/main/'
 ZINK = Path('Library/GPUBundles/nvmtl/zink')
 GUIDES = {
     Path('MINECRAFT-NVK.md'): 'Minecraft.md',
+    Path('NVK-APPLICATIONS.md'): 'Vulkan-Applications.md',
     Path('WINE-NVK.md'): 'Wine-CrossOver.md',
     Path('VIDEO-CODECS.md'): 'Video-codecs.md',
     ZINK / 'ZINK-OPENGL.md': 'Zink-OpenGL.md',
 }
 GUIDE_SOURCES = {
     Path('MINECRAFT-NVK.md'): Path('nvk/native-macos/INSTALL.md'),
+    Path('NVK-APPLICATIONS.md'): Path('nvk/native-macos/APPLICATIONS.md'),
     Path('WINE-NVK.md'): Path('nvk/wine-macos/INSTALL.md'),
     Path('VIDEO-CODECS.md'): Path('video/INSTALL.md'),
     ZINK / 'ZINK-OPENGL.md': Path('docs/ZINK-OPENGL.md'),
@@ -117,7 +119,8 @@ def organize(payload, records, identity=None):
     current.chmod(0o644)
     readme = (ROOT / 'docs/COMBINED-INSTALL.md').read_text()
     for relative, name in GUIDES.items():
-        readme = readme.replace(GITHUB_FILES + GUIDE_SOURCES[relative].as_posix(), 'Guides/' + name)
+        if (payload / 'Guides' / name).is_file():
+            readme = readme.replace(GITHUB_FILES + GUIDE_SOURCES[relative].as_posix(), 'Guides/' + name)
     readme = readme.replace(GITHUB_FILES + 'docs/INTEL-PANEL.md', 'Optional/README.md')
     readme = readme.replace(GITHUB_FILES + 'docs/OPTIONAL-AUDIO.md', 'Optional/Audio.md')
     (payload / 'READ-ME.md').write_text(readme)
