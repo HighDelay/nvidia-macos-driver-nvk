@@ -23,6 +23,44 @@ uses the actual old snapshot as its explicit three-way base and records the
 new upstream head as a parent; do not replay already integrated changes from
 the rewritten history. The preceding 2.6.4 base was `f95f4d2`.
 
+## Optional Intel panel bridge and RAM copies, 2026-11-04
+
+Adapt `kitsuneislife/nmx-intel` at `b4bb3a0c653248ce125ce7d36b920d216e53c16f`:
+panel series 1–21 and the v2.6.4 accelerator series. Source hashes and credit
+are in `kexts/NMIntelFB/NMX-PROVENANCE.json`. Its v2.5.4 panel base predates
+our brightness code; retain that handler, add inverted PWM handling and preserve
+its cancellation/drain. Resolve the old start/stop overlap by configuring the
+controller, primary RM handles, scanout proxy and VBL worker before registration.
+
+Keep NMIntelFB optional, default No, and preserve existing opt-ins. NVIDIA-parent
+publication, a primary head on headless laptops, matching NVKMS allocation and
+AGDC enable ordinary copies after startup for the selected panel; retain the
+bundled per-boot inspection/retry command and automatic-activation opt-out. Preserve
+the source's 45-second delay unless explicitly overridden. Failed parent/panel
+startup must release the claim and allow firmware matching. Honor NVIDIA removal,
+boot-guard and other-renderer opt-outs; do not take an unsupported inherited mode.
+Retain and drain workers, interrupt callbacks, PCI references and AGDC ownership.
+Keep diagnostic NVRAM writes off the frame path; there is no heartbeat writer.
+
+The user explicitly requested experimental fast-copy support too. Keep it off by
+default. Frame ABI 2 pairs both NVAccel variants with NMIntelFB: every Intel frame,
+including CPU fallback, has an exclusive lease and explicit completion. Keep
+IOSurface pending marks and the existing plugin-wrote/source-freshness checks.
+RAM scanout requires matching frame traffic, display version 12/13, the known
+16 MiB register layout and no other Intel accelerator. Reserve only zero GGTT
+entries for the second buffer, verify ownership and readback, and require a
+previous flip to latch before reusing its old front. Mode changes cannot race a
+lease. Uncertain DMA or scanout ownership quarantines the destination and source
+until reboot; never fall back into that same buffer or free prepared pages.
+The one-colour hold filter remains an explicit option, default zero.
+
+Do not import the source project's persistent auto-enable/WindowServer-kill job,
+fixed-address GGTT overwrite, automatic wake rewrite or NVRM binary-offset patch.
+The existing NVRM copy-engine API is reused. Sleep/wake and physical laptop
+boot/brightness/acceleration remain unverified for this port. Keep current
+NVMTL/cache/browser/capture, cursor teardown, Zink, gaming and small-BAR fixes.
+Only prepare a local test package while laptop and Resolve testing is pending.
+
 ## Resolve wrapped uniform loads, upstream PR #490, 2026-11-04
 
 Backport [upstream PR #490](https://github.com/nullmoth/nvidia-macos-driver/pull/490),

@@ -66,7 +66,8 @@ class PackageZinkTests(unittest.TestCase):
 
     def bundle(self, path, name):
         self.put(path / 'Contents/Info.plist', plistlib.dumps({'CFBundleExecutable': name}))
-        self.put(path / 'Contents/MacOS' / name, b'base executable ' + name.encode())
+        marker = b'\0nmintelfb-frame-abi:2\0' if name in ('NVAccel','NMIntelFB') else b''
+        self.put(path / 'Contents/MacOS' / name, b'base executable ' + name.encode() + marker)
 
     @staticmethod
     def snapshot(root):
@@ -76,6 +77,11 @@ class PackageZinkTests(unittest.TestCase):
         self.commands.append(tuple(str(a) for a in args))
         if args[0] == '/bin/bash' and str(args[1]).endswith('build_intel_panel.sh'):
             self.bundle(Path(args[2])/'NMIntelFB.kext', 'NMIntelFB')
+            (Path(args[2])/'NVKMS-HEADERS.json').write_text(json.dumps({
+                'repository': 'https://github.com/NVIDIA/open-gpu-kernel-modules',
+                'tag': '615.78.08', 'commit': '1a82fbfda8f321b056eb3568850f9316c5e465c5',
+                'headers_sha256': {'fixture/nvkms-kapi.h': '0'*64},
+            }))
         if args[0] == 'strings': return self.firmware
         if args[0] == 'git': return 'test-commit\n'
         if args[0] == 'otool': return 'cmd LC_RPATH\n cmdsize 40\n path /Library/GPUBundles/nvmtl (offset 12)\n'
@@ -102,9 +108,16 @@ class PackageZinkTests(unittest.TestCase):
         self.assertTrue((self.out/'Optional/NMIntelFB.kext/Contents/MacOS/NMIntelFB').is_file())
         self.assertFalse((self.out/'Library/Extensions/NMIntelFB.kext').exists())
         self.assertFalse(list(self.out.rglob('NMIntelFBVirtual.kext')))
+        self.assertEqual((self.out/'Optional/Intel-panel.command').read_bytes(),
+                         (ROOT/'tools/intel_panel_control.sh').read_bytes())
+        self.assertTrue((self.out/'Optional/Intel-panel.command').stat().st_mode & 0o111)
         identity = json.loads((self.out.with_name(self.out.name+'-build-records')/'Optional/INTEL-PANEL-BUILD.json').read_text())
         for name, sha in identity['files'].items():
             self.assertEqual(pkg.base_tools.digest(self.out/'Optional/NMIntelFB.kext'/name), sha)
+        self.assertEqual(identity['frame_bridge_abi'], 2)
+        self.assertFalse(identity['experimental_ram_scanout_enabled_by_default'])
+        for major, sha in identity['matched_accelerators_sha256'].items():
+            self.assertEqual(sha, pkg.base_tools.digest(self.out/'Library/NullMoth/kexts'/major/'NVAccel.kext/Contents/MacOS/NVAccel'))
         for command in ('Install.command', 'Verify.command', 'Uninstall.command'):
             self.assertTrue((self.out / command).stat().st_mode & 0o111)
         entries = {}
@@ -120,6 +133,13 @@ class PackageZinkTests(unittest.TestCase):
     def test_tampered_base_is_rejected_without_output(self):
         self.put(self.base / 'VERSION', b'tampered')
         with self.assertRaisesRegex(ValueError, 'SHA256SUMS mismatch'):
+            self.stage()
+        self.assertFalse(self.out.exists())
+
+    def test_old_accelerator_cannot_be_paired_with_ram_scanout(self):
+        self.put(self.base/'Library/NullMoth/kexts/15/NVAccel.kext/Contents/MacOS/NVAccel', b'old accelerator')
+        pkg.base_tools.write_manifest(self.base)
+        with self.assertRaisesRegex(ValueError,'matched frame-ABI-2 NVAccel'):
             self.stage()
         self.assertFalse(self.out.exists())
 

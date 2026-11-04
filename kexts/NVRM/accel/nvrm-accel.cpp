@@ -13,6 +13,8 @@
 #include <IOKit/IOService.h>
 #include "../nvrm_display_identity.h"
 #include <IOKit/IOLib.h>
+#include <string.h>
+#include "../../NMIntelFB/panel_bridge_abi.h"
 #include <IOKit/pci/IOPCIDevice.h>
 #include <pexpert/pexpert.h>
 #include <libkern/OSKextLib.h>
@@ -1249,6 +1251,64 @@ public:
 static int    gNvIop = 0;
 static SInt64 gCntIopOk, gCntIopFail, gCntIopEmpty, gCntIopSrcRes, gCntIopSrcSurf, gCntIopBlank;
 static SInt64 gCntIopOkHead[kNvMaxFB];
+// Optional Intel-panel copies, adapted from kitsuneislife/nmx-intel. All knobs
+// default off and the fast path requires the matched frame-lease ABI.
+static int gIopMemcpy = 0, gIopDirect = 0, gIopBlankHold = 0;
+static unsigned gIopBlankRun[kNvMaxFB];
+static SInt64 gCntIopDirect, gCntIopRam, gCntIopCopyUs, gCntIopBlankHeld, gCntIopQuarantined;
+
+class NVIntelFrameLease {
+    IOService *fb_;
+    const OSSymbol *endSymbol_ = nullptr;
+    bool retained_ = false;
+    bool active_ = false, blocked_ = false;
+public:
+    NMIntelFBFrame frame = {};
+    explicit NVIntelFrameLease(IOService *fb) : fb_(fb) {
+        if (!fb || !fb->metaCast("NMIntelFB")) return;
+        fb_->retain(); retained_ = true;
+        // Allocate the completion symbol before acquiring any pages. Even an
+        // allocation failure after a DMA must be able to report uncertainty.
+        endSymbol_ = OSSymbol::withCStringNoCopy(NMINTELFB_FN_END);
+        if (!endSymbol_) { blocked_ = true; return; }
+        frame.version = NMINTELFB_FRAME_VERSION;
+        const OSSymbol *symbol = OSSymbol::withCStringNoCopy(NMINTELFB_FN_BEGIN);
+        const IOReturn r = symbol ? fb->callPlatformFunction(symbol, false, &frame, nullptr, nullptr, nullptr) : kIOReturnNoMemory;
+        if (symbol) symbol->release();
+        active_ = r == kIOReturnSuccess;
+        // Legacy NMIntelFB has no RAM mode; retain its ordinary copy path.
+        blocked_ = !active_ && r != kIOReturnUnsupported;
+    }
+    ~NVIntelFrameLease() {
+        if (active_) finish(NMINTELFB_CANCEL);
+        if (endSymbol_) endSymbol_->release();
+        if (retained_) fb_->release();
+    }
+    bool active() const { return active_; }
+    bool blocked() const { return blocked_; }
+    IOReturn finish(unsigned result) {
+        frame.result = result;
+        const IOReturn r = fb_->callPlatformFunction(endSymbol_, false, &frame, nullptr, nullptr, nullptr);
+        active_ = false;
+        return r;
+    }
+    NVIntelFrameLease(const NVIntelFrameLease &) = delete;
+    NVIntelFrameLease &operator=(const NVIntelFrameLease &) = delete;
+};
+
+enum NVIntelCopyResult { kIntelNoCopy, kIntelCpuCopy, kIntelGpuCopy, kIntelHeld, kIntelUncertain };
+static NVIntelCopyResult nvAccelIntelDirect(NVAccel *, IOService *, unsigned, IOSurface *, const NMIntelFBFrame &);
+
+static void nvIntelCopyRows(void *dst, unsigned dpitch, const void *src, unsigned spitch, unsigned bytes, unsigned height)
+{
+    for (unsigned y = 0; y < height; ++y) {
+        const unsigned char *s = static_cast<const unsigned char *>(src) + size_t(y) * spitch;
+        unsigned char *d = static_cast<unsigned char *>(dst) + size_t(y) * dpitch;
+        if (__atomic_load_n(&gIopMemcpy, __ATOMIC_ACQUIRE)) memcpy(d, s, bytes);
+        else for (unsigned x = 0; x < bytes / 4; ++x)
+            reinterpret_cast<volatile unsigned *>(d)[x] = reinterpret_cast<const volatile unsigned *>(s)[x];
+    }
+}
 #define NVIOP_LOG_MAX 40
 static unsigned gIopLogs = 0;
 #define NVIOPLOG(fmt, ...) do { if (gIopLogs < NVIOP_LOG_MAX) { gIopLogs++; ALOG("iop: " fmt, ##__VA_ARGS__); } } while (0)
@@ -1312,6 +1372,8 @@ IOReturn NVDisplayPipe::performTransaction(IOAccelDisplayPipeTransaction2 *txn)
     unsigned head = 0;
     IOService *fb = a ? a->pipeFramebuffer(this, &head) : nullptr;
     if (!fb) NVIOP_FAIL(kIOReturnNotAttached, "no accelerator, or pipe %p drives a framebuffer that is none of ours", this);
+    NVIntelFrameLease intelFrame(fb);
+    if (intelFrame.blocked()) return kIOReturnSuccess; // Preserve the last frame; never reuse an unsafe buffer.
 
     IOSurface *s  = txn->getPlaneIOSurface(0, 0);
     OSObject  *ro = txn->getPlaneResource(0, 0);
@@ -1348,7 +1410,26 @@ IOReturn NVDisplayPipe::performTransaction(IOAccelDisplayPipeTransaction2 *txn)
         // stale, one-colour buffer on the panel every other frame: full-screen flicker, 5 of 40 flicker recordings
         // (1.13-1.14.1), nvaccel_iop_blank about half of every copied frame, never on machines whose frames all flip.
         // Such a frame now keeps the previous picture on the panel instead.
-        nvSurfWaitReady(s->getSurfaceID());   // a copied frame is read here, so its GPU work must be done first
+        const bool gpuReady = nvSurfWaitReady(s->getSurfaceID());
+        if (intelFrame.active() && !gpuReady) return kIOReturnSuccess;
+        const int directMode = __atomic_load_n(&gIopDirect, __ATOMIC_ACQUIRE);
+        if (intelFrame.active() && (directMode == 1 || directMode == 2)) {
+            const uint64_t start = mach_absolute_time();
+            const NVIntelCopyResult result = nvAccelIntelDirect(a, fb, head, s, intelFrame.frame);
+            if (result != kIntelNoCopy) {
+                uint64_t ns; absolutetime_to_nanoseconds(mach_absolute_time() - start, &ns);
+                OSAddAtomic64(static_cast<SInt64>(ns / 1000), &gCntIopCopyUs);
+                const unsigned completion = result == kIntelUncertain ? NMINTELFB_GPU_UNCERTAIN :
+                    result == kIntelHeld ? NMINTELFB_GPU_HELD :
+                    result == kIntelGpuCopy ? NMINTELFB_GPU_READY : NMINTELFB_CPU_READY;
+                const IOReturn end = intelFrame.finish(completion);
+                if (end == kIOReturnSuccess) {
+                    OSAddAtomic64(1, &gCntIopSrcSurf); OSAddAtomic64(1, &gCntIopOk);
+                    OSAddAtomic64(1, &gCntIopOkHead[head]);
+                }
+                return kIOReturnSuccess;
+            }
+        }
         if (!nvAccelSurfCopyReady(s, head)) return kIOReturnSuccess;
         const unsigned fmt = s->getPixelFormat();
         if (fmt != 0x42475241u) NVIOP_FAIL(kIOReturnUnsupported, "surface 0x%x format 0x%08x is not BGRA", s->getSurfaceID(), fmt);
@@ -1368,18 +1449,28 @@ IOReturn NVDisplayPipe::performTransaction(IOAccelDisplayPipeTransaction2 *txn)
     struct NVRMVramRequest q;
     for (unsigned i = 0; i < sizeof q; i++) ((volatile unsigned char *)&q)[i] = 0;
     q.version = NVRM_VRAM_ABI_VERSION;
-    IOReturn ret = a->askFramebufferForScanout(&q, fb);
+    IOReturn ret;
+    if (intelFrame.active()) {
+        q.kva = intelFrame.frame.kva;
+        q.width = intelFrame.frame.width; q.height = intelFrame.frame.height; q.pitch = intelFrame.frame.pitch;
+        ret = kIOReturnSuccess;
+    } else ret = a->askFramebufferForScanout(&q, fb);
     if (ret != kIOReturnSuccess || !q.kva || q.pitch < 4 || !q.height) NVIOP_FAIL(kIOReturnNotReady, "framebuffer would not describe its scanout (0x%x kva %p pitch %u)", (unsigned)ret, q.kva, q.pitch);
     if (w != q.width || h != q.height) NVIOP_FAIL(kIOReturnBadArgument, "source %ux%u is not the scanout's %ux%u", w, h, q.width, q.height);
 
     nvAccelIopHome(fb, head);
     const unsigned words = (((pitch < q.pitch) ? pitch : q.pitch) & ~3u) / 4;
     const unsigned spr = pitch / 4, dpr = q.pitch / 4;
-    volatile unsigned int *d = (volatile unsigned int *)q.kva;
-    for (unsigned y = 0; y < h; y++) {
-        const volatile unsigned int *sp = src + (unsigned long)y * spr;
-        volatile unsigned int *dp = d + (unsigned long)y * dpr;
-        for (unsigned x = 0; x < words; x++) dp[x] = sp[x];
+    if (intelFrame.active()) {
+        nvIntelCopyRows(q.kva, q.pitch, const_cast<const unsigned *>(src), pitch, words * 4, h);
+        if (intelFrame.finish(NMINTELFB_CPU_READY) != kIOReturnSuccess) return kIOReturnSuccess;
+    } else {
+        volatile unsigned int *d = (volatile unsigned int *)q.kva;
+        for (unsigned y = 0; y < h; y++) {
+            const volatile unsigned int *sp = src + (unsigned long)y * spr;
+            volatile unsigned int *dp = d + (unsigned long)y * dpr;
+            for (unsigned x = 0; x < words; x++) dp[x] = sp[x];
+        }
     }
     OSAddAtomic64(1, fromRes ? &gCntIopSrcRes : &gCntIopSrcSurf);
     const SInt64 n = OSAddAtomic64(1, &gCntIopOk);
@@ -1579,6 +1670,27 @@ SYSCTL_INT(_debug, OID_AUTO, nvaccel_surface_gpu_wait_max_us, CTLFLAG_RD | CTLFL
 static SInt64 gCntIopAsync, gCntIopAsyncRefused, gCntIopAsyncDrop;
 SYSCTL_INT(_debug, OID_AUTO, nvaccel_iop_async, CTLFLAG_RW | CTLFLAG_LOCKED, &gIopAsync, 0, "1 = the swap runs on a thread call and completes through signalTransactionInterrupt (Apple's shape); 0 = the earlier synchronous flip");
 NVACCEL_CNT(nvaccel_iop_async_flips,   gCntIopAsync,        "swaps completed asynchronously");
+static int nvIntelKnobSysctl SYSCTL_HANDLER_ARGS
+{
+    int *knob = static_cast<int *>(arg1);
+    int value = __atomic_load_n(knob, __ATOMIC_ACQUIRE);
+    const int error = sysctl_handle_int(oidp, &value, 0, req);
+    if (error || !req->newptr) return error;
+    if (value < 0 || value > arg2) return EINVAL;
+    __atomic_store_n(knob, value, __ATOMIC_RELEASE);
+    return 0;
+}
+SYSCTL_PROC(_debug, OID_AUTO, nvaccel_iop_memcpy, CTLTYPE_INT | CTLFLAG_RW | CTLFLAG_LOCKED | CTLFLAG_KERN,
+            &gIopMemcpy, 1, nvIntelKnobSysctl, "I", "Intel panel: 1 memcpy rows, 0 volatile words (default)");
+SYSCTL_PROC(_debug, OID_AUTO, nvaccel_iop_direct, CTLTYPE_INT | CTLFLAG_RW | CTLFLAG_LOCKED | CTLFLAG_KERN,
+            &gIopDirect, 2, nvIntelKnobSysctl, "I", "Intel panel: 0 ordinary copy, 1 direct staging copy, 2 CE into leased scanout RAM");
+SYSCTL_PROC(_debug, OID_AUTO, nvaccel_iop_blank_hold, CTLTYPE_INT | CTLFLAG_RW | CTLFLAG_LOCKED | CTLFLAG_KERN,
+            &gIopBlankHold, 8, nvIntelKnobSysctl, "I", "Intel RAM flip: optional bounded one-colour hold, 0 off (default)");
+NVACCEL_CNT(nvaccel_iop_direct_frames, gCntIopDirect, "Intel frames copied without updating the IOSurface system copy");
+NVACCEL_CNT(nvaccel_iop_ram_frames, gCntIopRam, "Intel frames copied by CE directly to leased RAM pages");
+NVACCEL_CNT(nvaccel_iop_copy_us, gCntIopCopyUs, "microseconds in the optional Intel copy path");
+NVACCEL_CNT(nvaccel_iop_blank_held, gCntIopBlankHeld, "Intel RAM flips deliberately held by the optional one-colour filter");
+NVACCEL_CNT(nvaccel_iop_quarantined, gCntIopQuarantined, "Intel copy completions uncertain; reboot required");
 NVACCEL_CNT(nvaccel_iop_async_refused, gCntIopAsyncRefused, "async swaps NVKMS refused (that frame stayed off the panel)");
 NVACCEL_CNT(nvaccel_iop_async_drop,    gCntIopAsyncDrop,    "frames dropped because a flip was still in flight past a refresh period");
 static SInt64 gCntIopLate;
@@ -1621,6 +1733,11 @@ static void nvaccelInstallSysctl(void)
     sysctl_register_oid(&sysctl__debug_nvaccel_crc_head);       sysctl_register_oid(&sysctl__debug_nvaccel_crc);
     sysctl_register_oid(&sysctl__debug_nvaccel_iop_flip_hit);   sysctl_register_oid(&sysctl__debug_nvaccel_iop_flip_miss);
     sysctl_register_oid(&sysctl__debug_nvaccel_iop_async);      sysctl_register_oid(&sysctl__debug_nvaccel_iop_async_flips);
+    sysctl_oid *intelOids[] = {&sysctl__debug_nvaccel_iop_memcpy, &sysctl__debug_nvaccel_iop_direct,
+        &sysctl__debug_nvaccel_iop_blank_hold, &sysctl__debug_nvaccel_iop_direct_frames,
+        &sysctl__debug_nvaccel_iop_ram_frames, &sysctl__debug_nvaccel_iop_copy_us,
+        &sysctl__debug_nvaccel_iop_blank_held, &sysctl__debug_nvaccel_iop_quarantined};
+    for (sysctl_oid *oid : intelOids) sysctl_register_oid(oid);
     { extern struct sysctl_oid sysctl__debug_nvaccel_svdiag; sysctl_register_oid(&sysctl__debug_nvaccel_svdiag); }
     sysctl_register_oid(&sysctl__debug_nvaccel_surface_gpu);    sysctl_register_oid(&sysctl__debug_nvaccel_surface_gpu_on);
     sysctl_register_oid(&sysctl__debug_nvaccel_surface_gpu_marks); sysctl_register_oid(&sysctl__debug_nvaccel_surface_gpu_waits);
@@ -2352,6 +2469,117 @@ static bool nvAccelSurfCopyReady(IOSurface *s, unsigned head)
     if (++gIopCopyHeld[head] > 4) { gIopCopyHeld[head] = 0; return true; }
     OSAddAtomic64(1, &gCntIopCopySkip);
     return false;
+}
+
+static unsigned nvIntelVaried(const void *pixels, unsigned width, unsigned height, unsigned pitch)
+{
+    const volatile unsigned char *source = static_cast<const volatile unsigned char *>(pixels);
+    const unsigned first = *reinterpret_cast<const volatile unsigned *>(source) & 0xffffffu;
+    unsigned varied = 0;
+    for (unsigned y = 0; y < 8; ++y) for (unsigned x = 0; x < 8; ++x) {
+        const size_t offset = size_t(height * (2 * y + 1) / 16) * pitch +
+                              size_t(width * (2 * x + 1) / 16) * 4;
+        if ((*reinterpret_cast<const volatile unsigned *>(source + offset) & 0xffffffu) != first) ++varied;
+    }
+    return varied;
+}
+
+static NVIntelCopyResult nvAccelIntelDirect(NVAccel *a, IOService *fb, unsigned head,
+                                           IOSurface *s, const NMIntelFBFrame &frame)
+{
+    if (!a || !fb || !s || !frame.kva || head >= kNvMaxFB) return kIntelNoCopy;
+    const unsigned id = s->getSurfaceID();
+    const unsigned long long width = s->getWidth(), height = s->getHeight(), pitch = s->getBytesPerRow();
+    if (!nvSVPend(id, 2) || s->getPixelFormat() != 0x42475241u ||
+        !width || !height || width > 16384 || height > 16384 ||
+        width != frame.width || height != frame.height || pitch < width * 4 ||
+        (pitch & 3) || pitch > 16384ull * 8) return kIntelNoCopy;
+    const unsigned long long length = height * pitch, pages = (length + 4095) / 4096;
+    NVRMRmHandles handles = {};
+    if (!nvAccelRmHandles(&handles)) return kIntelNoCopy;
+    const bool ram = __atomic_load_n(&gIopDirect, __ATOMIC_ACQUIRE) == 2 && frame.pages &&
+        frame.pitch == pitch && frame.length >= length && frame.pageCount >= pages;
+    bool locked = false;
+    for (unsigned i = 0; i < 8 && !(locked = nvFamLock(a, true)); ++i) IOSleep(1);
+    if (!locked) return kIntelNoCopy;
+    NVIntelCopyResult result = kIntelNoCopy;
+    void *cache = _ZN22IOGraphicsAccelerator223deviceCacheForIOSurfaceEP9IOSurfacej(a, s, 0);
+    OSObject *object = cache ? *reinterpret_cast<OSObject *volatile *>(static_cast<unsigned char *>(cache) + 0x20) : nullptr;
+    NVResource *resource = OSDynamicCast(NVResource, object);
+    NVVidMemory *memory = resource ? nvres_vidmem(resource) : nullptr;
+    volatile unsigned short *valid = resource ?
+        *reinterpret_cast<unsigned short *volatile *>(reinterpret_cast<volatile unsigned char *>(resource) + 0x30) : nullptr;
+    // Retain the fork's producer check: a family-valid VRAM allocation that the
+    // plugin never wrote must not displace the surface's real system pixels.
+    if (memory && memory->fRmHandle && !memory->fScanout && memory->fBytes >= length &&
+        valid && !(valid[0] & 1u) && nvAccelResPluginWrote(resource)) {
+        IOLock *stageLock = ram ? nullptr : nvSVStageLock();
+        IOBufferMemoryDescriptor *stage = nullptr;
+        unsigned long long *stagePages = nullptr;
+        const unsigned long long *targetPages = ram ? frame.pages : nullptr;
+        if (stageLock) {
+            IOLockLock(stageLock);
+            stage = nvSVStage(length);
+            IOByteCount segmentLength = 0;
+            const addr64_t physical = stage ? stage->getPhysicalSegment(0, &segmentLength, kIOMemoryMapperNone) : 0;
+            if (physical && segmentLength >= length && pages <= SIZE_MAX / sizeof(*stagePages))
+                stagePages = static_cast<unsigned long long *>(IOMalloc(size_t(pages) * sizeof(*stagePages)));
+            if (stagePages) {
+                for (unsigned long long i = 0; i < pages; ++i) stagePages[i] = physical + i * 4096;
+                targetPages = stagePages;
+            }
+        }
+        if (targetPages) {
+            NVRMSurfPageoff request = {};
+            request.version = NVRM_SS_RM_VERSION; request.status = NVRM_SS_OFF;
+            request.kapiDevice = handles.kapiDevice; request.kapiMemory = memory->fRmHandle;
+            request.pages = targetPages; request.pageCount = pages; request.length = length;
+            IOService *nvrm = nvAccelNVRM();
+            const OSSymbol *symbol = OSSymbol::withCStringNoCopy(NVRM_SS_FN_PAGEOFF);
+            bool attempted = false;
+            if (nvrm && symbol) {
+                attempted = true;
+                nvrm->callPlatformFunction(symbol, false, &request, nullptr, nullptr, nullptr);
+            }
+            if (symbol) symbol->release();
+            if (attempted && request.status == 0) {
+                if (ram) {
+                    const bool blank = !nvIntelVaried(frame.kva, frame.width, frame.height, frame.pitch);
+                    if (blank) OSAddAtomic64(1, &gCntIopBlank);
+                    const int hold = __atomic_load_n(&gIopBlankHold, __ATOMIC_ACQUIRE);
+                    const bool held = frame.mode == 2 && blank && hold > 0 &&
+                                      gIopBlankRun[head] < static_cast<unsigned>(hold);
+                    gIopBlankRun[head] = !blank ? 0 : held ? gIopBlankRun[head] + 1 : gIopBlankRun[head];
+                    if (held) { result = kIntelHeld; OSAddAtomic64(1, &gCntIopBlankHeld); }
+                    else result = kIntelGpuCopy;
+                    OSAddAtomic64(1, &gCntIopRam);
+                } else {
+                    nvIntelCopyRows(frame.kva, frame.pitch, stage->getBytesNoCopy(),
+                                    static_cast<unsigned>(pitch), frame.width * 4, frame.height);
+                    __asm__ volatile("sfence" ::: "memory");
+                    result = kIntelCpuCopy;
+                }
+                OSAddAtomic64(1, &gCntIopDirect);
+                // Do not clear nvSVPend or valid[0]: the IOSurface's system copy
+                // was not updated. Screenshots/CPU consumers still page it off.
+            } else if (attempted) {
+                // No known completion: never fall back into the same destination
+                // or let its allocation/source be freed underneath the DMA.
+                resource->retain();
+                reinterpret_cast<OSObject *>(s)->retain();
+                if (stage) gNVSVStageBuf = nullptr; // Deliberately retain this prepared staging buffer.
+                __atomic_store_n(&gIopDirect, 0, __ATOMIC_RELEASE);
+                result = kIntelUncertain;
+                OSAddAtomic64(1, &gCntIopQuarantined);
+                ALOG("Intel panel: CE completion uncertain (status %#x); source and destination retained until reboot", request.status);
+            }
+        }
+        if (stagePages && result != kIntelUncertain) IOFree(stagePages, size_t(pages) * sizeof(*stagePages));
+        if (stageLock) IOLockUnlock(stageLock);
+    }
+    if (cache) reinterpret_cast<OSObject *>(cache)->release();
+    nvFamUnlock(a);
+    return result;
 }
 
 static unsigned nvVaAllocLogged, nvVaMapLogged;

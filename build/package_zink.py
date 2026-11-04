@@ -119,17 +119,33 @@ def stage(base, zink, output, components=None, native_gld=False, records=None):
         panel = payload/'Optional/NMIntelFB.kext'
         copy_bundle(panel_build/'NMIntelFB.kext', panel)
         run('codesign', '--verify', '--strict', panel)
+        matched_accelerators = {}
+        for major in ('15', '26'):
+            executable = payload/'Library/NullMoth/kexts'/major/'NVAccel.kext/Contents/MacOS/NVAccel'
+            if b'nmintelfb-frame-abi:2\0' not in executable.read_bytes():
+                raise ValueError('Intel panel requires the matched frame-ABI-2 NVAccel for macOS '+major)
+            matched_accelerators[major] = base_tools.digest(executable)
+        if b'nmintelfb-frame-abi:2\0' not in (payload/'Library/Extensions/NVAccel.kext/Contents/MacOS/NVAccel').read_bytes():
+            raise ValueError('Intel panel requires the matched selected NVAccel')
         panel_identity = {
             'source_commit': run('git', '-C', ROOT, 'rev-parse', 'HEAD').strip(),
             'source_sha256': {str(p.relative_to(ROOT)): base_tools.digest(p) for p in
-                [ROOT/'build/build_intel_panel.sh', *sorted((ROOT/'kexts/NMIntelFB').glob('*'))]
+                [ROOT/'build/build_intel_panel.sh', ROOT/'tools/intel_panel_control.sh',
+                 ROOT/'kexts/NVRM/nvrm_gpuva_abi.h', ROOT/'kexts/NVRM/agdc/AppleGraphicsDeviceControl_re.h',
+                 ROOT/'kexts/NVRM/agdc/nvrm-agdc-k5.h', *sorted((ROOT/'kexts/NMIntelFB').glob('*'))]
                 if p.is_file()},
             'files': {str(p.relative_to(panel)): base_tools.digest(p) for p in panel.rglob('*') if p.is_file()},
             'installation': 'optional installer prompt; default no; retain an existing opt-in',
             'nvidia_intel_panel_acceleration_enabled_by_default': False,
+            'selected_panel_auto_activation': 'ordinary copies; nullmoth-intelfb-auto=0 disables it',
+            'experimental_ram_scanout_enabled_by_default': False,
+            'frame_bridge_abi': 2,
+            'matched_accelerators_sha256': matched_accelerators,
+            'nvkms_headers': json.loads((panel_build/'NVKMS-HEADERS.json').read_text()),
         }
-        (payload/'Optional/INTEL-PANEL-BUILD.json').write_text(json.dumps(panel_identity, indent=2)+'\n')
         shutil.copy2(ROOT/'docs/INTEL-PANEL.md', payload/'Optional/README.md')
+        shutil.copy2(ROOT/'tools/intel_panel_control.sh', payload/'Optional/Intel-panel.command')
+        (payload/'Optional/Intel-panel.command').chmod(0o755)
         replacements = {}
         # Verify the firmware version from the actual NVRM image, not stale text
         # in release manifests. Every referenced mandatory firmware must exist.
@@ -164,6 +180,14 @@ def stage(base, zink, output, components=None, native_gld=False, records=None):
                 plist.write_bytes(plistlib.dumps(data))
                 run('codesign', '--force', '--sign', '-', payload / relative)
                 run('codesign', '--verify', '--strict', payload / relative)
+        # Signatures include the selected GLD plist. Record the final paired
+        # accelerators after that transformation, not their pre-signing bytes.
+        panel_identity['matched_accelerators_sha256'] = {
+            major: base_tools.digest(payload/'Library/NullMoth/kexts'/major/'NVAccel.kext/Contents/MacOS/NVAccel')
+            for major in ('15','26')}
+        panel_identity['selected_accelerator_sha256'] = base_tools.digest(
+            payload/'Library/Extensions/NVAccel.kext/Contents/MacOS/NVAccel')
+        (payload/'Optional/INTEL-PANEL-BUILD.json').write_text(json.dumps(panel_identity, indent=2)+'\n')
         # Only the test utility consumes this ICD path. Production Zink opens
         # the private frontend directly, with no process-global loader override.
         icd = {'file_format_version':'1.0.0','ICD':{'library_path':'./libnvk_renderer.dylib','api_version':'1.4.363'}}

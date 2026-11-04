@@ -18,6 +18,11 @@ GSP firmware gsp_tu10x.bin, gsp_ga10x.bin and the matching ucode images from NVI
              redistributed unmodified under NVIDIA's licence (licenses/NVIDIA-firmware-LICENCE.txt), the same
              terms under which linux-firmware redistributes these images.
 
+kexts/NMIntelFB and the optional Intel-panel copy path in NVAccel include adaptations of
+  kitsuneislife/nmx-intel (https://github.com/kitsuneislife/nmx-intel), pinned at
+  b4bb3a0c653248ce125ce7d36b920d216e53c16f. See NMX-PROVENANCE.json in that source directory.
+  Original NullMoth code and its notices remain under their existing license.
+
 kexts/NMIntelFB  Panel brightness follows the method of WhateverXe's panel PWM (XELP::PanelPWM) by b00t0x,
              https://github.com/b00t0x/WhateverXe, BSD-3-Clause, Copyright (c) 2018 vit9696
              (licenses/WhateverXe-LICENSE.txt). Register layout from Linux i915/xe display headers, MIT.
