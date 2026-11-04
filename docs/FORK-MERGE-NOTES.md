@@ -59,6 +59,17 @@ and developer builds retain them. Keep real memory accounting, hazard/resource
 lifetime and delayed destruction active. This does not change our cache budgets,
 binding/resource optimizations or replace them with broader eviction.
 
+**Compute binding follow-up:** GPU instance conversion must use
+`nvmtl_bind_compute_pipeline`, just like app compute dispatches. A direct Vulkan
+bind leaves the per-recording cache naming the previous app pipeline; resuming
+that same app pipeline then incorrectly skips its bind. Keep repeated-binding
+elision and descriptor reuse, while tracking the internal conversion pipeline.
+`tools/test_compute_bindings.py` covers app/conversion/app transitions, consecutive
+conversions and failed requests. The `conversion-resume` GPU readback overwrites
+app output with two real conversions, then verifies the resumed app kernel and
+the conversion's remaining matrix, flags, UserID and address output. Its stale
+cache guard rejects an unfixed backend before GPU submission.
+
 **Optional audio:** the user requests a separate default-No installer choice.
 Move the verified upstream NMXAudio payload to `Optional/`, retain its license
 and record its untouched executable hash. Permit `--audio=yes|no` on Tahoe with a

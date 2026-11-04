@@ -24,7 +24,7 @@ def function(start):
 dispatch = '\n'.join(function(name) for name in (
     'void nvmtl_vk_cmd_dispatch_threads(', 'void nvmtl_vk_cmd_dispatch_indirect_tg(',
     'void nvmtl_vk_cmd_dispatch(', 'void nvmtl_vk_cmd_dispatch_indirect(',
-    'int nvmtl_vk_cmd_sum_occlusion('))
+    'int nvmtl_vk_cmd_sum_occlusion(', 'int nvmtl_vk_cmd_convert_instances('))
 assert source.count('pvkCmdBindPipeline(c->cb, VK_PIPELINE_BIND_POINT_COMPUTE,') == 1
 assert source.count('pvkCmdBindDescriptorSets(c->cb, VK_PIPELINE_BIND_POINT_COMPUTE,') == 1
 sass = function('int nvmtl_vk_cmd_dispatch_sass(')
@@ -40,10 +40,20 @@ fixture = r'''
 #include "nvmtl_vk.h"
 #define NVMTL_DISPATCH_PC_BYTES 48
 #define nvlog(...) ((void)0)
+// Upstream tracing hooks are outside this binding-state fixture.
+#define nvmtl_fx_note_dispatch(...) ((void)0)
+#define nvmtl_order_barrier(...) ((void)0)
+#define nvmtl_dt_begin(...) (-1)
+#define nvmtl_dt_end(...) ((void)0)
+#define nvmtl_dwit_mark(...) ((void)0)
+#define nvmtl_igw_note(...) ((void)0)
 static VkPhysicalDeviceLimits g_lim = {.maxComputeWorkGroupCount={65535,65535,65535}};
 static VkDescriptorSet g_heapSet=(VkDescriptorSet)30;
 static VkPipeline g_visibility_sum_pipeline=(VkPipeline)90;
 static VkPipelineLayout g_visibility_sum_layout=(VkPipelineLayout)91;
+static VkPipeline g_convinst_pipeline=(VkPipeline)92;
+static VkPipelineLayout g_convinst_layout=(VkPipelineLayout)93;
+static unsigned fail_conversion_init;
 static unsigned pipeline_calls, set_calls, dispatch_calls, push_calls, barrier_calls;
 static unsigned ubo=1, fail_snapshot;
 static unsigned variant_calls, fail_variant;
@@ -63,6 +73,7 @@ static VkPipeline nvmtl_compute_variant(nvk_pipeline *p,const uint32_t local[3])
     return (VkPipeline)((uintptr_t)p->pipe + (local[0]==1 ? 1 : 0));
 }
 static int nvmtl_visibility_sum_init(void) { return 0; }
+static int nvmtl_convinst_init(void) { return fail_conversion_init ? -1 : 0; }
 uint64_t nvmtl_vk_buffer_address(nvk_buffer *b) { return (uintptr_t)b->buf; }
 void nvmtl_vk_cmd_barrier(nvk_cmdbuf *c) { barrier_calls++; }
 static void pvkCmdBindPipeline(VkCommandBuffer cb,VkPipelineBindPoint point,VkPipeline p) {
@@ -148,6 +159,34 @@ int main(void) {
     different[2]=2;
     nvmtl_compute_variant_cached(&variants,&owners[0],different); assert(variant_calls==calls+14);
     puts("PASS: repeated variant lookup avoids global mutex/search; bounded eviction, owner/size keys and failed-build retry");
+
+    // An internal instance-conversion dispatch shares this Vulkan recording
+    // with app compute work. Check the actual bound pipeline, not just the
+    // cached value, including consecutive conversions and rejected requests.
+    nvk_cmdbuf mixed={0};
+    unsigned before_pipelines=pipeline_calls, before_sets=set_calls, before_dispatches=dispatch_calls;
+    nvmtl_convinst_args args={.src=0x1000,.dst=0x2000,.uid=0x3000,.astab=0x4000,.stride=64,.count=1};
+    nvmtl_vk_cmd_dispatch_threads(&mixed,&p,threads,tg);
+    assert(bound_pipeline==(VkPipeline)p.pipe && pipeline_calls==before_pipelines+1);
+    assert(nvmtl_vk_cmd_convert_instances(&mixed,&args)==0);
+    assert(bound_pipeline==g_convinst_pipeline && pipeline_calls==before_pipelines+2);
+    assert(nvmtl_vk_cmd_convert_instances(&mixed,&args)==0);
+    assert(bound_pipeline==g_convinst_pipeline && pipeline_calls==before_pipelines+2);
+    nvmtl_vk_cmd_dispatch_threads(&mixed,&p,threads,tg);
+    assert(bound_pipeline==(VkPipeline)p.pipe && pipeline_calls==before_pipelines+3);
+    nvmtl_vk_cmd_dispatch_threads(&mixed,&p,threads,tg);
+    assert(pipeline_calls==before_pipelines+3 && set_calls==before_sets+1);
+    assert(dispatch_calls==before_dispatches+5);
+    args.count=0;
+    assert(nvmtl_vk_cmd_convert_instances(&mixed,&args)==-1);
+    args.count=1; args.src=0x1001;
+    assert(nvmtl_vk_cmd_convert_instances(&mixed,&args)==-1);
+    args.src=0x1000; fail_conversion_init=1;
+    assert(nvmtl_vk_cmd_convert_instances(&mixed,&args)==-1);
+    nvmtl_vk_cmd_dispatch_threads(&mixed,&p,threads,tg);
+    assert(bound_pipeline==(VkPipeline)p.pipe && pipeline_calls==before_pipelines+3);
+    assert(set_calls==before_sets+1 && dispatch_calls==before_dispatches+6);
+    puts("PASS: instance conversion restores app pipeline; repeated app/conversion binds stay elided; rejected conversions preserve cached state");
 }
 '''
 with tempfile.TemporaryDirectory(prefix='nvmtl-compute-bindings-') as tmp:

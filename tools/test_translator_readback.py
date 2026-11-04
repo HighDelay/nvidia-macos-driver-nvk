@@ -83,6 +83,7 @@ entry:
 !2 = !{!3}
 !3 = !{i32 0, !"air.buffer", !"air.location_index", i32 0, i32 1, !"air.write", !"air.address_space", i32 1, !"air.arg_type_size", i32 4, !"air.arg_type_align_size", i32 4, !"air.arg_type_name", !"uint*", !"air.arg_name", !"out"}
 '''
+kernels['conversion-resume'] = kernels['control']
 for mode, name in {
     'phi': 'native_device_buffer_array_keeps_direct_buffer_pointer_phi_network_modeled',
     'table': 'native_device_buffer_array_through_a_generic_state_pointer_stores_through_the_table',

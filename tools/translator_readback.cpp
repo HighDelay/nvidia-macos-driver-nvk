@@ -22,6 +22,7 @@ extern "C" {
  X(nvmtl_vk_buffer_create) X(nvmtl_vk_buffer_address) X(nvmtl_vk_buffer_destroy) \
  X(nvmtl_vk_compute_pipeline_create) X(nvmtl_vk_pipeline_destroy) \
  X(nvmtl_vk_cmd_begin) X(nvmtl_vk_bind_buffer) X(nvmtl_vk_cmd_dispatch_threads) \
+ X(nvmtl_vk_cmd_convert_instances) \
  X(nvmtl_vk_submit_wait_at) X(nvmtl_vk_queue_destroy) \
  X(nvmtl_vk_image_create_typed) X(nvmtl_vk_image_write) X(nvmtl_vk_image_read) \
  X(nvmtl_vk_bind_texture_view) X(nvmtl_vk_bind_storage_view) X(nvmtl_vk_image_destroy) \
@@ -65,6 +66,7 @@ int main(int argc, char **argv) {
     require(!code.empty(), "SPIR-V input");
     const std::string mode = argv[3];
     const bool wrapped = mode.rfind("wrapped-", 0) == 0;
+    const bool conversion_resume = mode == "conversion-resume";
     const float uniform_slots[][4] = {{0.25f,-1.5f,2.f,16.f},{4.f,2.5f,-3.f,0.125f},{-1.f,8.f,0.5f,-16.f}};
     const uint32_t uniform_bits[] = {0x80000000u,0x7fc12345u,0xff800000u,0x3f800001u};
     nvk_queue queue{}; nvk_pipeline pipeline{};
@@ -82,7 +84,17 @@ int main(int argc, char **argv) {
     const float texture_a[4] = {0.125f, 0.25f, 0.5f, 1.f};
     const float texture_b[4] = {0.75f, 0.5f, 0.25f, 0.f};
     nvk_cmdbuf command{};
-    if (wrapped) {
+    if (conversion_resume) {
+        // One column-major identity transform, UserID descriptor and AS table.
+        // Conversion overwrites the first app output so only a successful
+        // resumed dispatch can restore its expected control value.
+        memset(buffers[1].map, 0, 4096);
+        float *matrix = (float *)buffers[1].map;
+        matrix[0] = matrix[4] = matrix[8] = 1.f;
+        uint32_t *words = (uint32_t *)buffers[1].map;
+        words[12] = 3; words[13] = 255; words[14] = 7; words[15] = 0; words[16] = 0x54321;
+        words[64] = 0x55667788; words[65] = 0x11223344; words[66] = 5;
+    } else if (wrapped) {
         const size_t stride = mode == "wrapped-trailing" || mode == "wrapped-array" ? 32 : 16;
         for (unsigned slot = 0; slot < 3; ++slot)
             memcpy((char *)buffers[1].map+(slot+1)*stride, uniform_slots[slot], 16);
@@ -164,8 +176,39 @@ int main(int argc, char **argv) {
         }
         call_nvmtl_vk_cmd_dispatch_threads(&command, &pipeline, threads, one);
         require(!command.nobind && !command.skipped, "dispatch recorded");
+        if (conversion_resume) {
+            // dispatch_threads may select a threadgroup-size pipeline variant.
+            void *app_pipeline = command.compute_pipeline;
+            require(app_pipeline != nullptr, "initial app pipeline cached");
+            nvmtl_convinst_args args{};
+            args.src = call_nvmtl_vk_buffer_address(&buffers[1]);
+            args.dst = call_nvmtl_vk_buffer_address(&buffers[0]);
+            args.uid = call_nvmtl_vk_buffer_address(&buffers[2]);
+            args.astab = args.src + 256;
+            args.stride = 80; args.count = 1; args.mtl_type = 1; args.n_as = 1;
+            for (unsigned conversion = 0; conversion < 2; ++conversion) {
+                check(call_nvmtl_vk_cmd_convert_instances(&command, &args), "instance conversion");
+                // Reject stale state before submitting anything: an unfixed
+                // backend could otherwise execute the wrong kernel/addresses.
+                require(command.compute_pipeline && command.compute_pipeline != app_pipeline,
+                        "conversion updates cached pipeline before app work resumes");
+            }
+            call_nvmtl_vk_cmd_dispatch_threads(&command, &pipeline, threads, one);
+            require(!command.nobind && !command.skipped && command.compute_pipeline == app_pipeline,
+                    "app compute pipeline restored after conversion");
+        }
         check(call_nvmtl_vk_submit_wait_at(&command, "translator_readback"), "bounded compute completion");
-        if (wrapped) {
+        if (conversion_resume) {
+            const uint32_t *out = (uint32_t *)buffers[0].map;
+            require(out[0] == 0x12345678, "resumed app dispatch overwrites conversion output");
+            const float *matrix = (float *)buffers[0].map;
+            require(matrix[5] == 1.f && matrix[10] == 1.f, "conversion matrix survives resumed app work");
+            require(out[12] == 0xff054321 && out[13] == 0x0300000c &&
+                    out[14] == 0x55667788 && out[15] == 0x11223344, "conversion flags, mask, table and AS address");
+            require(((uint32_t *)buffers[2].map)[0] == 0x54321, "conversion UserID output");
+            require(out[16] == 0xa5a5a5a5 && ((uint32_t *)buffers[2].map)[1] == 0xa5a5a5a5,
+                    "conversion and resumed app output bounds");
+        } else if (wrapped) {
             if (mode == "wrapped-bitcopy") require(!memcmp(buffers[0].map,uniform_bits,16), "wrapped load preserves signed zero, NaN payload, infinity and adjacent float bits");
             else for (unsigned i = 0; i < 4; ++i) {
                 float expected = uniform_slots[0][i]+uniform_slots[run][i];
@@ -234,6 +277,6 @@ int main(int argc, char **argv) {
     if (linear_sampler.s) call_nvmtl_vk_sampler_destroy(&linear_sampler);
     for (auto &b : buffers) call_nvmtl_vk_buffer_destroy(&b);
     call_nvmtl_vk_pipeline_destroy(&pipeline); call_nvmtl_vk_queue_destroy(&queue);
-    printf("PASS %s (%u dispatches)\n", mode.c_str(), runs);
+    printf("PASS %s (%u dispatches)\n", mode.c_str(), conversion_resume ? runs * 4 : runs);
     return 0;
 }

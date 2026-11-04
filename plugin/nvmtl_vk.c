@@ -9507,7 +9507,9 @@ int nvmtl_vk_cmd_convert_instances(nvk_cmdbuf *c, const nvmtl_convinst_args *arg
     }
     if (nvmtl_convinst_init()) return -1;
     nvmtl_vk_cmd_barrier(c);
-    pvkCmdBindPipeline(c->cb, VK_PIPELINE_BIND_POINT_COMPUTE, g_convinst_pipeline);
+    // The app can resume compute work in this recording after the internal
+    // conversion kernel. Keep its cached binding in sync with Vulkan's state.
+    nvmtl_bind_compute_pipeline(c, g_convinst_pipeline);
     pvkCmdPushConstants(c->cb, g_convinst_layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof *args, args);
     pvkCmdDispatch(c->cb, (args->count + 63u) / 64u, 1, 1);
     nvmtl_vk_cmd_barrier(c);
