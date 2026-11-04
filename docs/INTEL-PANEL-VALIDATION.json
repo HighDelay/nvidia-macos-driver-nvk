@@ -1,62 +1,53 @@
 {
-  "date": "2026-10-31",
-  "scope": "Optional NMIntelFB real variant; installer and packaging only; no kernel implementation changes",
-  "test_suites": [
-    {
-      "test": "intel_panel_install",
-      "passed": 13
-    },
-    {
-      "test": "primary_gpu_install",
-      "passed": 9
-    },
-    {
-      "test": "native_gld_install",
-      "passed": 16
-    },
-    {
-      "test": "install_private_copy",
-      "passed": 10
-    },
-    {
-      "test": "install_acl",
-      "passed": 5
-    },
-    {
-      "test": "uninstall_kext_paths",
-      "passed": 10
-    },
-    {
-      "test": "install_keeps_my_settings",
-      "passed": 5
-    },
-    {
-      "test": "install_kmutil_blocker",
-      "passed": 4
-    },
-    {
-      "test": "package_zink",
-      "passed": 18
-    }
-  ],
-  "test_count": 90,
-  "kernel_link": {
-    "passed": true,
-    "host": "Tahoe",
-    "five_kexts_present": true,
-    "live_files_unchanged": true,
-    "installed": false,
-    "sequoia_kernel_link_tested": false,
-    "laptop_boot_tested": false,
-    "optional_kext_sha256": "2415e7ef83107cfdde1bcfa89b2dbfe1d853d8570bfce9067ce28251fde7fdf6",
-    "temporary_collection_bytes": 18907136
+  "date": "2026-11-04",
+  "scope": "nmx-intel panel bridge and explicit optional RAM/copy-engine support",
+  "source": "https://github.com/kitsuneislife/nmx-intel/tree/b4bb3a0c653248ce125ce7d36b920d216e53c16f",
+  "frame_abi": 2,
+  "installer_default": "No",
+  "selected_panel_activation": "automatic ordinary copies; explicit NVRAM opt-out",
+  "fast_copy_default": false,
+  "one_colour_filter_default": 0,
+  "host_tests": {
+    "sanitizers": "ASan/UBSan",
+    "code": "production scanout.inc, actual NVAccel frame lease, actual automatic-activation method",
+    "ggtt_randomized_cases": 5000,
+    "coverage": [
+      "overflow and aperture bounds",
+      "unused GGTT reservation",
+      "mode rollback with no free GGTT range",
+      "latched flip before reuse",
+      "mode-change exclusion",
+      "unknown DMA quarantine and retained prepared pages",
+      "foreign PTE ownership",
+      "stale frame tokens",
+      "allocation failure before acquire",
+      "legacy ABI fallback",
+      "ordinary activation order/failure/stop"
+    ]
   },
-  "physical_laptop_boot_tested": false,
-  "intel_panel_acceleration_enabled": false,
-  "private_virtual_variant_in_release": false,
-  "optional_path": "Optional/NMIntelFB.kext",
-  "default_choice": "No",
-  "reused_driver_release": "v2.6.5-nvk",
-  "base_sha256": "11b6031cc295c1a5bf4a1008fbe8b8703a3256cd2a8647f4a4d5069e4a264322",
-  "real_bundle_signed_sha256": "2415e7ef83107cfdde1bcfa89b2dbfe1d853d8570bfce9067ce28251fde7fdf6"
+  "python_tests": {
+    "intel_panel_control": 8,
+    "intel_panel_install": 13,
+    "package_zink": 22,
+    "stage_package": 27
+  },
+  "retained_regressions": [
+    "iop_flip_gate",
+    "iop_present_path",
+    "iop_flip_outcome",
+    "surface_pending_lifetime"
+  ],
+  "builds": [
+    "NMIntelFB real",
+    "NVAccel macOS 15",
+    "NVAccel macOS 26"
+  ],
+  "dependencies": "NVIDIA 615.78.08 headers verified against pinned commit 1a82fbfda8f321b056eb3568850f9316c5e465c5",
+  "kernel_collection_link": "Recorded separately with the final local package; no live kernel collection changes",
+  "live_installation_changed": false,
+  "physical_laptop_tested": false,
+  "sleep_wake_supported": false,
+  "sequoia_hardware_tested_for_this_port": false,
+  "tahoe_hardware_tested_for_this_port": false,
+  "test_package": "2.6.6.71-nvk; local testing only pending user direction"
 }
