@@ -1,5 +1,6 @@
 /* SPDX-License-Identifier: MIT */
 #include "nvk_zink.h"
+#include "nvk_zink_private.h"
 #include "nvk_present.h"
 #include "zink/zink_screen.h"
 #include <stdio.h>
@@ -21,27 +22,6 @@
 #include <string.h>
 
 #define NVK_EXPORT __attribute__((visibility("default")))
-struct nvk_zink_screen {
-   struct pipe_frontend_screen fscreen;
-   int refs;
-   int uncertain;
-};
-struct nvk_zink_context {
-   struct pipe_frontend_drawable drawable;
-   struct nvk_zink_screen *screen;
-   struct st_visual visual;
-   struct st_context *st;
-   struct pipe_resource *attachments[ST_ATTACHMENT_COUNT];
-   unsigned width, height;
-   bool double_buffer;
-   bool front_flush_pending, front_flush_active;
-   struct pipe_resource *native_image;
-   struct {
-      IOSurfaceRef surface;
-      struct pipe_resource *buffer, *image;
-      struct pipe_fence_handle *fence;
-   } present[2];
-};
 static uint32_t next_drawable_id;
 static pthread_mutex_t screen_lock = PTHREAD_MUTEX_INITIALIZER;
 static struct nvk_zink_screen *process_screen;
@@ -212,6 +192,7 @@ nvk_zink_create_drawable_profile(unsigned width, unsigned height, struct nvk_zin
    pthread_mutex_unlock(&screen_lock);
    if (!ctx->st) { nvk_zink_destroy(ctx); return NULL; }
    ctx->st->frontend_context = ctx;
+   if (!nvk_iosurface_group_init(ctx, share)) { nvk_zink_destroy(ctx); return NULL; }
    return ctx;
 }
 
@@ -237,6 +218,7 @@ NVK_EXPORT void nvk_zink_destroy(struct nvk_zink_context *ctx)
 {
    if (!ctx || p_atomic_read(&ctx->screen->uncertain)) return;
    if (ctx->st) {
+      if (!nvk_iosurface_group_release(ctx)) return;
       nvk_zink_present_release(ctx);
       if (p_atomic_read(&ctx->screen->uncertain)) return;
       if (st_api_get_current() == ctx->st) nvk_zink_make_current(NULL);

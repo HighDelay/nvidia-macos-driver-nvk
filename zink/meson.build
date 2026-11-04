@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: MIT
 libnvk_zink = shared_library(
-  'nvk_zink', ['nvk_zink.c', 'nvk_present.c'],
+  'nvk_zink', ['nvk_zink.c', 'nvk_present.c', 'nvk_iosurface.c'],
   include_directories : [inc_include, inc_src, inc_mesa, inc_gallium, inc_gallium_aux, inc_gallium_drivers, inc_vulkan_util, include_directories('../../drivers/zink')],
   gnu_symbol_visibility : 'hidden',
   link_with : [libglapi, libgallium, libmesa],

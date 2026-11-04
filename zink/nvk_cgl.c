@@ -7,6 +7,7 @@
 #include <OpenGL/gl.h>
 #include <dlfcn.h>
 #include <execinfo.h>
+#include <malloc/malloc.h>
 #include <pthread.h>
 #include <stdatomic.h>
 #include <stdbool.h>
@@ -52,6 +53,12 @@ struct nvk_cgl_bridge {
    unsigned pending_width, pending_height;
    GLint native_x, native_y;
    struct native_cleanup *cleanup_reserve;
+   void **integer_original, **integer_zink;
+   const GLubyte **api_extensions;
+   char *api_extension_string;
+   char api_version_string[128], api_glsl_string[64];
+   GLint api_version, api_extension_count;
+   bool api_ready;
    struct nvk_cgl_bridge *next;
 };
 struct dispatch_entry { const char *name; size_t offset; void *adapter; };
@@ -68,6 +75,11 @@ static int materialize(struct nvk_cgl_bridge *b);
 static void release_gpu_present(struct nvk_cgl_bridge *b);
 static void drain_native_cleanups(struct nvk_cgl_bridge *b);
 static int present_drawable(CGLContextObj context);
+static void install_integer_dispatch(struct nvk_cgl_bridge *b);
+static bool select_integer_dispatch(struct nvk_cgl_bridge *b, bool zink);
+static void release_integer_dispatch(struct nvk_cgl_bridge *b);
+static int initialize_capabilities(struct nvk_cgl_bridge *b);
+#include "cgl_api.inc"
 void nvk_cgl_install_lwjgl_appkit(void);
 int nvk_cgl_obs_compatibility_enabled(void);
 
@@ -154,6 +166,7 @@ static struct nvk_cgl_bridge *bridge_current(void *engine)
        !nvk_zink_make_current(thread_bridge->zink)) {
       fail("No attached Zink context current on this thread"); return NULL;
    }
+   if (!initialize_capabilities(thread_bridge)) return NULL;
    unsigned width = thread_bridge->width, height = thread_bridge->height;
    GLint native_x = 0, native_y = 0;
    pthread_mutex_lock(&bridges_lock);
@@ -234,6 +247,93 @@ static void flush_front_buffer(struct nvk_cgl_bridge *b)
    nvk_zink_end_front_flush(b->zink, presented);
 }
 
+static int prepare_iosurface_flush(struct nvk_cgl_bridge *b)
+{
+   return nvk_zink_flush_iosurfaces(b->zink) || fail("IOSurface GPU publication failed");
+}
+
+static void refresh_iosurface_bindings(struct nvk_cgl_bridge *b, GLenum target, int framebuffer)
+{
+   if (!nvk_zink_refresh_iosurfaces(b->zink,target,framebuffer))
+      fail("IOSurface GPU refresh failed");
+}
+
+static bool api_has_extension(struct nvk_cgl_bridge *b, const char *name)
+{
+   const char *const *list=b->legacy?api_compatibility_extensions:api_core_extensions;
+   size_t count=b->legacy?sizeof(api_compatibility_extensions)/sizeof(*list):sizeof(api_core_extensions)/sizeof(*list);
+   size_t low=0, high=count;
+   while (low<high) {
+      size_t middle=low+(high-low)/2; int order=strcmp(name,list[middle]);
+      if (!order) return true;
+      if (order<0) high=middle; else low=middle+1;
+   }
+   return false;
+}
+
+/* The framework's symbol loader cannot expose every API supported by Mesa.
+ * Advertise the intersection of real public adapters and Mesa capabilities,
+ * independently for each CGL context. The standalone Mesa API stays intact. */
+static int initialize_capabilities(struct nvk_cgl_bridge *b)
+{
+   if (b->api_ready) return 1;
+   void (*get)(GLenum,GLint *)=(void *)nvk_zink_get_proc_address("glGetIntegerv");
+   const GLubyte *(*string)(GLenum)=(void *)nvk_zink_get_proc_address("glGetString");
+   const GLubyte *(*indexed)(GLenum,GLuint)=(void *)nvk_zink_get_proc_address("glGetStringi");
+   GLint major=0,minor=0,count=0;get(GL_MAJOR_VERSION,&major);get(GL_MINOR_VERSION,&minor);get(GL_NUM_EXTENSIONS,&count);
+   if (count<0 || count>16384 || major<3) return fail("Unsupported Mesa capability table");
+   const GLubyte **extensions=calloc((size_t)count+1,sizeof(*extensions));
+   if (!extensions) return fail("Cannot allocate CGL capability table");
+   size_t bytes=1;GLint kept=0;
+   for (GLint i=0;i<count;++i) {
+      const GLubyte *name=indexed(GL_EXTENSIONS,(GLuint)i);
+      if (name && api_has_extension(b,(const char *)name)) { extensions[kept++]=name;bytes+=strlen((const char *)name)+1; }
+   }
+   char *all=malloc(bytes);
+   if (!all) { free(extensions);return fail("Cannot allocate CGL extension string"); }
+   char *next=all;
+   for (GLint i=0;i<kept;++i) {
+      if (i) *next++=' ';
+      size_t length=strlen((const char *)extensions[i]);memcpy(next,extensions[i],length);next+=length;
+   }
+   *next=0;
+   GLint version=major*10+minor,limit=b->legacy?api_compatibility_version:api_core_version;
+   b->api_version=version<limit?version:limit;
+   const char *mesa=(const char *)string(GL_VERSION),*suffix=mesa?strchr(mesa,' '):NULL;
+   snprintf(b->api_version_string,sizeof(b->api_version_string),"%d.%d%s",b->api_version/10,b->api_version%10,suffix?suffix:"");
+   unsigned glsl=b->api_version>=33?(unsigned)b->api_version*10: b->api_version==32?150:b->api_version==31?140:130;
+   snprintf(b->api_glsl_string,sizeof(b->api_glsl_string),"%u.%02u Mesa CGL",glsl/100,glsl%100);
+   b->api_extensions=extensions;b->api_extension_count=kept;b->api_extension_string=all;b->api_ready=true;
+   return 1;
+}
+
+static const GLubyte *capability_string(struct nvk_cgl_bridge *b, GLenum name)
+{
+   if (name==GL_VERSION) return (const GLubyte *)b->api_version_string;
+   if (name==GL_SHADING_LANGUAGE_VERSION) return (const GLubyte *)b->api_glsl_string;
+   if (name==GL_EXTENSIONS && b->legacy) return (const GLubyte *)b->api_extension_string;
+   const GLubyte *(*get)(GLenum)=(void *)nvk_zink_get_proc_address("glGetString");return get(name);
+}
+
+static const GLubyte *capability_string_indexed(struct nvk_cgl_bridge *b, GLenum name, GLuint index)
+{
+   const GLubyte *(*get)(GLenum,GLuint)=(void *)nvk_zink_get_proc_address("glGetStringi");
+   if (name!=GL_EXTENSIONS) return get(name,index);
+   if (index<(GLuint)b->api_extension_count) return b->api_extensions[index];
+   /* Ask Mesa for a definitely invalid index, preserving its GL error path. */
+   return get(name,UINT32_MAX);
+}
+
+static bool capability_parameter(struct nvk_cgl_bridge *b, GLenum name, GLint *value)
+{
+   switch (name) {
+   case GL_MAJOR_VERSION: *value=b->api_version/10;return true;
+   case GL_MINOR_VERSION: *value=b->api_version%10;return true;
+   case GL_NUM_EXTENSIONS: *value=b->api_extension_count;return true;
+   default: return false;
+   }
+}
+
 #include "cgl_dispatch.inc"
 _Static_assert(sizeof(entries) / sizeof(entries[0]) <= MAX_ENTRIES, "adapter inventory too large");
 
@@ -260,6 +360,7 @@ static bool native_surface_copy_context(void)
 
 static void use_original(struct nvk_cgl_bridge *b)
 {
+   select_integer_dispatch(b,false);
    if (b->automatic) {
       b->original[0] = b->engine;
       memcpy(b->original + 1, b->apple_back, PREFIX_BYTES - 8);
@@ -297,6 +398,104 @@ static void use_zink(struct nvk_cgl_bridge *b)
    for (size_t i = 0; i < sizeof(entries) / sizeof(entries[0]); ++i)
       *(void **)((char *)b->context + entries[i].offset) = entries[i].adapter;
    *(void **)((char *)b->context + 0x1278) = (void *)swap_drawable;
+   select_integer_dispatch(b,true);
+}
+
+/* CGLTexImageIOSurface2D sends an eight-word IOSurface packet through the
+ * GLI integer callback. Clone the context's callback vector: the original
+ * vector is shared by Apple's engines and must never be edited globally. */
+static void ***integer_dispatch_slot(struct nvk_cgl_bridge *b)
+{
+   char *meta=*(char **)((char *)b->context+PREFIX_BYTES);
+   if (!meta) return NULL;
+   char *items=*(char **)(meta+0x78);
+   int count=*(int16_t *)(meta+0x82);
+   if (!items || count<1 || count>16) return NULL;
+   for (int i=0;i<count;++i) {
+      char *entry=items+(size_t)i*0x1e90;
+      if (*(void **)entry==b->engine) return (void ***)(entry+0x10);
+   }
+   return NULL;
+}
+
+static int iosurface_integer(void *engine, unsigned parameter, const int *values)
+{
+   pthread_mutex_lock(&bridges_lock);
+   struct nvk_cgl_bridge *b=bridges;
+   while (b && b->engine!=engine) b=b->next;
+   int (*original)(void *,unsigned,const int *)=b && b->integer_original ? b->integer_original[9] : NULL;
+   pthread_mutex_unlock(&bridges_lock);
+   if (!b || !original) return kCGLBadContext;
+   if (parameter!=910) return original(engine,parameter,values);
+   if (!values) return kCGLBadAddress;
+   CGLContextObj previous=CGLGetCurrentContext();
+   struct nvk_zink_context *previous_zink=nvk_zink_get_current();
+   bool borrowed=previous!=b->context;
+   if (borrowed) {
+      if (CGLLockContext(b->context)) return kCGLBadContext;
+      if (previous) CGLRetainContext(previous);
+      if (CGLSetCurrentContext(b->context)) {
+         if (previous) CGLReleaseContext(previous);
+         CGLUnlockContext(b->context); return kCGLBadContext;
+      }
+   }
+   int result=kCGLBadState;
+   if (bridge_current(engine)) {
+      IOSurfaceRef surface=IOSurfaceLookup((uint32_t)values[0]);
+      if (surface) {
+         result=nvk_zink_bind_iosurface(b->zink,(unsigned)values[1],(unsigned)values[2],
+            values[3],values[4],(unsigned)values[5],(unsigned)values[6],surface,(unsigned)values[7]);
+         CFRelease(surface);
+      } else result=kCGLBadValue;
+   }
+   if (borrowed) {
+      CGLError restored=CGLSetCurrentContext(previous);
+      int mesa_restored=nvk_zink_make_current(previous_zink);
+      if (!mesa_restored) nvk_zink_make_current(NULL);
+      if (previous) CGLReleaseContext(previous);
+      CGLUnlockContext(b->context);
+      if (restored || !mesa_restored) result=kCGLBadContext;
+   }
+   return result;
+}
+
+static bool named_callback(void *pointer, const char *name)
+{
+   Dl_info info={0};
+   return pointer && dladdr(pointer,&info) && info.dli_sname && !strcmp(info.dli_sname,name);
+}
+
+static void install_integer_dispatch(struct nvk_cgl_bridge *b)
+{
+   void ***slot=integer_dispatch_slot(b);
+   if (!slot || !*slot || !malloc_zone_from_ptr(*slot)) return;
+   size_t bytes=malloc_size(*slot);
+   if (bytes<16*sizeof(void *) || bytes>4096 ||
+       !named_callback((*slot)[4],"gliCreateContext") ||
+       !named_callback((*slot)[6],"gliDestroyContext") ||
+       !named_callback((*slot)[9],"gliSetInteger") ||
+       !named_callback((*slot)[15],"gliGetVersion")) return;
+   void **copy=malloc(bytes); if (!copy) return;
+   memcpy(copy,*slot,bytes); copy[9]=(void *)iosurface_integer;
+   b->integer_original=*slot; b->integer_zink=copy;
+   *slot=copy;
+}
+
+static bool select_integer_dispatch(struct nvk_cgl_bridge *b, bool zink)
+{
+   if (!b->integer_zink) return true;
+   void ***slot=integer_dispatch_slot(b);
+   if (!slot || (*slot!=b->integer_zink && *slot!=b->integer_original)) return false;
+   *slot=zink?b->integer_zink:b->integer_original;
+   return true;
+}
+
+static void release_integer_dispatch(struct nvk_cgl_bridge *b)
+{
+   /* Keep the clone alive if an unexpected carrier layout prevents proving
+    * that Apple's callback vector has been restored. */
+   if (select_integer_dispatch(b,false)) free(b->integer_zink);
+   b->integer_zink=NULL;
 }
 
 /* GLD context creation runs before gliInitDispatchTable. The 24H32 and 25G241
@@ -364,6 +563,7 @@ static int materialize(struct nvk_cgl_bridge *b)
                                             alpha_bits > 0);
    pthread_mutex_unlock(&bridges_lock);
    if (!b->zink) return fail("Cannot create automatic Zink context");
+   install_integer_dispatch(b);
    return 1;
 }
 
@@ -392,6 +592,8 @@ EXPORT void nvk_cgl_destroy_gld(void *driver)
       if (b->present_fbo) glDeleteFramebuffers(1, &b->present_fbo);
    }
    nvk_zink_destroy(b->zink);
+   release_integer_dispatch(b);
+   free(b->api_extensions);free(b->api_extension_string);
    free(b->present_pixels);
    free(b->cleanup_reserve);
    free(b);
@@ -447,6 +649,7 @@ EXPORT int nvk_cgl_attach(CGLContextObj context, unsigned width, unsigned height
    atomic_fetch_add(&generation, 1);
    pthread_mutex_unlock(&bridges_lock);
    use_zink(b);
+   install_integer_dispatch(b);
    CGLUnlockContext(context);
    return 1;
 }
@@ -708,6 +911,7 @@ static int present_drawable(CGLContextObj context)
    if (!context || context != CGLGetCurrentContext()) return fail("Present requires the context current");
    struct nvk_cgl_bridge *b = bridge_current(*(void **)context);
    if (!b) return 0;
+   if (!prepare_iosurface_flush(b)) return 0;
    drain_native_cleanups(b);
    if (b->apple_uncertain) return fail("Apple presentation completion uncertain; resources quarantined");
    if (!b->present_configured) {
@@ -860,6 +1064,8 @@ EXPORT int nvk_cgl_detach(CGLContextObj context)
    if (b->present_texture) glDeleteTextures(1, &b->present_texture);
    if (b->present_fbo) glDeleteFramebuffers(1, &b->present_fbo);
    nvk_zink_destroy(b->zink);
+   release_integer_dispatch(b);
+   free(b->api_extensions);free(b->api_extension_string);
    free(b->present_pixels);
    free(b->cleanup_reserve);
    free(b);

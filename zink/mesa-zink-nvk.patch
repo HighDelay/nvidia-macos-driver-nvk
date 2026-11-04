@@ -345,3 +345,32 @@
              simple_mtx_unlock(&real->lock);
              p_atomic_dec(&real->u.real.map_count);
              return NULL;
+--- a/src/gallium/drivers/zink/zink_types.h
++++ b/src/gallium/drivers/zink/zink_types.h
+@@ -1267,6 +1267,12 @@
+ /* "gfx" includes mesh here */
+ struct zink_resource {
+    struct threaded_resource base;
++#if defined(NVK_ZINK_NVK)
++   /* Only IOSurface-backed images opt into write-generation tracking. */
++   uint32_t nvk_iosurface_tracked;
++   uint64_t nvk_iosurface_writes;
++   struct zink_context *nvk_iosurface_writer;
++#endif
+ 
+    enum pipe_format internal_format:16;
+ 
+--- a/src/gallium/drivers/zink/zink_resource.h
++++ b/src/gallium/drivers/zink/zink_resource.h
+@@ -172,5 +172,11 @@
+ zink_resource_usage_set(struct zink_resource *res, struct zink_batch_state *bs, bool write)
+ {
+    zink_bo_usage_set(res->obj->bo, bs, write);
++#if defined(NVK_ZINK_NVK)
++   if (write && p_atomic_read(&res->nvk_iosurface_tracked)) {
++      p_atomic_set(&res->nvk_iosurface_writer, bs->ctx);
++      p_atomic_inc(&res->nvk_iosurface_writes);
++   }
++#endif
+    res->obj->unsync_access = false;
+ }

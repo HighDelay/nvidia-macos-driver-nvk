@@ -5,6 +5,7 @@ import json
 from pathlib import Path
 import re
 import subprocess
+from opengl_api import supported
 
 
 PROTOTYPE = (r'(?:GLAPI|extern)\s+([^;{}]+?)\s+(?:APIENTRY\s+)?(gl\w+)\s*'
@@ -104,6 +105,19 @@ def main():
     for slot, names in shared.items():
         if len({signature(prototypes[n][0], prototypes[n][2]) for n in names}) != 1:
             raise SystemExit(f'Incompatible shared GL dispatch slot {slot:#x}: {names}')
+    contract = json.loads((args.probe.parent/'cgl-api-requirements.json').read_text())
+    capabilities = {}
+    policy = ['/* SPDX-License-Identifier: Apache-2.0',
+              ' * Copyright 2013-2020 The Khronos Group Inc.',
+              ' * Derived API metadata intersected with recovered public dispatch. */']
+    for profile in ('core', 'compatibility'):
+        version, extensions = supported(contract, slots, profile)
+        capabilities[profile] = {'version': version, 'extensions': extensions}
+        policy += [f'static const unsigned api_{profile}_version = {version};',
+                   f'static const char *const api_{profile}_extensions[] = {{']
+        policy += ['  '+json.dumps(name)+',' for name in extensions]
+        policy += ['};']
+    (args.output/'cgl_api.inc').write_text('\n'.join(policy)+'\n')
     wrappers = ['/* Generated from public Khronos prototypes and local slot observations. */']
     rows = []
     for slot, aliases in shared.items():
@@ -126,6 +140,10 @@ def main():
                 '  delete_object(' + names[0] + ');']
         elif name == 'glSwapAPPLE':
             wrappers += ['  nvk_cgl_present(nvk_bridge->context);']
+        elif name == 'glGetString':
+            wrappers += [f'  return capability_string(nvk_bridge, {names[0]});']
+        elif name == 'glGetStringi':
+            wrappers += [f'  return capability_string_indexed(nvk_bridge, {names[0]}, {names[1]});']
         else:
             # Mesa and Apple use pointer-sized GLhandleARB on macOS, including
             # output arrays. Shared core slots above use GLuint declarations;
@@ -133,7 +151,18 @@ def main():
             wrappers += [f'  {ret} (*nvk_func)({params}) = (void *)nvk_bridge->procs[{len(rows)}];',
                          f'  if (!nvk_func) {{ missing_entrypoint("{name}");' +
                          (' return; }' if ret == 'void' else ' return 0; }')]
+            if name in {'glGetIntegerv','glGetInteger64v','glGetFloatv','glGetDoublev','glGetBooleanv'}:
+                value = '!!nvk_value' if name == 'glGetBooleanv' else 'nvk_value'
+                wrappers += ['  GLint nvk_value;',
+                             f'  if (capability_parameter(nvk_bridge, {names[0]}, &nvk_value)) {{ *{names[1]} = {value}; return; }}']
+            if set(aliases) & {'glFlush', 'glFinish', 'glFlushRenderAPPLE', 'glFinishRenderAPPLE', 'glFenceSync'}:
+                wrappers += ['  if (!prepare_iosurface_flush(nvk_bridge))' +
+                             (' return;' if ret == 'void' else ' return 0;')]
             wrappers += [f'  {"" if ret == "void" else "return "}nvk_func({", ".join(names)});']
+            if set(aliases) & {'glBindTexture', 'glBindTextureEXT'}:
+                wrappers += [f'  refresh_iosurface_bindings(nvk_bridge, {names[0]}, 0);']
+            if set(aliases) & {'glBindFramebuffer', 'glBindFramebufferEXT'}:
+                wrappers += [f'  refresh_iosurface_bindings(nvk_bridge, {names[0]}, 1);']
             if set(aliases) & {'glFlush', 'glFinish', 'glFlushRenderAPPLE', 'glFinishRenderAPPLE'}:
                 wrappers += ['  flush_front_buffer(nvk_bridge);']
         wrappers += ['}']
@@ -146,6 +175,8 @@ def main():
         'headers': ['gl3.h', 'gl.h', 'glext.h'],
         'context_prefix_bytes': 0x1e80, 'slots': slots,
         'aliases': {hex(slot): names for slot, names in shared.items() if len(names) > 1},
+        'capabilities': capabilities,
+        'registry_sha256': contract['registry_sha256'],
         'excluded': excluded,
         'limitations': ['Offsets are local OS observations, not a stable Apple ABI.',
                         'Absent symbols and empty compatibility stubs are explicitly excluded.',

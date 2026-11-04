@@ -9,6 +9,7 @@ import re
 import subprocess
 import tarfile
 import tempfile
+from opengl_api import requirements
 
 MESA_COMMIT = '17ca6174dcc6cb22059ac343bc29f8af7800f42e'
 ARCHIVE_SHA256 = '1328a4aaba2260c005ff46c88d572403f0b677cd87580050f4d1bfafe56388f0'
@@ -17,7 +18,8 @@ ARCHIVE_SHA256 = '1328a4aaba2260c005ff46c88d572403f0b677cd87580050f4d1bfafe56388
 # line endings differ. Keep accepting existing verified build inputs too.
 ARCHIVE_SHA256_CRLF = '79c8a65a5a5cf6968368e0b7338726465fc21444cc5d5583716eaf685ce879cf'
 ROOT = Path(__file__).resolve().parents[1]
-FRONTEND = ('nvk_zink.c', 'nvk_zink.h', 'nvk_present.c', 'nvk_present.h', 'meson.build', 'zink_sync_probe.c')
+FRONTEND = ('nvk_zink.c', 'nvk_zink.h', 'nvk_zink_private.h', 'nvk_iosurface.c',
+            'nvk_present.c', 'nvk_present.h', 'meson.build', 'zink_sync_probe.c')
 
 
 def digest(data):
@@ -78,6 +80,11 @@ def prepare(source, archive=None):
     for name in FRONTEND:
         directory = 'tools' if name == 'zink_sync_probe.c' else 'zink'
         write_changed(target/name,(ROOT/directory/name).read_bytes())
+    registry = source/'src/mesa/glapi/glapi/registry/gl.xml'
+    contract = requirements(registry)
+    contract.update(mesa_commit=MESA_COMMIT, registry_sha256=digest(registry.read_bytes()),
+                    registry_license='Apache-2.0', registry_copyright='Copyright 2013-2020 The Khronos Group Inc.')
+    write_changed(target/'cgl-api-requirements.json', (json.dumps(contract,sort_keys=True)+'\n').encode())
     identity['overlay_sha256'] = digest(patch.read_bytes())
     identity['frontend_sha256'] = {name:digest((target/name).read_bytes()) for name in FRONTEND}
     (target/'MESA-SOURCE.json').write_text(json.dumps(identity,indent=2)+'\n')

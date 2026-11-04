@@ -23,6 +23,51 @@ uses the actual old snapshot as its explicit three-way base and records the
 new upstream head as a parent; do not replay already integrated changes from
 the rewritten history. The preceding 2.6.4 base was `f95f4d2`.
 
+## Native Zink IOSurface texture interop and CGL capabilities, 2026-11-04
+
+Keep `CGLTexImageIOSurface2D` on Zink for supported rectangle/color/plane
+bindings. Clone the validated context-local GLI callback allocation and replace
+only integer parameter 910 handling, preserving the original callback for all
+other parameters and restoring its vector for Apple presentation and teardown.
+Do not globally interpose a loader, modify Apple's framework, or disable Zink
+for Avalonia/Ryujinx. The private callback layout still needs validation on
+other OS versions; no exact-build activation guard is added.
+
+Import the IOSurface host pages and copy to/from the private Zink image on the
+GPU. Keep locks, resources, context sharing, row/plane offsets, seeds and GPU
+fences paired. Flush, finish and GL sync creation publish this context's tracked
+writes. Texture/framebuffer rebinding refreshes externally changed storage;
+reject conflicting unflushed ownership. Retain deleted textures through queued
+writes, including Avalonia's delete-before-flush order. Rebinding/redefinition
+must invalidate framebuffer attachments and sampler views. Noncurrent teardown
+temporarily binds the correct Mesa context, drains writes and releases its
+texture references before restoring the previous binding. Completion uncertainty
+retains the imports and quarantines the screen rather than freeing busy pages.
+Only IOSurface images enable Zink's write-generation tracking; normal resources
+retain their existing path and no-interop flush/bind calls return immediately.
+
+Keep the CGL capability filter paired with this interop. On the affected host,
+Skia rejects Mesa's advertised 4.6 interface because Apple's public loader
+cannot provide required functions. Use the pinned Khronos registry and recovered
+public dispatch to compute version/extension coverage, then intersect that with
+each Mesa context. All typed version/count queries and indexed/legacy extension
+strings must agree, including GL errors for invalid queries. The tested framework
+covers 4.1 core / 3.2 compatibility. This changes CGL reporting, not the standalone
+Mesa API or its rendering backend. Preserve the existing OBS compatibility policy.
+
+Ryujinx 1.3.3 now imports its UI surfaces on a normal launch with the installed
+Zink libraries. The user confirms rendering and response on RTX 2060 SUPER /
+Tahoe 26.7.1 / 8 GiB BAR1, while reporting remaining UI quirks with Apple's
+renderer as well. Its own Skia library fails interface validation with the
+preceding capabilities and passes validation/context creation after filtering.
+Focused GPU tests cover input/output, padding, orientation, external updates,
+shared/noncurrent contexts, deleted/replaced textures, FBO/sampler invalidation,
+R8/RG8 NV12 planes, caller state, GL fences and noncurrent teardown. Retain the
+three preceding large-resize failures described below. Compositor capture
+rechecks are skipped when this session lacks screen-recording permission.
+Sequoia, other GPUs, game emulation and OBS through native interop are untested.
+No release is prepared for this local trial.
+
 ## Zink window presentation and late view attachment, 2026-11-04
 
 Honor `CGLFlushDrawable`/Cocoa `flushBuffer` when the target context is not

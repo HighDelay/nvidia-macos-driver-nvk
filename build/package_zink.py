@@ -20,7 +20,7 @@ ROOT = Path(__file__).resolve().parents[1]
 BASE_RUNTIME = Path('Library/GPUBundles/nvmtl')
 RUNTIME = BASE_RUNTIME / 'zink'
 ZINK_FILES = ('libnvk_zink_vulkan.dylib', 'libnvk_renderer.dylib', 'NATIVE-BUILD.json', 'libnvk_zink.dylib', 'libnvk_cgl.dylib', 'nvk_zink.h', 'nvk_cgl.h',
-              'zink_probe', 'zink_sync_probe', 'zink_native_present_probe', 'cgl_renderer_probe', 'cgl_zink_probe', 'cgl_zink_legacy_probe', 'cgl_iosurface_probe', 'obs_zink_policy_probe', 'cgl_zink_window_probe', 'cgl_zink_front_probe', 'cgl-os-build.txt', 'cgl-dispatch-map.json', 'ZINK-BUILD.json')
+              'zink_probe', 'zink_sync_probe', 'zink_native_present_probe', 'cgl_renderer_probe', 'cgl_zink_probe', 'cgl_zink_legacy_probe', 'cgl_iosurface_probe', 'cgl_iosurface_interop_probe', 'obs_zink_policy_probe', 'cgl_zink_window_probe', 'cgl_zink_front_probe', 'cgl-os-build.txt', 'cgl-dispatch-map.json', 'cgl-api-requirements.json', 'ZINK-BUILD.json')
 
 
 def run(*args):
@@ -198,10 +198,10 @@ def stage(base, zink, output, components=None, native_gld=False, records=None):
         source_dir = runtime / 'zink-source'
         if source_dir.exists(): shutil.rmtree(source_dir)
         source_dir.mkdir()
-        for name in ('nvk_zink.c', 'nvk_zink.h', 'nvk_cgl.c', 'nvk_cgl.h', 'appkit.m', 'nvk_cgl_gld.h', 'nvk_present.c', 'nvk_present.h', 'native_drawable.m', 'native_drawable.h',
+        for name in ('nvk_zink.c', 'nvk_zink.h', 'nvk_zink_private.h', 'nvk_iosurface.c', 'nvk_cgl.c', 'nvk_cgl.h', 'appkit.m', 'nvk_cgl_gld.h', 'nvk_present.c', 'nvk_present.h', 'native_drawable.m', 'native_drawable.h',
                      'gld_bridge.c', 'meson.build', 'mesa-zink-nvk.patch'):
             shutil.copy2(ROOT / 'zink' / name, source_dir / name)
-        for name in ('build_zink.sh', 'prepare_zink.py', 'build_cgl_zink.sh', 'generate_cgl_dispatch.py',
+        for name in ('build_zink.sh', 'prepare_zink.py', 'opengl_api.py', 'build_cgl_zink.sh', 'generate_cgl_dispatch.py',
                      'build_gld_bridge.sh', 'generate_gld_forward.py', 'build_zink_vulkan.py', 'record_zink_runtime.py'):
             shutil.copy2(ROOT / 'build' / name, source_dir / name)
         for name in ('Install.command', 'Uninstall.command', 'Verify.command'):

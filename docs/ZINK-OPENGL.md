@@ -101,8 +101,13 @@ Vulkan maps. The local Tahoe machine currently has 8 GiB BAR1; the maintainer
 also previously confirmed Minecraft with a 256 MiB BAR1 configuration.
 
 The adapter covers core 3.2/4.1 and legacy compatibility CGL contexts through the
-entrypoints exposed by the current Apple SDK/framework. Mesa reporting OpenGL
-4.6 does not give an application every 4.6 entrypoint through Apple's framework.
+entrypoints exposed by the current Apple SDK/framework. CGL reports the version
+and extensions those entrypoints actually cover: **4.1 core and 3.2 compatibility**
+on the tested framework. A build-time check uses the pinned Khronos registry
+and recovered dispatch map; unsupported functions and empty Apple stubs cannot
+qualify an extension. Version, GLSL and extension queries agree. The standalone
+Mesa API retains its own capabilities. This prevents Skia rejecting an interface
+that advertises unavailable 4.2+ functions.
 RGB/RGBA8 windows, opaque/transparent alpha, ordinary CGL swaps, resize, sharing
 and thread migration have focused tests. Stereo, multisampled/float drawables,
 pbuffers, full-screen transitions, sandboxed clients, other GPUs and multiple
@@ -136,12 +141,35 @@ Zink. `NVKZINK_REQUIRE_GPU=1` makes the standalone probe reject missing GPU-copy
 support; `NVKZINK_RGBX=1` tests alpha-less drawables. These names intentionally
 survive the installed Metal plugin's filtering of internal `NVK_` variables.
 
+### Native IOSurface textures
+
+`CGLTexImageIOSurface2D` now binds rectangle textures to IOSurface storage while
+rendering stays on Zink. GPU copies import and publish shared host pages; there
+is no CPU pixel conversion or frame readback. Supported formats include BGRA8,
+RGBA8/16F/32F, normalized and packed color formats, and individual R/RG planes
+such as NV12's R8/RG8 planes, subject to the renderer's format support. This does
+not perform YUV color conversion or import depth/compressed/multisample textures.
+
+Producer flush/finish and GL fences publish writes before another client reads
+them. After an external producer flushes or unlocks a changed surface, rebinding
+its texture or attached framebuffer refreshes the image. Keep normal CGL sharing
+and synchronization rules; concurrent unsynchronized writers are rejected.
+Deleted textures retain their surface through queued writes, covering Avalonia's
+delete-before-flush order. Failed imports leave the previous binding intact;
+uncertain GPU completion retains resources and stops the affected Zink screen.
+
+The CGL bridge clones a validated per-context integer callback vector and restores
+the original vector during Apple presentation and teardown. It does not replace
+OpenGL.framework, globally interpose `dlsym`, or opt Ryujinx out of Zink. Ryujinx
+1.3.3's UI renders and responds on RTX 2060 SUPER / Tahoe 26.7.1 after a normal
+launch. The user also sees its remaining UI quirks with Apple's renderer; game
+emulation and this new interop path on Sequoia/other GPUs are not validated here.
+
 ### OBS display capture compatibility
 
-OBS 33.0.1 needs two compatibility measures on the tested Intel Tahoe/NVIDIA
-system. Its OpenGL capture textures fail to import through
-`CGLTexImageIOSurface2D` while the context uses Zink. Its ScreenCaptureKit source
-also requests RGBA16F frames, which fail to start with “The stream is nil” even
+OBS 33.0.1 retains its previously tested compatibility mode. Before native
+IOSurface texture support, its Zink capture imports failed. Its ScreenCaptureKit
+source also requests RGBA16F frames, which fail to start with “The stream is nil” even
 with Apple's OpenGL renderer. Separate diagnostics receive BGRA8 frames and
 verify Apple's BGRA8/RGBA16F texture imports successfully.
 
@@ -153,7 +181,8 @@ renderer and changes its RGBA16F capture request to **8-bit BGRA SDR**. It is
 checked only for the `com.obsproject.obs-studio` application; other applications
 continue to select Zink. OBS 33.0.1's moving desktop preview is user-confirmed on
 RTX 2060 SUPER / Tahoe 26.7.1. HDR capture, encoding and streaming need separate
-testing. This is a compatibility path, not native Zink IOSurface import support.
+testing. The compatibility mode continues using Apple's renderer independently
+of the new native import support; OBS capture through Zink needs separate testing.
 
 To turn the mode off, quit OBS and run:
 

@@ -32,6 +32,9 @@ clang -arch x86_64 -mmacosx-version-min=15.5 -std=c11 -Wall -Wextra -Werror -Wno
 clang -arch x86_64 -mmacosx-version-min=15.5 -std=c11 -Wall -Wextra -Werror -Wno-deprecated-declarations \
   "$REPO/tools/cgl_iosurface_probe.c" -framework OpenGL -framework IOSurface -framework CoreVideo -framework CoreFoundation \
   -o "$ZINK_OUTPUT/cgl_iosurface_probe"
+clang -arch x86_64 -mmacosx-version-min=15.5 -std=c11 -O2 -Wall -Wextra -Werror -Wno-deprecated-declarations \
+  "$REPO/tools/cgl_iosurface_interop_probe.c" -framework OpenGL -framework IOSurface -framework CoreVideo -framework CoreFoundation \
+  -o "$ZINK_OUTPUT/cgl_iosurface_interop_probe"
 clang -arch x86_64 -mmacosx-version-min=15.5 -fobjc-arc -O2 -Wall -Wextra -Werror -Wno-deprecated-declarations \
   "$REPO/tools/obs_zink_policy_probe.m" -framework Cocoa -framework OpenGL -framework ScreenCaptureKit -framework CoreVideo \
   -o "$ZINK_OUTPUT/obs_zink_policy_probe"
@@ -46,6 +49,6 @@ clang++ -arch x86_64 -mmacosx-version-min=15.5 -std=c++17 -fobjc-arc -O2 \
   "$REPO/tools/zink_native_present_probe.mm" -I"$REPO/zink" -I"${VULKAN_HEADERS:-$HOME/Vulkan-Headers/include}" \
   -framework Cocoa -framework OpenGL -framework QuartzCore -o "$ZINK_OUTPUT/zink_native_present_probe"
 cp "$CGL_BUILD/cgl-dispatch-map.json" "$ZINK_OUTPUT/"
-for name in cgl_zink_probe cgl_zink_legacy_probe cgl_iosurface_probe obs_zink_policy_probe cgl_zink_window_probe cgl_zink_front_probe zink_native_present_probe; do codesign --force --sign - "$ZINK_OUTPUT/$name"; done
+for name in cgl_zink_probe cgl_zink_legacy_probe cgl_iosurface_probe cgl_iosurface_interop_probe obs_zink_policy_probe cgl_zink_window_probe cgl_zink_front_probe zink_native_present_probe; do codesign --force --sign - "$ZINK_OUTPUT/$name"; done
 python3 "$REPO/build/record_zink_runtime.py" "$ZINK_OUTPUT" cgl
 echo "Native CGL adapters generated on macOS $CGL_OS_BUILD: $ZINK_OUTPUT/libnvk_cgl.dylib"

@@ -45,6 +45,15 @@ int nvk_zink_readback(struct nvk_zink_context *ctx, void *pixels,
 int nvk_zink_readback_bottom_up(struct nvk_zink_context *ctx, void *pixels,
                                  size_t size, size_t stride);
 #ifdef __APPLE__
+/* CGL-compatible status code (zero on success). The caller binds a named
+ * rectangle texture and keeps ctx current. The surface remains live across
+ * external writers; bind notifications refresh it, and flush publishes GPU
+ * writes before handing ownership to external consumers. */
+int nvk_zink_bind_iosurface(struct nvk_zink_context *, unsigned target,
+                             unsigned internal_format, int width, int height,
+                             unsigned format, unsigned type, IOSurfaceRef, unsigned plane);
+int nvk_zink_flush_iosurfaces(struct nvk_zink_context *);
+int nvk_zink_refresh_iosurfaces(struct nvk_zink_context *, unsigned target, int framebuffer);
 /* Optional diagnostic observer. The queue is externally locked during the
  * callback. 1 = verified, 0 = safe diagnostic failure, -1 = uncertain GPU work.
  * Gameplay leaves this unset; diagnostic readback is separate pixel traffic. */

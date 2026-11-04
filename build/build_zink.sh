@@ -31,6 +31,7 @@ ninja -C "$ZINK_BUILD" -j "${ZINK_BUILD_JOBS:-4}" src/gallium/targets/nvk-zink/l
 cp "$ZINK_BUILD/src/gallium/targets/nvk-zink/libnvk_zink.dylib" "$ZINK_OUTPUT/"
 cp "$ZINK_BUILD/src/gallium/targets/nvk-zink/zink_sync_probe" "$ZINK_OUTPUT/"
 cp "$REPO/zink/nvk_zink.h" "$ZINK_OUTPUT/"
+cp "$MESA_SOURCE/src/gallium/targets/nvk-zink/cgl-api-requirements.json" "$ZINK_OUTPUT/"
 install_name_tool -id @rpath/libnvk_zink.dylib "$ZINK_OUTPUT/libnvk_zink.dylib"
 install_name_tool -add_rpath "${ZINK_VULKAN_RUNTIME:-/Library/GPUBundles/nvmtl/zink}" "$ZINK_OUTPUT/libnvk_zink.dylib"
 codesign --force --sign - "$ZINK_OUTPUT/libnvk_zink.dylib"
