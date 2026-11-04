@@ -301,6 +301,13 @@ bundle. Never use this shim for WindowServer or register it system-wide.
 The native probe reads a separate diagnostic GPU buffer to verify pixels; that
 readback is not part of gameplay presentation.
 
+The native resize checks also cover odd/tiny windows, overlapping scissor clears,
+transparent output and forced host-page fallback. AppKit may constrain a requested
+large window to an odd height. Three earlier reported resize failures came from
+an off-by-one expected scissor boundary in this probe; they pass after correcting
+the expected image, with the installed driver libraries unchanged. Pixel checks
+remain exact, and presentation dimensions must match the rendered frame.
+
 ## Packaging and installation
 
 Start with a checksum-verified **complete fork package**, including Minecraft,

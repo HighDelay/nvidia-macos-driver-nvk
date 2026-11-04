@@ -19,6 +19,7 @@
 static unsigned verified;
 static unsigned host_verified;
 static unsigned red = 255, green_value = 255;
+static unsigned drawn_width, drawn_height;
 static bool transparent;
 static int reject(const nvk_zink_present_event *) { return 0; }
 static int uncertain(const nvk_zink_present_event *) { return -1; }
@@ -43,6 +44,7 @@ static void check_swap_interval(NSOpenGLView *view, CGLContextObj context, GLint
 static void check(VkResult status) { require(status == VK_SUCCESS, "Vulkan diagnostic operation failed"); }
 static void draw_pattern(unsigned width, unsigned height)
 {
+   drawn_width = width; drawn_height = height;
    /* Different colors per frame catch reuse of an obsolete front/back image. */
    red = 64 + (verified % 8) * 19; green_value = 128 + (verified % 5) * 23;
    glViewport(0,0,width,height); glClearColor(red/255.0f,0,0,0); glClear(GL_COLOR_BUFFER_BIT);
@@ -55,6 +57,8 @@ static int observe(const nvk_zink_present_event *event)
 {
    bool uncertain = false;
    try {
+      require(event->width == drawn_width && event->height == drawn_height,
+              "Native drawable dimensions differ from the rendered frame");
       auto gdpa = (PFN_vkGetDeviceProcAddr)event->get_device_proc_addr;
       auto device = (VkDevice)event->device; auto queue = (VkQueue)event->queue;
       D(CreateBuffer); D(DestroyBuffer); D(GetBufferMemoryRequirements); D(AllocateMemory); D(FreeMemory);
@@ -95,11 +99,14 @@ static int observe(const nvk_zink_present_event *event)
       unsigned mismatches = 0;
       for (unsigned y = 0; y < event->height; ++y) for (unsigned x = 0; x < event->width; ++x) {
          unsigned source_y = event->height - y - 1;
-         bool green = x >= event->width/4 && x < event->width*3/4 &&
-                      source_y >= event->height/4 && source_y < event->height*3/4;
+         /* Match glScissor(origin, extent), including integer truncation.
+          * floor(3*h/4) differs from floor(h/4)+floor(h/2) when h%4==3.
+          * AppKit can constrain a requested 960px window to an odd height. */
+         bool green = x >= event->width/4 && x < event->width/4 + event->width/2 &&
+                      source_y >= event->height/4 && source_y < event->height/4 + event->height/2;
          bool blue = x >= event->width-8 && source_y >= event->height-8;
          const unsigned char expected[] = {(unsigned char)(blue ? 255 : 0),
-            (unsigned char)(green ? green_value : 0), (unsigned char)(green || blue ? 0 : red),
+            (unsigned char)(green && !blue ? green_value : 0), (unsigned char)(green || blue ? 0 : red),
             (unsigned char)(transparent ? 0 : 255)};
          const unsigned char *pixel = (const unsigned char *)mapping + (size_t)y * event->row + x*4;
          if (memcmp(pixel, expected, 4) && ++mismatches <= 3)
@@ -123,10 +130,10 @@ static int observe(const nvk_zink_present_event *event)
 int main(int argc, char **argv)
 {
    @autoreleasepool { try {
-      require(argc >= 3, "usage: native-probe libnvk_cgl.dylib nvk_icd.json [transparent] [automatic] [worker] [reject|uncertain] [default] [windows] [swap-interval] [pacing] [large-resize]");
+      require(argc >= 3, "usage: native-probe libnvk_cgl.dylib nvk_icd.json [transparent] [automatic] [worker] [reject|uncertain] [default] [windows] [swap-interval] [pacing] [large-resize|odd-resize]");
       setvbuf(stdout, nullptr, _IOLBF, 0);
       bool automatic = false, worker = false, defaults = false, windows = false;
-      bool swap_interval = false, pacing = false, large_resize = false;
+      bool swap_interval = false, pacing = false, large_resize = false, odd_resize = false;
       int failure = 0;
       for (int i = 3; i < argc; ++i) {
          if (!strcmp(argv[i], "transparent")) transparent = true;
@@ -139,6 +146,7 @@ int main(int argc, char **argv)
          else if (!strcmp(argv[i], "swap-interval")) swap_interval = true;
          else if (!strcmp(argv[i], "pacing")) { pacing = true; swap_interval = true; }
          else if (!strcmp(argv[i], "large-resize")) large_resize = true;
+         else if (!strcmp(argv[i], "odd-resize")) odd_resize = true;
          else require(false, "Unknown option");
       }
       if (defaults) unsetenv("NVKZINK_PRESENT"); else setenv("NVKZINK_PRESENT", "native", 1);
@@ -177,6 +185,8 @@ int main(int argc, char **argv)
       if (large_resize) sizes = {NSMakeSize(128,128),NSMakeSize(854,480),NSMakeSize(1920,960),
          NSMakeSize(854,480),NSMakeSize(1920,1080),NSMakeSize(1280,720),
          NSMakeSize(1920,960),NSMakeSize(640,480)};
+      if (odd_resize) sizes = {NSMakeSize(127,95),NSMakeSize(131,99),NSMakeSize(17,15),
+         NSMakeSize(31,31),NSMakeSize(129,97),NSMakeSize(854,481),NSMakeSize(640,480)};
       for (const NSSize size : sizes) {
          [window setContentSize:size]; [context update];
          for (unsigned i=0;i<3;++i) {
@@ -185,7 +195,7 @@ int main(int argc, char **argv)
             unsigned width=backing.size.width,height=backing.size.height;
             /* Automatic mode must pick up AppKit's new size itself. Calling
              * the bridge resize API here would hide a broken update hook. */
-            if (!(large_resize && automatic)) require(resize(cgl,width,height),error());
+            if (!((large_resize || odd_resize) && automatic)) require(resize(cgl,width,height),error());
             draw_pattern(width,height);
             require(!glGetError(), "GL draw");
             if (i & 1) require(present(cgl),error());

@@ -23,6 +23,28 @@ uses the actual old snapshot as its explicit three-way base and records the
 new upstream head as a parent; do not replay already integrated changes from
 the rewritten history. The preceding 2.6.4 base was `f95f4d2`.
 
+## Native resize probe correction, 2026-11-04
+
+The three previously retained large-resize failures were false positives in
+`tools/zink_native_present_probe.mm`, reproduced with unchanged installed driver
+binaries. AppKit constrains the requested 1920x960 window to 1920x939 on this
+desktop. The green scissor starts at `height/4` with extent `height/2`; its
+exclusive end is their sum. The old expected end `height*3/4` included an extra
+row when the height modulo four was three. A separate expectation also failed
+to give the last blue clear priority where the two rectangles overlap.
+
+Keep exact origin-plus-extent bounds and blue-over-green ordering, require the
+native event dimensions to match the rendered frame, and retain byte-for-byte
+pixel checks. Do not loosen tolerances or alter presentation code to satisfy
+an incorrect expected image. Explicit, automatic GLD and forced system-page
+large-resize cases now pass. New odd/tiny resize cases cover both backings and
+transparent output. The correction changes diagnostics only; the driver
+libraries, capture policy, synchronization and GPU-copy paths remain unchanged.
+All 43 runtime cases pass without the optional screen-capture tests. A separate
+negative control with a deliberately shortened scissor still fails pixel checks.
+Validation is on RTX 2060 SUPER / Tahoe 26.7.1 / 8 GiB BAR1; forced family-VRAM
+refusal tests the host-page fallback, not a physical small-BAR reconfiguration.
+
 ## Native Zink IOSurface texture interop and CGL capabilities, 2026-11-04
 
 Keep `CGLTexImageIOSurface2D` on Zink for supported rectangle/color/plane
@@ -62,8 +84,8 @@ renderer as well. Its own Skia library fails interface validation with the
 preceding capabilities and passes validation/context creation after filtering.
 Focused GPU tests cover input/output, padding, orientation, external updates,
 shared/noncurrent contexts, deleted/replaced textures, FBO/sampler invalidation,
-R8/RG8 NV12 planes, caller state, GL fences and noncurrent teardown. Retain the
-three preceding large-resize failures described below. Compositor capture
+R8/RG8 NV12 planes, caller state, GL fences and noncurrent teardown. The initially
+retained large-resize failures are resolved by the probe correction above. Compositor capture
 rechecks are skipped when this session lacks screen-recording permission.
 Sequoia, other GPUs, game emulation and OBS through native interop are untested.
 No release is prepared for this local trial.
@@ -108,10 +130,10 @@ CGL, Cocoa and the public bridge API, checking Mesa restoration before a GL
 adapter could restore it lazily. Late-view cases verify the initial GPU fallback
 and subsequent native copies, preserve forced GPU mode, and flush a context
 before it has any drawable. Pre-repair libraries fail these lifecycle checks.
-The retained suite passes except three large-resize variants: all three also
-fail on the installed preceding runtime with identical pixel mismatches at
-1920x960. Retain that unresolved baseline result rather than claiming a clean
-large-window qualification. After installing the clean matched libraries,
+The initial suite retained three identical large-resize failures on both the
+preceding and candidate runtimes. The later probe investigation above identifies
+incorrect expectations at the actual 1920x939 size, and all three pass with the
+corrected test and unchanged installed driver. After installing the clean matched libraries,
 the user confirms that AnyDesk's remote picture renders and keeps updating
 on a normal launch. Both `NVKZINK_DISABLE` and `NVKZINK_PRESENT` are unset;
 the viewer reports Mesa's compatibility renderer and loads the repaired Zink
