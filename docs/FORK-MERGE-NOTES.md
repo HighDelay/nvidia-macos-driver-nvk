@@ -59,7 +59,9 @@ fixed-address GGTT overwrite, automatic wake rewrite or NVRM binary-offset patch
 The existing NVRM copy-engine API is reused. Sleep/wake and physical laptop
 boot/brightness/acceleration remain unverified for this port. Keep current
 NVMTL/cache/browser/capture, cursor teardown, Zink, gaming and small-BAR fixes.
-Only prepare a local test package while laptop and Resolve testing is pending.
+The isolated Tahoe collection links all five kexts without installing them.
+Laptop testing remains pending. After these checks the user requested no further
+local build work and cleanup of old build outputs; no release is requested.
 
 ## Resolve wrapped uniform loads, upstream PR #490, 2026-11-04
 
@@ -90,10 +92,10 @@ cache-budget, capture, Zink or gaming-provider source changes are needed.
 
 The author reports testing Resolve 21.1.2 on RTX 3060 Laptop / Tahoe 26.7.2;
 local validation above uses synthetic shaders and GPU readback, not Resolve.
-Application playback/preview will be tested on another machine. Preserve the
-content-hashed translator cache identity; restart Resolve after updating, without
-manually deleting shader caches. Prepare only the local test package until the
-user approves a release.
+On 2026-11-04 the user confirmed that Resolve is working on the other machine;
+its GPU, OS and Resolve versions were not supplied. Preserve the content-hashed
+translator cache identity; restart Resolve after updating, without manually
+deleting shader caches. The user does not need another local Resolve build.
 
 ## Native resize probe correction, 2026-11-04
 

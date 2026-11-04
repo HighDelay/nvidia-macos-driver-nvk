@@ -43,11 +43,22 @@
     "NVAccel macOS 26"
   ],
   "dependencies": "NVIDIA 615.78.08 headers verified against pinned commit 1a82fbfda8f321b056eb3568850f9316c5e465c5",
-  "kernel_collection_link": "Recorded separately with the final local package; no live kernel collection changes",
+  "kernel_collection_link": {
+    "passed": true,
+    "host": "Tahoe 26.7.1",
+    "five_kexts_present": true,
+    "temporary_collection_sha256": "97a87c6e814728f19fe79a934de5b4658e7b7a58b06734f8ff00b51870e134da",
+    "temporary_collection_bytes": 19038208,
+    "root_owned_private_repository": true,
+    "live_files_unchanged": true,
+    "installed": false,
+    "sequoia_kernel_link_tested": false,
+    "record": "out/records/intel-panel-20261104/KERNEL-LINK-RESULT.json"
+  },
   "live_installation_changed": false,
   "physical_laptop_tested": false,
   "sleep_wake_supported": false,
   "sequoia_hardware_tested_for_this_port": false,
   "tahoe_hardware_tested_for_this_port": false,
-  "test_package": "2.6.6.71-nvk; local testing only pending user direction"
+  "delivery": "Source integration only at user request; completed local build/test artifacts removed during cleanup. Detailed validation records retained."
 }
