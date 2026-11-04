@@ -20,7 +20,7 @@ the repositories and artifacts that need changing.
 
 | Fork | Release contents |
 | --- | --- |
-| [HighDelay/nvidia-macos-driver](https://github.com/HighDelay/nvidia-macos-driver) | Complete installable driver archive with top-level `pkgroot/`, native Minecraft runtime, compact Wine/NVK provider and matched DXVK pair; standalone compact provider archive and `SHA256SUMS`, following the previous Wine/NVK release. |
+| [HighDelay/nvidia-macos-driver](https://github.com/HighDelay/nvidia-macos-driver) | Complete installable driver archive with top-level `pkgroot/`, native Minecraft runtime, compact Wine/NVK provider and matched DXVK pair; standalone compact provider archive, separate optional ARM translation scripts archive and `SHA256SUMS`, following the previous Wine/NVK release. |
 | [HighDelay/yaagl-nvk](https://github.com/HighDelay/yaagl-nvk) | Separate Global and CN launcher archives containing ZZZ, GI and HSR, with Start commands, required launcher data, guides and `SHA256SUMS`. |
 | [HighDelay/dxvk-nvk](https://github.com/HighDelay/dxvk-nvk) | Matched x64 `d3d11.dll` and `dxgi.dll`, license, source patch, build provenance, setup notes and `SHA256SUMS`. |
 | [HighDelay/vkd3d-nvk](https://github.com/HighDelay/vkd3d-nvk) | Matched x64 `d3d12.dll` and `d3d12core.dll`, upstream license/source identity, build provenance, Wine/NVK setup notes and `SHA256SUMS`. Reuse unchanged upstream binaries only with verified provenance. |
@@ -51,6 +51,31 @@ the repositories and artifacts that need changing.
    Present the complete draft and validation limits, then wait for the user's explicit
    approval before publishing. After approval, publish a regular public release marked
    Latest, with draft and prerelease disabled, unless the user requests otherwise.
+
+### ARM translation release asset
+
+Standing user instruction, updated 2026-11-04: include the separate ARM translation
+scripts package in each driver release, alongside the driver and compact provider.
+Use `nvidia-arm-scripts-<driver-version>.tar.gz` with top-level
+`NVIDIA-ARM-Scripts/`, and include its digest in the release's shared `SHA256SUMS`.
+Keep it outside `pkgroot/`; installing the driver must not install the CPU translator.
+The scripts use the signed upstream runtime directly, without requiring `1401.app`
+or changing the GPU driver or OpenCore.
+
+Build with `build/package_arm_apps.py --version <driver-version>`. The scripts
+package version follows the driver; the bundled runtime retains its independently
+pinned upstream version. Verify its SHA-256, upstream Ed25519 signature, internal
+checksums, licenses and helper signature/architecture. Run the wrapper tests and
+isolated install/check/uninstall checks; record application translation results
+separately and retain upstream CPU, disk-space and application-support limits.
+Reuse unchanged runtime bytes only with verified provenance and hashes.
+
+Stage this archive with the other assets under `out/`. Preserve the exact validated
+local archives for the later draft rather than rebuilding solely to upload them.
+Include a short setup link to [the ARM scripts guide](tools/arm-apps/README.md) in
+the release notes. Verify uploaded sizes/digests and obtain explicit publication
+approval for the complete draft, including this asset. Local-test and release-hold
+instructions apply to the ARM package too.
 
 ### Driver release format
 

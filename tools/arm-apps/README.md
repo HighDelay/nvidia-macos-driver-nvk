@@ -51,5 +51,12 @@ scripts use the repository's PolyForm Noncommercial license.
 To build this separate package from the driver source checkout:
 
 ```sh
-python3 build/package_arm_apps.py --output "$HOME/Downloads/NVIDIA-ARM-Scripts-build"
+python3 build/package_arm_apps.py --version 2.7.1 --output out/arm-scripts-2.7.1
 ```
+
+Each driver release includes `nvidia-arm-scripts-<driver-version>.tar.gz` as a
+separate optional asset, listed in the shared release `SHA256SUMS`. Its package
+version follows the driver; the signed upstream runtime has its own pinned version.
+Keep the archive outside the driver's `pkgroot/` and retain validated local assets
+for the later draft. Publishing requires approval of the complete draft; see the
+[release policy](https://github.com/HighDelay/nvidia-macos-driver-nvk/blob/main/AGENTS.md#arm-translation-release-asset).
