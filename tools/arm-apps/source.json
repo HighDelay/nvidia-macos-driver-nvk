@@ -1,0 +1,11 @@
+{
+  "schema_version": 1,
+  "version": "2.7.0",
+  "archive": "nullmoth-arm-2.7.0.tar.gz",
+  "url": "https://nullmothsystems.com/download/arm/nullmoth-arm-2.7.0.tar.gz",
+  "signature_url": "https://nullmothsystems.com/download/arm/nullmoth-arm-2.7.0.tar.gz.sig",
+  "sha256": "eb4331ba373e0dccc3cf241ef2115ec1b8f88b38ecf3762a3d70a5312b5fa81c",
+  "release_key_ed25519_base64": "ztPmcj+mcHYM1X2lrp24yjq0xBuzke7gh5XJ3E2fd4E=",
+  "installer_source": "https://github.com/nullmoth/1401/blob/470db400ae18b02093c7d93daf4ed3e43a28a45d/mac/Sources/ArmApps.swift",
+  "license": "PolyForm-Noncommercial-1.0.0; LLVM and other third-party licenses remain in the unchanged archive"
+}

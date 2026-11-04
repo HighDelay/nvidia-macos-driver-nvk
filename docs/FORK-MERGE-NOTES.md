@@ -105,6 +105,28 @@ a separate ARM script package; no driver release or installable driver archive
 is prepared by this integration. Local details are under
 `/Volumes/Games/upstream-271-review-20261104/` and compact records under `out/records/`.
 
+## Separate ARM app scripts, 2026-11-04
+
+`build/package_arm_apps.py` creates an independent scripts archive, never a driver
+payload. Pin the current signed NullMoth ARM 2.7.0 archive and the upstream 1401
+release key in `tools/arm-apps/`; do not require 1401.app or let its stock-driver
+installer replace this fork. The packaging and install paths authenticate the
+same byte buffer with SHA-256 and Ed25519 before extraction. Reject traversal,
+links, devices, duplicate names and Finder metadata. Privileged extraction uses a
+fresh root-only folder; install with umask 022 and keep `/Library/NullMoth`
+traversable. Translation/list/remove run as the user through `nm-arm` with direct
+arguments. Runtime uninstall never passes a user-writable translated-app manifest
+to root: it keeps translated copies, which the user can remove with `nm-arm remove`.
+
+Validate the wrapper with the macOS CLT's Python 3.9 as well as the host Python.
+Twenty-nine host cases cover authentication, archive boundaries, opt-in privilege
+and literal app paths. The unchanged upstream runtime installs and passes its
+CPU/CLT/LLVM check in a user-owned test prefix on i5-11400F / Tahoe 26.7.1. The
+synthetic ARM-only app reaches the wrapper correctly but upstream refuses to
+translate it because this volume has 6 GiB free and requires at least 8 GiB.
+Keep that safeguard: this is not a successful translated-app or GUI/game test.
+No system translator, driver, OpenCore or application was installed by these checks.
+
 ## Optional Intel panel bridge and RAM copies, 2026-11-04
 
 Adapt `kitsuneislife/nmx-intel` at `b4bb3a0c653248ce125ce7d36b920d216e53c16f`:

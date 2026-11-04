@@ -44,6 +44,9 @@ configuration, driver installation and boot-menu recovery. Keep the OpenCore
 boot disk connected while using it. This fork's Zink and native gaming runtimes
 require **this fork's package**, installed using the method above.
 
+For ARM-only apps without 1401, use the [separate ARM scripts](tools/arm-apps/README.md).
+They install the independent translator and leave the GPU driver/OpenCore alone.
+
 ## Uninstall / recovery
 
 ```sh
