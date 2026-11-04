@@ -23,6 +23,40 @@ uses the actual old snapshot as its explicit three-way base and records the
 new upstream head as a parent; do not replay already integrated changes from
 the rewritten history. The preceding 2.6.4 base was `f95f4d2`.
 
+## Resolve wrapped uniform loads, upstream PR #490, 2026-11-04
+
+Backport [upstream PR #490](https://github.com/nullmoth/nvidia-macos-driver/pull/490),
+commit `ca2eecdf57009ed0c9879f3d7a74cbd3c3a33a2a`, credited to WatchAndyTW.
+Its base is the same integrated `470e391`; the backport applies without textual
+conflicts and does not merge unrelated upstream changes.
+
+Resolve's display vertex shader reads float4 values through a pointer to nested
+header structs containing `[4 x i32]`. Preserve the existing successful-load
+paths, then permit the zero-offset leading scalar array only when element count
+and lane width agree. Load that array through a correctly typed access chain
+and reinterpret individual lane bits. Do not skip a leading member, widen an
+array read, numerically convert integer bits to floats, or bitcast aggregate
+pointers. Keep the common predicate equivalent to the preceding bare-array path.
+
+The installed translator reproduces the reported rejection. The backport's
+Resolve-shaped vertex fixture translates and passes `spirv-val` for Vulkan 1.2.
+Eight focused wrapper/layout tests and 18 retained GL uniform/sampler/pointer
+tests pass, as do all 2,232 core library tests. Six GPU readback cases perform
+18 dispatches covering nested/single structs, trailing fields, arrays of arrays,
+matching float lanes, dynamic slot indices and exact signed-zero/NaN/infinity
+bits. All 21 retained GPU readbacks also pass on RTX 2060 SUPER / Tahoe 26.7.1.
+Across a 426-entry local shader sample, all 415 successful outputs are
+byte-identical and the 11 failures remain identical; this is not a complete cache
+sweep. The wrapper ABI retains all 20 exports. No plugin/kernel, binding/resource,
+cache-budget, capture, Zink or gaming-provider source changes are needed.
+
+The author reports testing Resolve 21.1.2 on RTX 3060 Laptop / Tahoe 26.7.2;
+local validation above uses synthetic shaders and GPU readback, not Resolve.
+Application playback/preview will be tested on another machine. Preserve the
+content-hashed translator cache identity; restart Resolve after updating, without
+manually deleting shader caches. Prepare only the local test package until the
+user approves a release.
+
 ## Native resize probe correction, 2026-11-04
 
 The three previously retained large-resize failures were false positives in

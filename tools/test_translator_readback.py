@@ -170,6 +170,23 @@ entry:
 !6 = !{{i32 3, !"air.buffer", !"air.location_index", i32 1, i32 1, !"air.read", !"air.address_space", i32 1, !"air.arg_type_size", i32 8, !"air.arg_type_align_size", i32 8, !"air.arg_type_name", !"ulong*", !"air.arg_name", !"input"}}
 '''
 
+# Struct-wrapped uniform slots must preserve the LLVM layout and lane bits.
+wrapped = (ROOT/'translator/translator/tests/fixtures/buffers/wrapped_uniform_load.ll').read_text()
+kernels['wrapped-nested'] = wrapped
+kernels['wrapped-single'] = wrapped.replace('type { { [4 x i32] } }', 'type { [4 x i32] }').replace(
+    'i64 0, i32 0, i32 0, i64 1', 'i64 0, i32 0, i64 1')
+kernels['wrapped-trailing'] = wrapped.replace('type { { [4 x i32] } }', 'type { { [4 x i32] }, <4 x i32> }').replace(
+    '!"air.arg_type_size", i32 16, !"air.arg_type_align_size", i32 4',
+    '!"air.arg_type_size", i32 32, !"air.arg_type_align_size", i32 4')
+kernels['wrapped-array'] = wrapped.replace('[4 x i32]', '[2 x [4 x i32]]').replace(
+    'i64 0, i32 0, i32 0, i64 1', 'i64 0, i32 0, i32 0, i64 0, i64 1').replace(
+    '!"air.arg_type_size", i32 16, !"air.arg_type_align_size", i32 4',
+    '!"air.arg_type_size", i32 32, !"air.arg_type_align_size", i32 4')
+kernels['wrapped-float'] = wrapped.replace('[4 x i32]', '[4 x float]').replace('packed_uint4', 'packed_float4')
+bits = kernels['wrapped-float'].replace('<4 x float>', '<4 x i32>')
+bits = replace(bits, '  %pos = fadd fast <4 x i32> %copyload, %rect\n', '')
+kernels['wrapped-bitcopy'] = replace(bits, 'store <4 x i32> %pos', 'store <4 x i32> %copyload')
+
 translator = ctypes.CDLL(str(args.translator.resolve()))
 translator.nvmtl_translate.argtypes = [ctypes.c_char_p, ctypes.c_char_p, ctypes.POINTER(ctypes.c_void_p), ctypes.POINTER(ctypes.c_size_t), ctypes.c_void_p, ctypes.c_size_t]
 translator.nvmtl_translate.restype = ctypes.c_int

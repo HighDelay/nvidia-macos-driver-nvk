@@ -64,6 +64,9 @@ int main(int argc, char **argv) {
     std::vector<char> code((std::istreambuf_iterator<char>(input)), {});
     require(!code.empty(), "SPIR-V input");
     const std::string mode = argv[3];
+    const bool wrapped = mode.rfind("wrapped-", 0) == 0;
+    const float uniform_slots[][4] = {{0.25f,-1.5f,2.f,16.f},{4.f,2.5f,-3.f,0.125f},{-1.f,8.f,0.5f,-16.f}};
+    const uint32_t uniform_bits[] = {0x80000000u,0x7fc12345u,0xff800000u,0x3f800001u};
     nvk_queue queue{}; nvk_pipeline pipeline{};
     check(call_nvmtl_vk_queue_create(&queue), "queue");
     check(call_nvmtl_vk_compute_pipeline_create(code.data(), code.size(), &pipeline), "compute pipeline");
@@ -79,7 +82,12 @@ int main(int argc, char **argv) {
     const float texture_a[4] = {0.125f, 0.25f, 0.5f, 1.f};
     const float texture_b[4] = {0.75f, 0.5f, 0.25f, 0.f};
     nvk_cmdbuf command{};
-    if (mode == "forward0" || mode == "forward1") {
+    if (wrapped) {
+        const size_t stride = mode == "wrapped-trailing" || mode == "wrapped-array" ? 32 : 16;
+        for (unsigned slot = 0; slot < 3; ++slot)
+            memcpy((char *)buffers[1].map+(slot+1)*stride, uniform_slots[slot], 16);
+        if (mode == "wrapped-bitcopy") memcpy((char *)buffers[1].map+stride,uniform_bits,16);
+    } else if (mode == "forward0" || mode == "forward1") {
         ((uint64_t *)buffers[0].map)[0] = call_nvmtl_vk_buffer_address(&buffers[1]);
         ((uint64_t *)buffers[0].map)[1] = call_nvmtl_vk_buffer_address(&buffers[2]);
         ((float *)buffers[1].map)[0] = 4.25f;
@@ -130,9 +138,12 @@ int main(int argc, char **argv) {
         {1.f / 2046.f, 3.f / 2046.f, 5.f / 2046.f, 1.f / 6.f}};
     const uint16_t half_controls[][3] = {{0x3c00, 0x3800, 0}, {0x7e00, 0x3c00, 0x3800},
         {0xbc00, 0x4000, 0x3400}, {0x3800, 0x3800, 0x3800}, {0x7c00, 0xfc00, 1}};
-    const unsigned runs = mode == "pack10" ? sizeof(controls) / sizeof(controls[0])
+    const unsigned runs = wrapped ? 3 : mode == "pack10" ? sizeof(controls) / sizeof(controls[0])
         : mode == "pack565dyn" ? sizeof(half_controls) / sizeof(half_controls[0]) : 1;
     for (unsigned run = 0; run < runs; run++) {
+        if (wrapped) ((uint32_t *)buffers[1].map)[1] = run+1;
+        std::vector<char> input_snapshot;
+        if (wrapped) input_snapshot.assign((char *)buffers[1].map,(char *)buffers[1].map+4096);
         if (mode == "pack10") memcpy(buffers[1].map, controls[run], 16);
         if (mode == "pack565dyn") memcpy(buffers[1].map, half_controls[run], 6);
         check(call_nvmtl_vk_cmd_begin(&queue, &command), "command begin");
@@ -154,7 +165,17 @@ int main(int argc, char **argv) {
         call_nvmtl_vk_cmd_dispatch_threads(&command, &pipeline, threads, one);
         require(!command.nobind && !command.skipped, "dispatch recorded");
         check(call_nvmtl_vk_submit_wait_at(&command, "translator_readback"), "bounded compute completion");
-        if (mode == "forward0" || mode == "forward1") {
+        if (wrapped) {
+            if (mode == "wrapped-bitcopy") require(!memcmp(buffers[0].map,uniform_bits,16), "wrapped load preserves signed zero, NaN payload, infinity and adjacent float bits");
+            else for (unsigned i = 0; i < 4; ++i) {
+                float expected = uniform_slots[0][i]+uniform_slots[run][i];
+                if (((float *)buffers[0].map)[i] != expected)
+                    fprintf(stderr,"wrapped run %u lane %u: got %.9g expected %.9g\n",run,i,((float *)buffers[0].map)[i],expected);
+                require(((float *)buffers[0].map)[i] == expected,"wrapped uniform loads preserve slot stride, lane order and dynamic index");
+            }
+            for (unsigned i = 4; i < 4096/4; ++i) require(((uint32_t *)buffers[0].map)[i] == 0xa5a5a5a5,"wrapped output stays inside float4");
+            require(!memcmp(buffers[1].map,input_snapshot.data(),4096),"wrapped input is read-only");
+        } else if (mode == "forward0" || mode == "forward1") {
             require(((float *)buffers[3].map)[0] == (mode == "forward0" ? 17.5f : 4.25f), "forward address phi selects the actual source");
             require(((uint32_t *)buffers[3].map)[1] == 0xa5a5a5a5, "forward output bounds");
         } else if (mode == "alloca") {
