@@ -49,3 +49,8 @@ If the desktop cannot start:
 3. Before rebooting again, clear the flag with
    `nvram -d "7C436110-AB2A-4BBB-A880-FE41995C9F82:nullmoth-remove=1"`.
 4. Reinstall the previous working driver package.
+
+Optional HD Audio on Tahoe defaults to **No**, separately from the Intel panel.
+Use `sudo bash install.sh --audio=yes` to opt in or `--audio=no` to remove audio
+previously installed by this fork. Independent audio installations are preserved.
+See [optional audio](https://github.com/HighDelay/nvidia-macos-driver-nvk/blob/main/docs/OPTIONAL-AUDIO.md).

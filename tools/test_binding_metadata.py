@@ -16,7 +16,7 @@ embedded = (ROOT / 'plugin/NVMTLEmbedded.m').read_text()
 backend = (ROOT / 'plugin/nvmtl_vk.c').read_text()
 bind = method(embedded, 'void nvmtl_bind_embedded(')
 bind = bind[:bind.index('    extern int nvmtl_vk_emb_same')] + '    slow_path++;\n}\n'
-dictionary = method(embedded, 'void nvmtl_bind_embedded_dict(')
+dictionary = method(embedded, 'void nvmtl_bind_embedded_enc(')
 restore = '\n'.join(method(backend, name) for name in (
     'static int nvmtl_sampler_restore_on(', 'int nvmtl_vk_bind_parked_sampler(',
     'void nvmtl_vk_parked_samplers_keep('))
@@ -52,6 +52,10 @@ static int nvmtl_vk_bind_sampler(nvk_cmdbuf *c,uint32_t set,uint32_t index,nvk_s
 @implementation NVMTLCommandBuffer @end
 @interface NVMTLBuffer : NSObject @end
 @implementation NVMTLBuffer @end
+@interface NVMTLComputeCommandEncoder : NSObject { @public
+    unsigned _baN[NVMTL_NBUFAT]; NVMTLBuffer *_baObj[NVMTL_NBUFAT]; NSUInteger _baOff[NVMTL_NBUFAT];
+} @end
+@implementation NVMTLComputeCommandEncoder @end
 @interface NVMTLSamplerState : NSObject { @public nvk_sampler _s; } @end
 @implementation NVMTLSamplerState @end
 @interface NVMTLEmbeddedPlan : NSObject { @public BOOL wantSampler; uint32_t slot; } @end
@@ -104,12 +108,13 @@ int main(void) { @autoreleasepool {
     plan->wantSampler=NO;
     nvmtl_bind_embedded(cb,0,argument,NULL,NULL);
     assert(t.s[0][167].h==replacement.s && slow_path==2);
-    // The compute dictionary entry point skips its extra lookup once empty is known.
-    for(unsigned i=0;i<1000;i++) nvmtl_bind_embedded_dict(cb,0,empty,@{});
+    // The compute encoder entry point skips its extra lookup once empty is known.
+    NVMTLComputeCommandEncoder *encoder=[NVMTLComputeCommandEncoder new];
+    for(unsigned i=0;i<1000;i++) nvmtl_bind_embedded_enc(cb,0,empty,encoder);
     assert(empty->static_reads==1 && empty->plan_reads==1);
     NVMTLFunction *compute=function(@[],@[]);
-    nvmtl_bind_embedded_dict(cb,0,compute,@{});unsigned reads=compute->plan_reads;
-    nvmtl_bind_embedded_dict(cb,0,compute,@{});assert(compute->plan_reads==reads);
+    nvmtl_bind_embedded_enc(cb,0,compute,encoder);unsigned reads=compute->plan_reads;
+    nvmtl_bind_embedded_enc(cb,0,compute,encoder);assert(compute->plan_reads==reads);
     // Concurrent cold/warm readers share only the monotonic atomic empty flag.
     NVMTLFunction *shared=function(@[],@[]);
     dispatch_apply(128,dispatch_get_global_queue(QOS_CLASS_USER_INITIATED,0),^(size_t index) { @autoreleasepool {
@@ -121,7 +126,7 @@ int main(void) { @autoreleasepool {
     // Static-sampler opt-out still omits only static metadata; embedded work continues.
     static_enabled=NO;NVMTLFunction *disabled=function(@[@[@7,ss]],@[]);
     nvmtl_bind_embedded(cb,0,disabled,NULL,NULL);assert(disabled->_bindingMetadataEmpty && !disabled->static_reads);
-    puts("PASS: cold/warm empty metadata, 10000 lookup elisions, sampler restoration after shader/app changes, independent stages/functions, nonempty static/argument plans, compute dictionaries and concurrent readers");
+    puts("PASS: cold/warm empty metadata, 10000 lookup elisions, sampler restoration after shader/app changes, independent stages/functions, nonempty static/argument plans, compute encoders and concurrent readers");
 } }
 '''
 with tempfile.TemporaryDirectory(prefix='nvmtl-binding-metadata-') as directory:

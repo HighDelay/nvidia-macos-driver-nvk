@@ -35,7 +35,7 @@ fixture = r'''
 #define NVMTL_TABLES_PER_PAGE 256
 enum { NVMTL_E78_H3, E78C_SETREUSE, E78C_SETNEW };
 enum { NVMTL_SLOT_BUF=1 };
-''' + slot_type + '\n' + table_limit + '\n' + table_type + r'''
+''' + re.search(r'typedef struct \{ void \*mem;.*?\} hz_ent;', vk).group(0) + '\n' + slot_type + '\n' + table_limit + '\n' + table_type + r'''
 typedef struct { nvk_buffer buffer; } nvmtl_address_page;
 static nvk_buffer g_dummyBuf;
 static int enabled=1, dynamic=1, snapshots, allocations, copies;
@@ -196,6 +196,8 @@ int main(void) {
 
 iface = re.search(r'@interface NVMTLResSet : NSMutableSet .*?@end', header, re.S).group(0)
 impl = section(objects, '@implementation NVMTLResSet', '\n@end') + '\n@end\n'
+# the identity-hashed set the class allocates sits just above it in NVMTLObjects.m
+impl = objects[objects.index('static NSMutableSet *nvmtl_identity_set('):objects.index('@implementation NVMTLResSet')] + impl
 resources = r'''
 #import <Foundation/Foundation.h>
 #include <assert.h>
@@ -213,10 +215,13 @@ static void nvmtl_resref(id o,int d) { refs+=d; if(d<0) lastReleased=o; }
 @end
 int main(void) { @autoreleasepool {
     NVMTLResSet *set=[NVMTLResSet new]; EqualResource *a=[EqualResource new], *alias=[EqualResource new];
-    a->key=alias->key=1; [set addObject:a]; [set addObject:alias];
+    // Metal objects are equal only to themselves, so the set dedupes by identity: the same object twice is one
+    // member, and an equal-but-distinct object is a second member (it never stands in for the first)
+    a->key=alias->key=1; [set addObject:a]; [set addObject:a];
     assert(set.count==1 && refs==1);
     for(unsigned i=0;i<8;i++) assert(!set->_mru[i] || set->_mru[i]==(__bridge const void *)a);
-    [set removeObject:alias]; assert(!set.count && !refs && lastReleased==a);
+    [set removeObject:alias]; assert(set.count==1 && refs==1);
+    [set removeObject:a]; assert(!set.count && !refs && lastReleased==a);
     for(unsigned i=0;i<8;i++) assert(!set->_mru[i]);
     lastReleased=nil;
     for(unsigned i=0;i<32;i++) [set addObject:[NSObject new]];
@@ -226,7 +231,7 @@ int main(void) { @autoreleasepool {
     [set addObject:a]; assert(set.count==1 && refs==33);
     [set removeAllObjects]; assert(!set.count && refs==32);
     [taken removeAllObjects]; assert(!refs);
-    puts("PASS: MRU retains canonical members, equal-object removal, sealing, clearing, residency balance");
+    puts("PASS: MRU retains canonical members, identity membership, sealing, clearing, residency balance");
 } }
 '''
 

@@ -4,9 +4,33 @@ set -u
 # fixed PATH those resolve through whatever the caller exported, and kmutil
 # rebuilds the auxiliary kernel collection.
 PATH=/usr/bin:/bin:/usr/sbin:/sbin; export PATH
-# the NVIDIA driver only: the AMD/Intel GPU driver, the NPU driver and the audio driver are separate products with
-# their own uninstallers
+# NVIDIA, optional Intel panel, and audio explicitly installed by this fork.
+# Independent audio, AMD/Intel GPU and NPU installations remain external.
 KEXTS="NVRM NVAccel NVRMFB NVRMAGDC NVPrimarySelector NMIntelFB"; EXT=/Library/Extensions; GB=/Library/GPUBundles
+AUDIO_MARKER=/Library/NullMoth/nvidia-audio.sha256
+# Only a root-owned record matching the installed binary grants this installer
+# ownership. An independently installed or subsequently replaced audio driver
+# remains external. Keep this helper identical in install.sh and uninstall.sh.
+audio_managed() {
+  local p meta owner mode expected actual
+  [ -f "$AUDIO_MARKER" ] && [ -d "$EXT/NMXAudio.kext" ] || return 1
+  for p in /Library/NullMoth "$AUDIO_MARKER" "$EXT/NMXAudio.kext"; do
+    [ ! -L "$p" ] || return 1
+    meta=$(stat -f '%u %Lp' "$p" 2>/dev/null) || return 1
+    owner=${meta%% *}; mode=${meta#* }
+    [ "$owner" = 0 ] || return 1
+    case "$mode" in *[2367]?|*[2367]) return 1;; esac
+  done
+  p="$EXT/NMXAudio.kext/Contents/MacOS/NMXAudio"
+  [ -f "$p" ] && [ ! -L "$p" ] || return 1
+  expected=$(cat "$AUDIO_MARKER") || return 1
+  [ "${#expected}" = 64 ] || return 1
+  case "$expected" in *[!0-9a-f]*) return 1;; esac
+  actual=$(shasum -a 256 "$p" | awk '{print $1}') || return 1
+  [ "$expected" = "$actual" ]
+}
+AUDIO_MANAGED=0
+if audio_managed; then AUDIO_MANAGED=1; KEXTS="$KEXTS NMXAudio"; fi
 KC=/Library/KernelCollections/AuxiliaryKernelExtensions.kc
 K=/System/Library/Kernels/kernel
 KARG=(--allow-missing-kdk); [ -f "$K" ] && KARG+=(--kernel "$K")   # without a matching Kernel Debug Kit, kmutil needs --allow-missing-kdk
@@ -25,6 +49,7 @@ rollback_removal() {
   [ ! -e "$RB/com.nullmoth.osupdate.plist" ] || cp -p "$RB/com.nullmoth.osupdate.plist" /Library/LaunchDaemons/ || failed=1
   if [ -e "$RB/AuxiliaryKernelExtensions.kc" ]; then cp -p "$RB/AuxiliaryKernelExtensions.kc" "$KC" || failed=1
   else rm -f "$KC" || failed=1; fi
+  [ ! -f "$RB/nvidia-audio.sha256" ] || cp -p "$RB/nvidia-audio.sha256" "$AUDIO_MARKER" || failed=1
   return "$failed"
 }
 die() {
@@ -107,6 +132,17 @@ permanent_kext_path() {
 
 # Include only permanent installed paths in a collection that will survive this
 # process. A copied temporary repository leaves broken paths after cleanup.
+# Other NullMoth products can remain in the collection. Reject only the exact
+# bundle IDs this invocation is removing, not the vendor's entire namespace.
+collection_has_removed_ids() {
+  local ids k wanted
+  ids=$(printf '%s\n' "$1" | grep -oE '(com\.nullmoth\.[A-Za-z0-9_.-]+|org\.hackintosh\.experimental\.NVPrimarySelector)')
+  for k in $KEXTS; do
+    case "$k" in NVPrimarySelector) wanted=org.hackintosh.experimental.NVPrimarySelector;; *) wanted=com.nullmoth.$k;; esac
+    if printf '%s\n' "$ids" | grep -Fxq "$wanted"; then return 0; fi
+  done
+  return 1
+}
 KEEP_KEXT_ARGS=(); KEEP_KEXT_IDS=""
 keep_kext() {
   local path=$1 id=$2 parent
@@ -137,6 +173,7 @@ if [ -s "$KC" ]; then
     || die "cannot inspect the existing collection before preserving extensions"
   while IFS=$'\t' read -r external_id external_version external_path external_rest; do
     case "$external_path" in *.kext) ;; *) continue;; esac
+    if [ "$AUDIO_MANAGED" = 1 ] && [ "$external_id" = com.nullmoth.NMXAudio ]; then continue; fi
     case "$external_id" in com.nullmoth.NVRM|com.nullmoth.NVAccel|com.nullmoth.NVRMFB|com.nullmoth.NVRMAGDC|com.nullmoth.NMIntelFB|org.hackintosh.experimental.NVPrimarySelector) continue;; esac
     case " $KEEP_KEXT_IDS " in *" $external_id "*) continue;; esac
     case "$external_path" in /System/*) continue;; esac
@@ -152,7 +189,7 @@ else
   kmutil create -n aux --volume-root / ${KARG[@]+"${KARG[@]}"} -B $KB -S $KS --repository "$RB/repo" ${KEEP_KEXT_ARGS[@]+"${KEEP_KEXT_ARGS[@]}"} -A "$NEWKC" -z >/dev/null 2>&1 || die "kmutil could not rebuild the collection"
   [ -s "$NEWKC" ] || die "kmutil produced no removal collection"
   INS=$(kmutil inspect -a x86_64 -A "$NEWKC" --show-extension-info 2>/dev/null) || die "cannot inspect the removal collection"
-  printf '%s\n' "$INS" | grep -Eq 'com\.nullmoth|org\.hackintosh\.experimental\.NVPrimarySelector' && die "the removal collection still lists the NVIDIA driver or selector"
+  collection_has_removed_ids "$INS" && die "the removal collection still lists the NVIDIA driver or selector"
   for kept_id in $KEEP_KEXT_IDS; do
     printf '%s\n' "$INS" | awk '{print $1}' | grep -Fxq "$kept_id" || die "removal collection dropped $kept_id"
   done
@@ -172,11 +209,12 @@ for k in $KEXTS; do [ ! -e "$EXT/$k.kext" ] || ditto "$EXT/$k.kext" "$RB/$k.kext
 for b in NVMTLDriver.bundle NVIDIAShared.bundle nvmtl NVKZinkGLDriver.bundle nvmtl-allow.txt; do [ ! -e "$GB/$b" ] || ditto "$GB/$b" "$RB/$b" || die "cannot back up $b"; done
 [ ! -d /Library/NullMoth/nvfw ] || ditto /Library/NullMoth/nvfw "$RB/firmware-new" || die "cannot back up firmware"
 [ ! -d /Users/Shared/nvfw ] || ditto /Users/Shared/nvfw "$RB/firmware-old" || die "cannot back up legacy firmware"
-for f in /Library/NullMoth/kexts /Library/NullMoth/driver-version /Library/NullMoth/update-pending /Library/LaunchDaemons/com.nullmoth.osupdate.plist "$KC"; do
+for f in "$AUDIO_MARKER" /Library/NullMoth/kexts /Library/NullMoth/driver-version /Library/NullMoth/update-pending /Library/LaunchDaemons/com.nullmoth.osupdate.plist "$KC"; do
   [ ! -e "$f" ] || cp -Rp "$f" "$RB/" || die "cannot back up the removal state"
 done
 REMOVING=1
 for k in $KEXTS; do rm -rf "$EXT/$k.kext" || die "cannot remove $k"; done
+[ "$AUDIO_MANAGED" != 1 ] || rm -f "$AUDIO_MARKER" || die "cannot remove audio opt-in"
 for b in NVMTLDriver.bundle NVIDIAShared.bundle nvmtl NVKZinkGLDriver.bundle nvmtl-allow.txt; do rm -rf "$GB/$b" || die "cannot remove $b"; done
 rm -rf /Library/NullMoth/kexts /Library/NullMoth/nvfw /Library/NullMoth/licenses /Library/NullMoth/driver-version /Library/NullMoth/update-pending /Library/LaunchDaemons/com.nullmoth.osupdate.plist || die "cannot remove the cached driver or update switcher"
 # the firmware used to live here; an install no longer writes it, so take the leftover with us
@@ -199,7 +237,7 @@ else
 fi
 if [ -f "$KC" ]; then
   FINAL_INS=$(kmutil inspect -a x86_64 -A "$KC" --show-extension-info 2>/dev/null) || die "cannot verify the published removal collection"
-  printf '%s\n' "$FINAL_INS" | grep -Eq 'com\.nullmoth|org\.hackintosh\.experimental\.NVPrimarySelector' && die "the kernel collection still lists the NVIDIA driver or selector"
+  collection_has_removed_ids "$FINAL_INS" && die "the kernel collection still lists the NVIDIA driver or selector"
   for kept_id in $KEEP_KEXT_IDS; do
     printf '%s\n' "$FINAL_INS" | awk '{print $1}' | grep -Fxq "$kept_id" || die "published removal collection dropped $kept_id"
   done

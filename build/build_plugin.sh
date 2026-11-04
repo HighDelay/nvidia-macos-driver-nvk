@@ -10,7 +10,7 @@ RDEF=""; OPT=-O1
 until mkdir $L 2>/dev/null; do sleep 5; done; echo "build_plugin $C $$" > $L/owner; trap 'rm -rf "$L"' EXIT
 xcrun clang -arch x86_64 -bundle -fobjc-arc $OPT $RDEF -Wno-protocol -Wno-incomplete-implementation \
   -I"$HOME/Vulkan-Headers/include" -o $O/NVMTLDriver NVMTLDevice.m \
-  -framework Foundation -framework Metal -framework IOSurface -framework IOKit 2>$O/NVMTLDriver.err \
+  -framework Foundation -framework Metal -framework IOSurface -framework IOKit -framework MetalFX 2>$O/NVMTLDriver.err \
   || { echo "STOP: compile failed"; grep -A2 ': error:' $O/NVMTLDriver.err | head -30; exit 5; }
 codesign -f -s - $O/NVMTLDriver 2>/dev/null
 miss=0

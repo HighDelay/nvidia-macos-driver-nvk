@@ -4,19 +4,44 @@ set -u
 PATH=/usr/bin:/bin:/usr/sbin:/sbin; export PATH
 HERE=$(cd "$(dirname "$0")" && pwd)
 INTEL_PANEL_CHOICE=ask
+AUDIO_CHOICE=ask
 while [ "$#" != 0 ]; do
   case "$1" in
     --payload)
       [ "$#" -ge 2 ] && [ -d "$2" ] || { echo "STOP: --payload requires an existing package directory" >&2; exit 2; }
       HERE=$(cd "$2" && pwd) || exit 2; shift 2;;
+    --audio=yes) AUDIO_CHOICE=yes; shift;;
+    --audio=no) AUDIO_CHOICE=no; shift;;
     --intel-panel=yes) INTEL_PANEL_CHOICE=yes; shift;;
     --intel-panel=no) INTEL_PANEL_CHOICE=no; shift;;
-    *) echo "STOP: expected --payload directory or --intel-panel=yes|no" >&2; exit 2;;
+    *) echo "STOP: expected --payload directory, --intel-panel=yes|no or --audio=yes|no" >&2; exit 2;;
   esac
 done
 KEXTS="NVRM NVAccel NVRMFB NVRMAGDC"
 REMOVED_KEXTS=""
 EXT=/Library/Extensions; GB=/Library/GPUBundles; FW=/Library/NullMoth/nvfw; FWOLD=/Users/Shared/nvfw
+AUDIO_MARKER=/Library/NullMoth/nvidia-audio.sha256
+# Only a root-owned record matching the installed binary grants this installer
+# ownership. An independently installed or subsequently replaced audio driver
+# remains external. Keep this helper identical in install.sh and uninstall.sh.
+audio_managed() {
+  local p meta owner mode expected actual
+  [ -f "$AUDIO_MARKER" ] && [ -d "$EXT/NMXAudio.kext" ] || return 1
+  for p in /Library/NullMoth "$AUDIO_MARKER" "$EXT/NMXAudio.kext"; do
+    [ ! -L "$p" ] || return 1
+    meta=$(stat -f '%u %Lp' "$p" 2>/dev/null) || return 1
+    owner=${meta%% *}; mode=${meta#* }
+    [ "$owner" = 0 ] || return 1
+    case "$mode" in *[2367]?|*[2367]) return 1;; esac
+  done
+  p="$EXT/NMXAudio.kext/Contents/MacOS/NMXAudio"
+  [ -f "$p" ] && [ ! -L "$p" ] || return 1
+  expected=$(cat "$AUDIO_MARKER") || return 1
+  [ "${#expected}" = 64 ] || return 1
+  case "$expected" in *[!0-9a-f]*) return 1;; esac
+  actual=$(shasum -a 256 "$p" | awk '{print $1}') || return 1
+  [ "$expected" = "$actual" ]
+}
 KC=/Library/KernelCollections/AuxiliaryKernelExtensions.kc
 K=/System/Library/Kernels/kernel
 # macOS 13+ kmutil refuses to build any kernel collection without a Kernel Debug Kit matching the build unless it is told
@@ -50,6 +75,9 @@ rollback_install() {
   if [ -f "$BK/intel-panel-touched" ]; then
     case " $restore_kexts " in *' NMIntelFB '*) ;; *) restore_kexts="$restore_kexts NMIntelFB";; esac
   fi
+  if [ -f "$BK/audio-touched" ]; then
+    case " $restore_kexts " in *' NMXAudio '*) ;; *) restore_kexts="$restore_kexts NMXAudio";; esac
+  fi
   [ -z "$NEWKC" ] || rm -f "$NEWKC" || failed=1
   for k in $restore_kexts; do
     rm -rf "$EXT/$k.kext" || failed=1
@@ -74,6 +102,10 @@ rollback_install() {
   # the version record follows the files it describes, or Send logs names a version that is not installed
   if [ -f "$BK/driver-version" ]; then cp -p "$BK/driver-version" /Library/NullMoth/driver-version || failed=1
   else rm -f /Library/NullMoth/driver-version || failed=1; fi
+  if [ -f "$BK/audio-touched" ]; then
+    rm -f "$AUDIO_MARKER" || failed=1
+    [ ! -f "$BK/nvidia-audio.sha256" ] || cp -p "$BK/nvidia-audio.sha256" "$AUDIO_MARKER" || failed=1
+  fi
   return "$failed"
 }
 step() { echo; echo "== $*"; }; ok() { echo "   ok  $*"; }
@@ -152,6 +184,7 @@ kpath() {
     NVAccel) echo "$VAR/NVAccel.kext";;
     NVPrimarySelector) echo "$SELECTOR_SOURCE";;
     NMIntelFB) echo "$HERE/Optional/NMIntelFB.kext";;
+    NMXAudio) echo "$HERE/Optional/NMXAudio.kext";;
     *) echo "$HERE/Library/Extensions/$1.kext";;
   esac
 }
@@ -237,6 +270,42 @@ if [ "$INTEL_PANEL_CHOICE" = yes ]; then
 elif [ -d "$EXT/NMIntelFB.kext" ]; then
   REMOVED_KEXTS=NMIntelFB; INTEL_PANEL_TOUCHED=1
   ok "Intel panel support will be removed; the previous copy is backed up"
+fi
+# NMXAudio is a separate, optional HD Audio driver for Tahoe. Never infer an
+# opt-in from a detected controller or take ownership of another installation.
+AUDIO=0; AUDIO_TOUCHED=0; AUDIO_OWNED=0
+audio_managed && AUDIO_OWNED=1
+if [ "$AUDIO_CHOICE" = ask ] && [ "$AUDIO_OWNED" = 1 ]; then AUDIO_CHOICE=yes; fi
+if [ "$AUDIO_CHOICE" = ask ]; then
+  AUDIO_CHOICE=no
+  if [ "$MAJ" -ge 26 ] && [ -d "$HERE/Optional/NMXAudio.kext" ] && [ ! -e "$EXT/NMXAudio.kext" ] &&
+     ioreg -r -c IOPCIDevice -l -w0 2>/dev/null | grep -q '"class-code" = <00030400>'; then
+    echo
+    echo "Optional NMXAudio HD Audio driver (Tahoe only). Skip if your audio already works."
+    if [ -t 0 ]; then
+      printf 'Install the optional audio driver? [y/N] '
+      answer=""; IFS= read -r answer || answer=""
+      case "$answer" in y|Y|yes|YES|Yes) AUDIO_CHOICE=yes;; esac
+    else
+      echo "No interactive input: audio support skipped (use --audio=yes to opt in)."
+    fi
+  fi
+fi
+if [ "$AUDIO_CHOICE" = yes ]; then
+  [ "$MAJ" -ge 26 ] || die "the optional audio driver requires macOS Tahoe; use --audio=no on Sequoia"
+  [ "$AUDIO_OWNED" = 1 ] || { [ ! -e "$EXT/NMXAudio.kext" ] && [ ! -L "$EXT/NMXAudio.kext" ]; } \
+    || die "NMXAudio is installed independently or changed; it was left untouched (use --audio=no)"
+  [ -d "$HERE/Optional/NMXAudio.kext" ] && [ ! -L "$HERE/Optional/NMXAudio.kext" ] \
+    || die "this package lacks the optional audio driver"
+  [ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$HERE/Optional/NMXAudio.kext/Contents/Info.plist" 2>/dev/null)" = com.nullmoth.NMXAudio ] \
+    || die "invalid optional audio bundle identity"
+  ioreg -r -c IOPCIDevice -l -w0 2>/dev/null | grep -q '"class-code" = <00030400>' \
+    || die "no PCI HD Audio controller found; use --audio=no"
+  KEXTS="$KEXTS NMXAudio"; AUDIO=1; AUDIO_TOUCHED=1
+  ok "optional audio selected; existing driver-managed opt-ins are kept on updates"
+elif [ "$AUDIO_OWNED" = 1 ]; then
+  REMOVED_KEXTS="$REMOVED_KEXTS NMXAudio"; AUDIO_TOUCHED=1
+  ok "driver-managed audio will be removed; independent audio drivers are kept"
 fi
 GLD_BUNDLE=""
 if [ -d "$HERE/Library/GPUBundles/NVKZinkGLDriver.bundle" ]; then
@@ -441,6 +510,10 @@ step "4. back up what is there now -> $BK"
 printf '%s\n' "$BUILD" > "$BK/macos-build" || die "record backup macOS build"
 [ "$PRIMARY" != 1 ] || touch "$BK/primary-selector-used" || die "record primary selector backup"
 [ "$INTEL_PANEL_TOUCHED" != 1 ] || touch "$BK/intel-panel-touched" || die "record Intel panel rollback"
+if [ "$AUDIO_TOUCHED" = 1 ]; then
+  touch "$BK/audio-touched" || die "record audio rollback"
+  [ ! -f "$AUDIO_MARKER" ] || backup_copy "audio opt-in" cp -p "$AUDIO_MARKER" "$BK/nvidia-audio.sha256"
+fi
 CHANGED_KEXTS="$KEXTS${REMOVED_KEXTS:+ $REMOVED_KEXTS}"
 # ditto, not cp -Rp: cp re-applies file flags through symlinks and stopped on nvmtl/libvulkan.dylib with "chflags: Too
 # many levels of symbolic links" (Mac 1.10 logs 10-10, 2 uploads); ditto keeps links, flags and xattrs, as the restore does.
@@ -595,6 +668,9 @@ ok "installed"
 # the licences and notices of everything this package carries, beside the driver they cover
 if [ -d "$HERE/licenses" ]; then rm -rf /Library/NullMoth/licenses && ditto "$HERE/licenses" /Library/NullMoth/licenses \
   && chmod -R go-w /Library/NullMoth/licenses || echo "   note: the licence texts could not be copied to /Library/NullMoth/licenses"; fi
+# /Library/NullMoth must stay traversable by every user: ARM apps' nm-arm lives under it and runs as the user. A root
+# shell with umask 077 (the Mac app's privileged steps) left it 700 in 2.7, which hid nm-arm from its own user.
+mkdir -p /Library/NullMoth && chmod 755 /Library/NullMoth || echo "   note: /Library/NullMoth could not be made readable (ARM apps may not start)"
 if [ -f "$HERE/VERSION" ]; then mkdir -p /Library/NullMoth && tr -cd '0-9.\n' < "$HERE/VERSION" | head -n 1 > /Library/NullMoth/driver-version.tmp \
   && chmod 644 /Library/NullMoth/driver-version.tmp && mv /Library/NullMoth/driver-version.tmp /Library/NullMoth/driver-version; fi
 
@@ -638,6 +714,10 @@ rm -rf /Library/NullMoth/kexts "$FW"
 if [ -f "\$BK/AuxiliaryKernelExtensions.kc" ]; then cp -p "\$BK/AuxiliaryKernelExtensions.kc" "$KC"; else rm -f "$KC"; fi
 [ ! -f "\$BK/os-major" ] || cp -p "\$BK/os-major" /Library/NullMoth/os-major
 if [ -f "\$BK/driver-version" ]; then cp -p "\$BK/driver-version" /Library/NullMoth/driver-version; else rm -f /Library/NullMoth/driver-version; fi
+if [ -f "\$BK/audio-touched" ]; then
+  rm -f "$AUDIO_MARKER"
+  [ ! -f "\$BK/nvidia-audio.sha256" ] || cp -p "\$BK/nvidia-audio.sha256" "$AUDIO_MARKER"
+fi
 nvram -d \$V:nullmoth-nv-starts 2>/dev/null
 echo "previous" > /Library/NullMoth/driver-restored
 done_job
@@ -713,6 +793,18 @@ if kmutil showloaded --list-only --bundle-identifier as.vit9696.WhateverGreen 2>
   case " $ba " in *" gfxrst=4 "*) ;; *) echo "   NOTE: WhateverGreen is loaded and boot-args lack 'gfxrst=4' — add it in your OpenCore config.plist, or the Mac can panic when the NVIDIA display first opens";; esac
 fi
 
+# Commit ownership only after all install/link/job steps succeeded. Rollback and
+# the boot fallback restore this record together with the matching binary.
+if [ "$AUDIO_TOUCHED" = 1 ]; then
+  if [ "$AUDIO" = 1 ]; then
+    audio_sum=$(shasum -a 256 "$EXT/NMXAudio.kext/Contents/MacOS/NMXAudio") || die "hash installed audio"
+    audio_sum=${audio_sum%% *}
+    printf '%s' "$audio_sum" | grep -Eq '^[0-9a-f]{64}$' || die "invalid installed audio hash"
+    (umask 077; printf '%s\n' "$audio_sum" > "$AUDIO_MARKER.tmp") \
+      && chown root:wheel "$AUDIO_MARKER.tmp" && chmod 600 "$AUDIO_MARKER.tmp" && mv -f "$AUDIO_MARKER.tmp" "$AUDIO_MARKER" \
+      || die "record audio opt-in"
+  else rm -f "$AUDIO_MARKER" || die "remove audio opt-in"; fi
+fi
 echo; echo "Done. Reboot now: sudo shutdown -r now"
 if [ "$ALLOWED" = "$(echo $KEXTS | wc -w | tr -d ' ')" ]; then
   echo "This is an update of extensions you already allowed: one restart is enough. macOS may show a notice that they were"

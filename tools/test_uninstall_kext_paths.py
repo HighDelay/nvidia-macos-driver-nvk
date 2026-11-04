@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Exercise the complete uninstaller with permanent default and external kexts."""
 import json
+import hashlib
 from pathlib import Path
 import plistlib
 import shutil
@@ -58,6 +59,40 @@ class UninstallPaths(fixture.Install):
 
     def cache(self):
         self.kc.write_text(json.dumps({'entries':self.entries}));self.old[self.kc]=self.kc.read_bytes()
+
+    def audio(self, managed):
+        p=self.bundle('Library/Extensions/NMXAudio.kext','com.nullmoth.NMXAudio','1.0.0')
+        exe=p/'Contents/MacOS/NMXAudio';exe.parent.mkdir();exe.write_bytes(b'installed audio')
+        marker=self.root/'Library/NullMoth/nvidia-audio.sha256'
+        if managed:
+            marker.write_text(hashlib.sha256(exe.read_bytes()).hexdigest()+'\n');marker.chmod(0o600)
+            self.old[marker]=marker.read_bytes()
+        self.old[exe]=exe.read_bytes()
+        self.entries.append(['com.nullmoth.NMXAudio','1.0.0',str(p)]);self.cache()
+        return p,marker
+
+    def test_independent_audio_survives_removal(self):
+        p,marker=self.audio(False);r=self.run_remove();self.assertEqual(r.returncode,0,r.stdout+r.stderr)
+        self.assertTrue(p.exists());self.assertFalse(marker.exists())
+        self.assertIn('com.nullmoth.NMXAudio',self.kc.read_text())
+
+    def test_managed_audio_and_record_removed(self):
+        p,marker=self.audio(True);r=self.run_remove();self.assertEqual(r.returncode,0,r.stdout+r.stderr)
+        self.assertFalse(p.exists());self.assertFalse(marker.exists())
+        self.assertNotIn('com.nullmoth.NMXAudio',self.kc.read_text())
+
+    def test_audio_rollback_restores_record_and_binary(self):
+        p,marker=self.audio(True);r=self.run_remove(FAKE_REMOVE_LIVE_DROP='com.highpoint-tech.kext.HighPointRR')
+        self.assert_restored(r);self.assertTrue(p.exists());self.assertTrue(marker.exists())
+
+    def test_replaced_audio_is_preserved(self):
+        p,marker=self.audio(True);(p/'Contents/MacOS/NMXAudio').write_bytes(b'external replacement')
+        r=self.run_remove();self.assertEqual(r.returncode,0,r.stdout+r.stderr)
+        self.assertEqual((p/'Contents/MacOS/NMXAudio').read_bytes(),b'external replacement')
+
+    def test_untrusted_record_does_not_claim_external_audio(self):
+        p,marker=self.audio(True);marker.chmod(0o666)
+        r=self.run_remove();self.assertEqual(r.returncode,0,r.stdout+r.stderr);self.assertTrue(p.exists())
 
     def external(self):
         p=self.bundle('external drivers/External.kext','org.test.External','1')

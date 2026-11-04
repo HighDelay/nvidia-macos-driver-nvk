@@ -1,4 +1,46 @@
+## Fork integration of 2.7.1 (unreleased)
+
+- Retain native Zink, Photo Booth, ANGLE/capture, bounded shader-cache, video and Wine/NVK repairs while incorporating upstream renderer, lifetime and shader changes.
+- Keep growing allocation/image diagnostics behind the diagnostic opt-in in release builds.
+- Bundle NMXAudio as a separate Tahoe installer option, default No; preserve independent audio installations and retain managed opt-ins on updates.
+- Keep ARM translation separate from the driver package; 1401 uses the standalone `nm-arm` CLI.
+
 # Changelog
+
+## 2.7.1
+
+- OpenGL apps: setting the same render pipeline again inside an open render pass is skipped, so draw-heavy OpenGL apps spend less CPU per draw.
+- ARM apps: the installer keeps /Library/NullMoth readable, so the ARM translator can be reached without the `sudo chmod 711 /Library/NullMoth` workaround.
+- Known issue: Cyberpunk 2077 can still render interiors too bright on some launches. Quit and launch the game again.
+
+## 2.7
+
+- ARM apps (opt-in, experimental): an optional translator for Mac apps built only for Apple silicon. It compiles an app's ARM code into Intel (x86-64) code ahead of time, so the app can run on Intel and AMD hackintoshes. Turn it on in 1401 › ARM apps (opt-in); on Windows, tick Also set up ARM apps (opt-in) on a fresh install. Your original app is never changed, and Turn off removes the translator and every translated copy.
+- ARM apps works today for command-line tools (lz4, xxhsum, cmake and z3 give byte-identical output to Apple silicon). Apps with windows are experimental; Go, Flutter, Java/Electron and SVE video codecs do not work yet, and games are not supported in 2.7. It needs a CPU with AES instructions and the Xcode Command Line Tools.
+- macOS 26 Tahoe has sound. Tahoe ships no HD Audio driver, so PCs on it had no output device at all. The driver package now carries NullMoth's own HD Audio driver and installs it on Tahoe when your PC has an HD Audio controller: onboard Realtek and other codecs (rear and front analog) and NVIDIA HDMI/DisplayPort audio. macOS 15 keeps Apple's own driver and is not touched.
+- If Logic Pro, GarageBand, or MainStage says "Selected Driver not found" after updating, open its Settings › Audio and pick your output again. The old device was Apple's, and it no longer exists.
+- Kernel panics fixed. The driver kept a saved interrupt state inside a shared lock object, which macOS reported as "element modified after free" and which could end in a panic. The state now stays with the caller, as NVIDIA's code expects.
+- Games that run several compute passes at once no longer hit random GPU faults (FAULT_PTE / FAULT_PDE) or show garbage lighting. Concurrent compute work and render passes are now ordered correctly.
+- Resources declared with useHeap: and residency sets stay alive until the GPU is done with them. Before, a heap could be freed under work that still used it.
+- Freed buffers, images, and views keep their GPU address until the work that was in flight when they died has finished.
+- Long sessions no longer run out of GPU connections: the command-pool cache is bounded.
+- The memory a game is told it may use leaves a reserve on the card, so big games run out of VRAM less often.
+- A shader that uses a heap binding its heap was not created with is refused instead of running into a GPU fault.
+- Metal ray tracing: acceleration structures build on the GPU, instance transforms honour the matrix layout the app declares (before, every column-major transform was wrong), builds are thread-safe, and VRAM is checked before a build.
+- Bindless argument-buffer heaps carry storage images and texel buffers, so a shader can write a texture it found through a heap.
+- 10-bit BGR10A2 textures can be written by compute shaders (HDR and 10-bit output render correctly).
+- sRGB images keep their storage use through a compatible UNORM view, so writes to them land.
+- A render pipeline that does not match the open render pass restarts the pass with its attachments kept, instead of the draw being dropped.
+- Indirect compute dispatches prepare the textures declared with useResource:usage: first.
+- Shader translation: make_filled_simdgroup_matrix, barrier scopes, byte-addressed threadgroup memory, pointer phis, device-address arithmetic, and pixel-coordinate sampling now translate correctly.
+- Functions that call visible functions translate once their callees are known.
+- Application profiles: the driver applies per-application settings and shader fixes for one named application, in that process only, with its own shader cache. Cyberpunk 2077's light clustering now renders correctly at about 40 fps on an RTX 5060.
+- GPU compute: convolution kernels use the tensor cores, with a speed gate that keeps Apple's MPS kernel wherever ours is not clearly faster.
+- Shader compiler: small per-thread arrays stay in registers, plus better scheduling, conversion, and load handling.
+- Compute pipelines skip buffer bounds checks (graphics keep them), and small private buffers and images share VRAM blocks.
+- Less CPU per draw and dispatch: binding tables in fixed arrays, fresh system memory is not zeroed twice, and buffers are parked for reuse.
+- Diagnostics that cost speed are compiled out of the release build.
+- Known issue: Cyberpunk 2077's first launch after a restart can render interiors too bright while the game streams its files in. Quit and launch the game again.
 
 ## 2.6.6
 

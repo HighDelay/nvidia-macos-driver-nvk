@@ -97,6 +97,42 @@ class PackageZinkTests(unittest.TestCase):
         self.assertEqual(self.zink_original, self.snapshot(self.zink))
         self.assertFalse(list(self.root.glob('.zink-package-*')))
 
+    def add_audio(self, optional=False, identifier='com.nullmoth.NMXAudio'):
+        target=self.base/('Optional' if optional else 'Library/Extensions')/'NMXAudio.kext'
+        self.bundle(target,'NMXAudio')
+        info=plistlib.loads((target/'Contents/Info.plist').read_bytes())
+        info.update(CFBundleIdentifier=identifier,CFBundleVersion='1.0.0')
+        (target/'Contents/Info.plist').write_bytes(plistlib.dumps(info))
+        pkg.base_tools.write_manifest(self.base)
+        return target
+
+    def test_audio_is_relocated_without_changing_binary_or_signature(self):
+        audio=self.add_audio();before=self.snapshot(audio)
+        self.stage()
+        self.assertFalse((self.out/'Library/Extensions/NMXAudio.kext').exists())
+        self.assertEqual(before,self.snapshot(self.out/'Optional/NMXAudio.kext'))
+        self.assertIn('--audio=yes',(self.out/'Optional/Audio.md').read_text())
+        identity=json.loads((self.out/'PACKAGE-IDENTITY.json').read_text())
+        self.assertTrue(identity['optional_audio']['bundled'])
+        self.assertEqual(identity['optional_audio']['default'],'No')
+        self.assertEqual(identity['components_sha256']['Optional/NMXAudio.kext/Contents/MacOS/NMXAudio'],
+                         pkg.base_tools.digest(audio/'Contents/MacOS/NMXAudio'))
+        pkg.base_tools.verify_manifest(self.out)
+
+    def test_existing_optional_audio_is_kept(self):
+        audio=self.add_audio(optional=True);before=self.snapshot(audio)
+        self.stage();self.assertEqual(before,self.snapshot(self.out/'Optional/NMXAudio.kext'))
+
+    def test_duplicate_audio_payloads_are_refused_atomically(self):
+        self.add_audio();self.add_audio(optional=True)
+        with self.assertRaisesRegex(ValueError,'duplicate audio'):self.stage()
+        self.assertFalse(self.out.exists())
+
+    def test_wrong_audio_identity_is_refused_atomically(self):
+        self.add_audio(identifier='org.external.Audio')
+        with self.assertRaisesRegex(ValueError,'audio bundle identity'):self.stage()
+        self.assertFalse(self.out.exists())
+
     def test_complete_stage_preserves_payload_and_covers_every_regular_file(self):
         self.stage()
         self.unchanged()

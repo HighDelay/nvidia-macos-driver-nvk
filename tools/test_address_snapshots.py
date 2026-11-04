@@ -15,13 +15,14 @@ def section(start, end):
 macros = section('#define NVMTL_NBUF ', '#define NVMTL_DISPATCH_PC_BYTES')
 slot = re.search(r'typedef struct \{ uint8_t kind;.*?\} nvmtl_slot;', src, re.S).group(0)
 table = re.search(r'typedef struct \{ nvmtl_slot s\[.*?\} nvmtl_bindtable;', src, re.S).group(0)
-page = section('#define NVMTL_TABLES_PER_PAGE', '\n#define NVMTL_KEEP')
+page = section('#define NVMTL_TABLES_PER_PAGE', '\n#include "nvmtl_pool_cost.inc"')
 bindings = section('static int nvmtl_bind_slot(', '\nint nvmtl_vk_emb_same(')
 view = section('int nvmtl_vk_bind_texture_view(', '\nint nvmtl_vk_bind_storage_view(')
 snapshot = section('static int nvmtl_address_snapshot(', '\nstatic void nvmtl_spirv_retarget_set(')
 fixture = r'''
 #include <assert.h>
 #include <stdint.h>
+#include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -31,7 +32,8 @@ fixture = r'''
 ''' + macros + r'''
 #define NVMTL_EMB_KEYMAX 480
 enum { NVMTL_SLOT_NONE, NVMTL_SLOT_BUF, NVMTL_SLOT_TEX, NVMTL_SLOT_SAMP, NVMTL_SLOT_TEXBUF };
-''' + '\n'.join((slot, table, page)) + r'''
+''' + re.search(r'typedef struct \{ void \*mem;.*?\} hz_ent;', src).group(0) + '\n#include "nvmtl_page_life.h"\n' + '\n'.join((slot, table, page)) + r'''
+static nvmtl_pl_state g_pl; static pthread_mutex_t g_pl_lock=PTHREAD_MUTEX_INITIALIZER;
 static nvk_buffer g_dummyBuf={.buf=(void *)0x10000};
 static unsigned dummy_queries, page_queries, allocations;
 static int fail_alloc;
@@ -50,6 +52,9 @@ int nvmtl_vk_buffer_create(size_t size,int host,nvk_buffer *out) {
 }
 void nvmtl_vk_buffer_destroy(nvk_buffer *b) { free(b->map); memset(b,0,sizeof *b); }
 static nvmtl_address_page *nvmtl_keep_page_pop(void) { nvmtl_address_page *p=parked; parked=NULL; return p; }
+''' + r'''
+static void nvmtl_hz_slot_bound(nvk_cmdbuf *c,nvmtl_bindtable *t,uint32_t set,uint32_t binding,uint32_t kind,const void *h) {}
+static void nvmtl_live_relabel(nvk_buffer *b,uint32_t kind) {}
 ''' + bindings + view + snapshot + r'''
 static uint64_t *words(nvk_cmdbuf *c,const VkDescriptorBufferInfo *info) {
     return (uint64_t *)((uint8_t *)((nvmtl_address_page *)c->address_pages)->buffer.map+info->offset);

@@ -33,6 +33,9 @@ The installer offers experimental **Intel laptop panel support** (`NMIntelFB`),
 default **No**, for internal screens wired to an unsupported Intel GPU. Existing
 opt-ins survive updates. See [when to enable it](docs/INTEL-PANEL.md).
 
+Optional [NMXAudio HD Audio](docs/OPTIONAL-AUDIO.md) is offered separately on
+Tahoe, also defaulting to **No**. Existing independent audio drivers are preserved.
+
 ## 1401 Mac app
 
 Download the upstream [1401 Mac app](https://github.com/nullmoth/1401/releases),

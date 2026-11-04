@@ -16,12 +16,94 @@ Before each merge:
 4. Build the affected components and check their behavior, resource lifetime and synchronization.
    Record which fork changes upstream now covers, what remains local and the validation limits.
 
-The current upstream base is **2.6.6 at `470e391`**, from `upstream/main`, integrated on
-2026-11-01. Upstream rewrote its history: the old 2.6.5 base `ceba63c` maps to
-`c6f5aa0`, differing only in remote build paths and a tool docstring. This merge
-uses the actual old snapshot as its explicit three-way base and records the
-new upstream head as a parent; do not replay already integrated changes from
-the rewritten history. The preceding 2.6.4 base was `f95f4d2`.
+The current upstream base is **2.7.1 at `6b4752c51b0719862fb46471d383317ef7ecc6f0`**,
+integrated on 2026-11-04 from the release tag. Its common ancestor with this fork
+is `470e391` (2.6.6), so this update uses an ordinary three-way merge. Earlier
+upstream history was rewritten: old 2.6.5 `ceba63c` maps to `c6f5aa0`; do not
+replay already integrated history. The preceding 2.6.4 base was `f95f4d2`.
+
+## Upstream 2.7.1 integration, 2026-11-04
+
+Resolve eight textual conflicts: both required local frameworks plus MetalFX,
+optional-component uninstall, fixed-array compute bindings, worker submission,
+blit fence/copy barriers, cached buffer addresses, submission-copy tests and the
+shader emitter's pointer-address sidecar. Preserve release `-O2`, the metadata
+empty fast path, sampler restoration, per-recording bindings and resource caches.
+Use the new compute encoder arrays instead of restoring the obsolete dictionary.
+
+Take repeated-render-pipeline elision, compatible render-pass transitions,
+compute/pass ordering, retained useHeap/residency members, delayed buffer/image/
+view destruction, bounded command-pool retention, GPU instance conversion,
+BGR10A2/storage-image support, shader changes, application profiles and complete
+shader-cache mode names. Worker acceptance may release later queue parts before
+its fence wait, while preserving the fork's scheduled-after-acceptance rule,
+publication policy and owned inflight/quarantine path. Keep exact completion
+witness matching: lifetime sequence allocation is ordered with queue submission,
+but witness allocation still happens earlier and is a separate contract.
+
+The fork's Photo Booth writable storage/Unknown usage and preview orientation,
+ANGLE terminal/sampler repairs, surface handoff/capture, bounded address cache,
+Parallels callbacks/cache I/O, native Zink/CGL/IOSurface/AnyDesk/resize/small-BAR,
+video codecs and Wine/DXVK/vkd3d/DLSS remain. Zink, native frontends, codec overlay,
+CGL, NMIntelFB, both accelerator sources, framebuffer and wrapper source are
+byte-identical to the preceding fork commit. Recheck producer hashes before any
+future binary reuse; these identities do not authorize reusing a stock accelerator
+without the Intel frame ABI 2 or a stock GLD without the fork's interop repairs.
+
+**Diagnostic retention:** upstream's release switch omitted several recorders.
+Its allocation, image and view histories grow for the life of the process and
+probe a temporary Vulkan buffer per allocation. Gate the histories, slot records,
+barrier/copy histories and image-death lookups with `NVMTL_LOSS_RECORDS` too.
+Ordinary release clients keep no catalogs or address probes; explicit diagnostics
+and developer builds retain them. Keep real memory accounting, hazard/resource
+lifetime and delayed destruction active. This does not change our cache budgets,
+binding/resource optimizations or replace them with broader eviction.
+
+**Optional audio:** the user requests a separate default-No installer choice.
+Move the verified upstream NMXAudio payload to `Optional/`, retain its license
+and record its untouched executable hash. Permit `--audio=yes|no` on Tahoe with a
+PCI HD Audio controller. Retain an opt-in only when a root-owned ownership record
+matches the installed binary; independent or replaced NMXAudio remains external.
+Pair the record with backup, immediate/stale-install rollback, boot fallback and
+uninstall. Removal checks exact selected IDs, never every `com.nullmoth.*` product.
+Intel-panel selection remains independent. See [audio setup](OPTIONAL-AUDIO.md).
+
+The ARM app translator is an independent signed package, installed by 1401 through
+`/Library/NullMoth/arm/bin/nm-arm`. Keep it outside the driver archive and use its
+CLI as the user. The merged driver preserves `/Library/NullMoth` traversal so the
+CLI is reachable. Do not extract an executable from 1401 or replace this fork with
+its stock driver; separate script packaging is handled independently.
+
+**Validation:** release plugin and matching shader translator compile. The core
+suite passes 2,241 tests, five retained integrations pass 33 (including eight
+Resolve layout cases), and wrapper tests
+pass 44 with its two existing ignores and two unavailable private fixtures
+explicitly excluded. GPU tests on RTX 2060 SUPER / Tahoe 26.7.1 / 8 GiB BAR1 pass
+27 shader cases, 32 Core Image frames and 64 IOSurface handoffs (zero stale reads).
+The new catalog policy runs 4,096 allocations/images per configuration under
+ASan/UBSan and fails on unmodified upstream as a negative control. The actual RM
+spinlock adapter passes 64,000 concurrent nested lock pairs; the old adapter
+fails. Seven upstream pure-C suites, hazard/lifetime/descriptor checks and the
+retained fork host regressions pass. Adapt stale fixtures to fixed arrays,
+ordered lifetime helpers and the actual embedded instance kernel: 240 random
+matrix/type cases agree byte-for-byte, and the generator now reproduces the
+embedded runtime bytes instead of its older row-only kernel.
+
+The isolated Tahoe collection links the verified official 2.7.1 RM, retained fork
+framebuffer/AGDC, matched Tahoe accelerator and both optional kexts. A separate repository containing only
+the four core kexts links and contains exactly those four IDs too. Public Darwin RM build archives are not
+available, so a future package must use the verified official 2.7.1 RM, with
+provenance, instead of the old 2.6.6 binary. NAK speed267 source patches are
+retained; their presence is not proof that an existing native Zink/Wine renderer
+was rebuilt with them. Preserve the matching private renderer identities and
+small-BAR overlay when refreshing those runtimes.
+
+This is isolated source/build/regression validation, not a reboot, physical audio
+or laptop test, Sequoia kernel link, or ARM GUI/game qualification. Installed files
+and the live collection remain unchanged. The user requested merging first and
+a separate ARM script package; no driver release or installable driver archive
+is prepared by this integration. Local details are under
+`/Volumes/Games/upstream-271-review-20261104/` and compact records under `out/records/`.
 
 ## Optional Intel panel bridge and RAM copies, 2026-11-04
 

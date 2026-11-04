@@ -112,7 +112,10 @@ extern id gNVMTLMainDevice;
   NVMTLFunction *_linkedVert, *_linkedFrag; uint32_t _a8mask;
   NVMTLFunction *_descVert, *_descFrag; /* _descriptor's functions, read once instead of two property sends per draw */ } @end
 @interface NVMTLCommandQueue : NSObject <MTLCommandQueue> {
-  @public nvk_queue _q; id _dev; id _completionQueue; dispatch_queue_t _callbackOrderQueue; NSMutableArray *_reservations; dispatch_semaphore_t _capacity; NSUInteger _capacityCount;
+  // _resSets: the residency sets this queue was given. A set retains its allocations, so holding the
+  // set is what keeps them alive; without this nobody did, and an app that handed its only reference
+  // to the queue had every resource in the set freed under work the queue had not finished.
+  @public nvk_queue _q; id _dev; id _completionQueue; dispatch_queue_t _callbackOrderQueue; NSMutableArray *_reservations; dispatch_semaphore_t _capacity; NSUInteger _capacityCount; NSMutableArray *_resSets;
 } @end
 @interface NVMTLCommandBuffer : NSObject <MTLCommandBuffer> {
   NSError *_cbError;
@@ -129,6 +132,7 @@ extern id gNVMTLMainDevice;
   unsigned _nEncSealed;
   CFTimeInterval _gpuStart, _gpuEnd;
   CFTimeInterval _legacyKernelStart, _legacyKernelEnd;
+  uint64_t _cbtSeq, _cbtCreate, _cbtCommit, _cbtWait0; unsigned _cbtND; char _cbtK[40];   // NVMTL_CB_TIME (dev)
   nvmtl_gpu_interval _gpuTiming; BOOL _gpuTimingSeen, _gpuTimingInvalid;
   NSMutableArray *_parts, *_scheduledHandlers;
   NSUInteger _nextPart;
@@ -184,15 +188,22 @@ extern id gNVMTLMainDevice;
 @interface NVMTLIndirectCommandBuffer : NSObject <MTLIndirectCommandBuffer> {
   @public NSMutableArray<NVMTLIndirectCommand *> *_cmds; id<MTLDevice> _dev; NSString *_label;
 } @end
+#ifndef NVMTL_NBUFAT
+#define NVMTL_NBUFAT 32   /* buffer argument indices an encoder tracks (Metal has 31) */
+#endif
 @interface NVMTLComputeCommandEncoder : NSObject <MTLComputeCommandEncoder> {
   @public NVMTLCommandBuffer *_cb; NVMTLComputePipelineState *_ps; NSMutableArray *_scratch; NSMutableDictionary *_samplers;
   NSMutableDictionary *_tgLen;
-  NSMutableDictionary *_bufAt;
+  // The binding table, by Metal buffer index: the buffer, its offset and, for setBytes, the inline length and base.
+  // Plain arrays: WAS an NSMutableDictionary of NSArrays, three allocations on every setBuffer (a large part of the
+  // ~2.5 us of host time per dispatch against Apple's ~0.3 us). _baN: 0 unbound, 2 = buffer+offset, 4 = setBytes form.
+  __strong id _baObj[NVMTL_NBUFAT]; NSUInteger _baOff[NVMTL_NBUFAT], _baLen[NVMTL_NBUFAT], _baBase[NVMTL_NBUFAT];
+  uint8_t _baN[NVMTL_NBUFAT];
   NSMutableSet *_resources;
   NSMutableDictionary *_sassTextures, *_sassSamplers;   // by Metal index, for kernels run from machine code
 } @end
 @interface NVMTLBlitCommandEncoder : NSObject <MTLBlitCommandEncoder> { @public NVMTLCommandBuffer *_cb; __weak NVMTLCommandBuffer *_owner; } @end
-@interface NVMTLAccelerationStructure : NVMTLBuffer <MTLAccelerationStructure> { @public nvk_accel _as; nvk_buffer _uid; uint32_t _iftAdd; } @end
+@interface NVMTLAccelerationStructure : NVMTLBuffer <MTLAccelerationStructure> { @public nvk_accel _as; nvk_buffer _uid; nvk_buffer _scratch; uint32_t _iftAdd; } @end
 @interface NVMTLAccelerationStructureCommandEncoder : NSObject <MTLAccelerationStructureCommandEncoder> { @public NVMTLCommandBuffer *_cb; __weak NVMTLCommandBuffer *_owner; } @end
 uint32_t nvmtl_geoms_from_descriptor(id desc, nvmtl_geom *out, uint32_t max, int *instance, uint32_t *instance_count, NSMutableSet *track);
 #define NVMTL_NBUFAT 32   /* buffer argument indices an encoder tracks (Metal has 31) */
@@ -227,7 +238,12 @@ uint32_t nvmtl_geoms_from_descriptor(id desc, nvmtl_geom *out, uint32_t max, int
 
 NSArray<NSDictionary *> *nvmtl_embedded_bindings(NVMTLFunction *function);
 void nvmtl_bind_embedded(NVMTLCommandBuffer *cb, uint32_t set, NVMTLFunction *fn, NVMTLBuffer *__strong const *bufAt, const NSUInteger *offAt);
-void nvmtl_bind_embedded_dict(NVMTLCommandBuffer *cb, uint32_t set, NVMTLFunction *fn, NSDictionary *bufferAtIndex);
+void nvmtl_bind_embedded_enc(NVMTLCommandBuffer *cb, uint32_t set, NVMTLFunction *fn, NVMTLComputeCommandEncoder *e);
+// the NSArray form of one binding ({buffer, offset} or {buffer, offset, length, base}), for the few readers that want it
+static inline NSArray *nvmtl_bufat(NVMTLComputeCommandEncoder *e, NSUInteger i) {
+    if (!e || i >= NVMTL_NBUFAT || !e->_baN[i] || !e->_baObj[i]) return nil;
+    return e->_baN[i] == 4 ? @[e->_baObj[i], @(e->_baOff[i]), @(e->_baLen[i]), @(e->_baBase[i])] : @[e->_baObj[i], @(e->_baOff[i])];
+}
 uint64_t nvmtl_resid_for_texture(id t);
 uint64_t nvmtl_resid_for_sampler(id s);
 
@@ -290,6 +306,9 @@ static inline void nvmtl_mip_written(NVMTLTexture *t, NSUInteger level) {
 @interface NVMTLIndirectCommandBuffer () { @public uint64_t _resid; } @end
 @interface NVMTLIndirectCommand () - (void)nvmtlCopyFrom:(NVMTLIndirectCommand *)o; @end
 NSUInteger nvmtl_air_max_tg(NVMTLFunction *fn);
+BOOL nvmtl_air_grid_only(NVMTLFunction *fn);
+// _gridOnly: 0 not yet asked, 1 the kernel's result does not depend on its threadgroup shape, -1 it may
+@interface NVMTLComputePipelineState () { @public int8_t _gridOnly; } @end
 @interface NVMTLRenderCommandEncoder () { @public NSString *_label; } @end
 @interface NVMTLRenderCommandEncoder () { @public uint32_t _vstride[NVMTL_NVIN]; uint32_t _vstrideSet; } @end
 @interface NVMTLComputeCommandEncoder () { @public NSString *_label; } @end
@@ -297,9 +316,13 @@ NSUInteger nvmtl_air_max_tg(NVMTLFunction *fn);
 @interface NVMTLBlitCommandEncoder () { @public NSString *_label; BOOL _tailFull; } @end
 @interface NVMTLAccelerationStructureCommandEncoder () { @public NSString *_label; } @end
 @interface NVMTLHeap () { @public MTLHazardTrackingMode _hazard; } @end
+// hazard model (nvmtl_hazard.h): which buffer slots and textures each stage of a pipeline writes, from its reflection
+@interface NVMTLRenderPipelineState () { @public int _hzReady; uint32_t _hzBuf[2]; uint64_t _hzTex[2][2]; } @end
+@interface NVMTLComputePipelineState () { @public int _hzReady; uint32_t _hzBuf; uint64_t _hzTex[2]; } @end
 @interface NVMTLIndirectCommandBuffer () { @public MTLResourceOptions _opts; } @end
 @interface NVMTLBuffer () { @public uint32_t _purge; } @end
 @interface NVMTLTexture () { @public uint32_t _purge; } @end
+@interface NVMTLTexture () { @public BOOL _rbSwap; } @end   // a writable BGR10A2Unorm held as R10G10B10A2 (NVMTLDevice.m)
 @interface NVMTLHeap () { @public uint32_t _purge; } @end
 #include <os/lock.h>
 @interface NVMTLHeap () { @public NSUInteger *_fr; uint32_t _nfr, _cfr; os_unfair_lock _fl; BOOL _backed; } @end

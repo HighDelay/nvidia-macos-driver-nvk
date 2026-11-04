@@ -53,6 +53,31 @@ def copy_file(source, destination):
     destination.chmod(source.stat().st_mode & 0o777)
 
 
+def stage_optional_audio(payload):
+    """Keep the verified upstream audio payload outside default extensions."""
+    active = payload / 'Library/Extensions/NMXAudio.kext'
+    optional = payload / 'Optional/NMXAudio.kext'
+    if not active.exists() and not optional.exists():
+        return None
+    if active.exists() and optional.exists():
+        raise ValueError('duplicate audio payloads; select one verified NMXAudio build')
+    source = active if active.exists() else optional
+    base_tools.bundle(source, 'NMXAudio')
+    base_tools.validate_links(source.resolve())
+    info = plistlib.loads((source/'Contents/Info.plist').read_bytes())
+    if info.get('CFBundleIdentifier') != 'com.nullmoth.NMXAudio':
+        raise ValueError('unexpected optional audio bundle identity')
+    run('lipo', source/'Contents/MacOS/NMXAudio', '-verify_arch', 'x86_64')
+    binary_hash = base_tools.digest(source/'Contents/MacOS/NMXAudio')
+    if active.exists():
+        optional.parent.mkdir(exist_ok=True)
+        active.rename(optional)
+    shutil.copy2(ROOT/'docs/OPTIONAL-AUDIO.md', optional.parent/'Audio.md')
+    return {'bundle_version': info.get('CFBundleVersion'), 'binary_sha256': binary_hash,
+            'default_install': False, 'minimum_macos_major': 26,
+            'provenance': 'unchanged audio payload from the checksum-verified base package'}
+
+
 def stage(base, zink, output, components=None, native_gld=False, records=None):
     if components is not None:
         raise ValueError("Stage matched driver components with build/stage_package.py first; arbitrary Library overlays are unsupported")
@@ -112,6 +137,7 @@ def stage(base, zink, output, components=None, native_gld=False, records=None):
     with tempfile.TemporaryDirectory(prefix='.zink-package-', dir=output.parent) as temp:
         payload = Path(temp) / 'pkgroot'
         copy_bundle(base, payload)
+        audio_identity = stage_optional_audio(payload)
         # Always bundle the real framebuffer, outside Library/Extensions. Only
         # an explicit installer choice copies it into the system repositories.
         panel_build = Path(temp) / 'intel-panel'
@@ -269,6 +295,7 @@ def stage(base, zink, output, components=None, native_gld=False, records=None):
                     'source_dirty': bool(run('git', '-C', ROOT, 'status', '--porcelain', '--untracked-files=no').strip()),
                     'component_replacements': replacements, 'firmware': sorted(firmware_paths),
                     'optional_intel_panel': panel_identity,
+                    'optional_audio': audio_identity,
                     'zink_sha256': base_tools.digest(runtime / 'libnvk_zink.dylib'),
                     'cgl_sha256': base_tools.digest(runtime / 'libnvk_cgl.dylib'),
                     'gld_sha256': (base_tools.digest(payload / 'Library/GPUBundles/NVKZinkGLDriver.bundle/Contents/MacOS/NVKZinkGLDriver')

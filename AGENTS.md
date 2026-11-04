@@ -69,6 +69,13 @@ builder, regenerate checksums after cleanup, and verify that repackaging leaves
 driver/runtime binaries unchanged. A packaging-only change reuses verified
 binaries and does not require recompiling or repeating kernel link tests.
 
+Standing user instruction, updated 2026-11-04: bundle NMXAudio under `Optional/`
+when it is supplied by the verified upstream package. Audio is a separate installer
+choice, default No, for Tahoe with a PCI HD Audio controller. Retain driver-managed
+opt-ins on updates and their backup/rollback/removal state. Preserve independently
+installed or replaced audio drivers; do not uninstall the NullMoth namespace wholesale.
+Keep audio separate from the Intel-panel choice and from NVIDIA video codecs.
+
 Standing user instruction, updated 2026-10-31: future driver releases use tags
 `v<version>-nvk` and archives `nvidia-macos-driver-<version>-nvk.tar.gz`.
 Keep optional NMIntelFB support in the normal complete driver package under

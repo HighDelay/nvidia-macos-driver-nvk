@@ -1,0 +1,119 @@
+{
+  "upstream_tag": "v2.7.1",
+  "upstream_commit": "6b4752c51b0719862fb46471d383317ef7ecc6f0",
+  "fork_parent": "25567de77f0b89256a2815d184465d85647a911c",
+  "common_ancestor": "470e391e8cf8d7e499cdabfa7f2daadb6e14bcfd",
+  "conflict_files": [
+    "build/build_plugin.sh",
+    "package/uninstall.sh",
+    "plugin/NVMTLEmbedded.m",
+    "plugin/NVMTLEventSync.m",
+    "plugin/NVMTLObjects.m",
+    "plugin/nvmtl_vk.c",
+    "tools/test_submission_copies.py",
+    "translator/translator/src/native/emitter/body/core_inst.rs"
+  ],
+  "host": {
+    "os": "26.7.1",
+    "build": "25G241",
+    "gpu": "RTX 2060 SUPER",
+    "bar1_gib": 8
+  },
+  "compilation": {
+    "plugin": "x86_64, macOS 15.0 minimum, release -O2",
+    "translator": "x86_64, macOS 15.5 minimum, locked wrapper dependencies",
+    "existing_warnings": [
+      "333 Metal/SDK protocol/deprecation warnings",
+      "one unused pointee binding in upstream shader translator"
+    ]
+  },
+  "tests": {
+    "core_lib": 2241,
+    "focused_integrations": 33,
+    "wrapper": 44,
+    "wrapper_existing_ignored": 2,
+    "wrapper_missing_private_fixtures_excluded": 2,
+    "gpu_shader_cases": 27,
+    "core_image_frames": 32,
+    "surface_handoffs": 64,
+    "surface_stale_reads": 0,
+    "audio_install": 16,
+    "uninstall": 15,
+    "zink_package": 26,
+    "primary_install": 9,
+    "intel_panel_install": 13,
+    "base_package": 27,
+    "loss_records_allocations_per_configuration": 4096,
+    "spinlock_pairs": 64000,
+    "instance_matrix_cases": 240,
+    "resolve_retained_integration": 8
+  },
+  "kernel_collections": {
+    "WithAudio.kc": {
+      "bytes": 19562496,
+      "sha256": "8c5d954b6d021206551e4c3213c691c18f8caa7a1c21ddf7ca15fa954611d0b2",
+      "bundles": [
+        "NMIntelFB",
+        "NMXAudio",
+        "NVAccel",
+        "NVRM",
+        "NVRMAGDC",
+        "NVRMFB"
+      ],
+      "installed": false
+    },
+    "CoreOnly.kc": {
+      "bytes": 18874368,
+      "sha256": "5630e70a7b1e6a67d7afcc53bb5b51ed447e5f2a63eca0f0ca22232fe00f0871",
+      "bundles": [
+        "NVAccel",
+        "NVRM",
+        "NVRMAGDC",
+        "NVRMFB"
+      ],
+      "installed": false
+    }
+  },
+  "retained_sources_unchanged": [
+    "zink",
+    "nvk/native-macos",
+    "nvk/wine-macos",
+    "video",
+    "kexts/NMIntelFB",
+    "kexts/NVRM/accel",
+    "kexts/NVRMFB",
+    "plugin/NVMTLGL.m",
+    "translator/wrapper"
+  ],
+  "source_hashes": {
+    "plugin/NVMTLDevice.m": "884cb951761ac5460edd931ca45aa56771073c9024ecd269f3613a9bf28d7e0d",
+    "plugin/NVMTLObjects.m": "72b1d4a9d2a5017de79adb7a154060fc54acd4b249af483878deeca0e9e14377",
+    "plugin/NVMTLEmbedded.m": "c4da26974e31ee98751d71c37e26741337267b893f81dab42e95467f1c699091",
+    "plugin/NVMTLEventSync.m": "fe988f03c904c6330cbe411aebeb9c2ce8f49958af38b83e7176536e417a7338",
+    "plugin/nvmtl_vk.c": "b6ec813ddb976c54598ee67620db040ea79780feebd48ae37374528ef885890b",
+    "translator/wrapper/Cargo.lock": "0c461b83a10967cf6d414d51dd58577c3e41f837f9a2ceb53eeb512af68afc99"
+  },
+  "diagnostic_catalogs": "No unbounded memory/image/view history or base-address probe in ordinary release clients; retained under NVMTL_LOSS_RECORDS",
+  "optional_audio": {
+    "default": "No",
+    "tahoe_only": true,
+    "controller": "PCI HD Audio",
+    "existing_opt_ins": "root-owned matching binary fingerprint",
+    "independent_audio_preserved": true
+  },
+  "upstream_archives": {
+    "driver_sha256": "0b28f420dbc0f8a796a8a67c60490b1909886d302fd2008ad884cc12231e7851",
+    "arm_sha256": "eb4331ba373e0dccc3cf241ef2115ec1b8f88b38ecf3762a3d70a5312b5fa81c",
+    "release_signatures": "Ed25519 verified against 1401 pinned release public key"
+  },
+  "installed_files_unchanged": true,
+  "live_kernel_collection_changed": false,
+  "driver_package_created": false,
+  "release_created": false,
+  "limits": [
+    "No combined-driver reboot or live browser/game test",
+    "No physical audio/laptop or Sequoia kernel test",
+    "Existing native runtimes not rebuilt with speed267",
+    "ARM script package handled separately"
+  ]
+}
