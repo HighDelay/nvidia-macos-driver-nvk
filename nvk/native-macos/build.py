@@ -53,13 +53,16 @@ manifest = {
 }
 (out / 'nvk-bridge-runtime.properties').write_text(
     '\n'.join(k + '=' + v for k, v in manifest.items()) + '\n')
+source_names = ['nvk/native-macos/bridge.mm', 'nvk/native-macos/present_hud.h', 'nvk/native-macos/build.py']
 record = {
     'source_commit': subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=repo, text=True).strip(),
-    'source_uncommitted': True, 'presentation': 'gpu-copy',
+    'source_uncommitted': bool(subprocess.check_output(
+        ['git', 'status', '--porcelain', '--untracked-files=no', '--', *source_names], cwd=repo, text=True).strip()),
+    'presentation': 'gpu-copy',
     'renderer_source': str(args.renderer),
     'renderer_original_sha256': hashlib.sha256(args.renderer.read_bytes()).hexdigest(),
     'files': {str(p.relative_to(out)): hashlib.sha256(p.read_bytes()).hexdigest() for p in lib.glob('*.dylib')},
-    'source_files': {'nvk/native-macos/bridge.mm': hashlib.sha256((repo / 'nvk/native-macos/bridge.mm').read_bytes()).hexdigest()},
+    'source_files': {name: hashlib.sha256((repo / name).read_bytes()).hexdigest() for name in source_names},
 }
 (out / 'BUILD.json').write_text(json.dumps(record, indent=2) + '\n')
 print(json.dumps(record, indent=2))

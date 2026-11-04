@@ -39,6 +39,40 @@ def digest(path):
         return hashlib.file_digest(stream, "sha256").hexdigest()
 
 
+def validate_frontend(frontend, base_renderer, renderer_source=None):
+    """Accept a new backend only when it derives from the explicitly selected renderer."""
+    record = json.loads((frontend / "BUILD.json").read_text())
+    if record["entry"]["path"] != CRITICAL[0] or record["renderer"]["path"] != CRITICAL[1]:
+        raise ValueError("Unexpected frontend library layout")
+    for key in ("entry", "renderer"):
+        binary = frontend / record[key]["path"]
+        if binary.is_symlink() or not binary.is_file() or digest(binary) != record[key]["sha256"]:
+            raise ValueError("Frontend " + key + " does not match its build record")
+        subprocess.run(["codesign", "--verify", "--strict", str(binary)], check=True)
+        subprocess.run(["lipo", str(binary), "-verify_arch", "x86_64"], check=True)
+    if renderer_source is None:
+        if record["renderer"]["sha256"] != digest(base_renderer):
+            raise ValueError("Frontend renderer must match the base provider; select --renderer-source to upgrade it")
+        return record, None
+    renderer_source = renderer_source.resolve(strict=True)
+    subprocess.run(["codesign", "--verify", "--strict", str(renderer_source)], check=True)
+    subprocess.run(["lipo", str(renderer_source), "-verify_arch", "x86_64"], check=True)
+    with tempfile.TemporaryDirectory(prefix="nvk-renderer-identity-") as temporary:
+        private = Path(temporary) / "libnvk_renderer.dylib"
+        shutil.copyfile(renderer_source, private)
+        private.chmod(0o755)
+        commands = [
+            ["install_name_tool", "-id", "@loader_path/libnvk_renderer.dylib", str(private)],
+            ["codesign", "--force", "--sign", "-", "--timestamp=none", str(private)],
+        ]
+        for command in commands:
+            subprocess.run(command, check=True)
+        if digest(private) != record["renderer"]["sha256"]:
+            raise ValueError("Frontend renderer does not derive from --renderer-source")
+    return record, {"source_path": str(renderer_source), "source_sha256": digest(renderer_source),
+                    "private_sha256": record["renderer"]["sha256"], "commands": commands}
+
+
 def add_vkd3d(root, archive, source):
     if digest(archive) != VKD3D_ARCHIVE_SHA256:
         raise ValueError("Unrecognized vkd3d-proton release archive")
@@ -128,7 +162,7 @@ def add_dlss(root, nvapi_archive, nvapi_source, ngx_archive):
 
 
 def build(base, output, vkd3d_archive=None, vkd3d_source=None, frontend=None,
-          nvapi_archive=None, nvapi_source=None, ngx_archive=None):
+          nvapi_archive=None, nvapi_source=None, ngx_archive=None, renderer_source=None):
     base, output = base.resolve(strict=True), output.absolute()
     if output.exists() or output.is_symlink():
         raise ValueError("Output exists; choose a new directory")
@@ -137,6 +171,8 @@ def build(base, output, vkd3d_archive=None, vkd3d_source=None, frontend=None,
         raise ValueError("Output must be outside the base runtime")
     if bool(vkd3d_archive) != bool(vkd3d_source):
         raise ValueError("Supply both --vkd3d-archive and --vkd3d-source")
+    if renderer_source and not frontend:
+        raise ValueError("--renderer-source requires --frontend")
     dlss_inputs = [nvapi_archive, nvapi_source, ngx_archive]
     if any(dlss_inputs) and not all(dlss_inputs):
         raise ValueError("Supply --nvapi-archive, --nvapi-source and --ngx-archive together")
@@ -178,18 +214,13 @@ def build(base, output, vkd3d_archive=None, vkd3d_source=None, frontend=None,
             target.chmod(0o755 if path.stat().st_mode & 0o111 else 0o644)
         presentation = source["presentation"]
         frontend_record = source.get("frontend_build")
+        renderer_update = None
         if frontend:
             frontend = frontend.resolve(strict=True)
-            record = json.loads((frontend / "BUILD.json").read_text())
-            if record["entry"]["path"] != CRITICAL[0] or record["renderer"]["path"] != CRITICAL[1]:
-                raise ValueError("Unexpected frontend library layout")
-            if digest(frontend / CRITICAL[1]) != digest(root / CRITICAL[1]) or record["renderer"]["sha256"] != digest(root / CRITICAL[1]):
-                raise ValueError("Frontend renderer must match the base provider byte-for-byte")
-            if digest(frontend / CRITICAL[0]) != record["entry"]["sha256"]:
-                raise ValueError("Frontend binary does not match its build record")
-            subprocess.run(["codesign", "--verify", "--strict", str(frontend / CRITICAL[0])], check=True)
-            shutil.copyfile(frontend / CRITICAL[0], root / CRITICAL[0])
-            (root / CRITICAL[0]).chmod(0o755)
+            record, renderer_update = validate_frontend(frontend, root / CRITICAL[1], renderer_source)
+            for relative in CRITICAL[:2]:
+                shutil.copyfile(frontend / relative, root / relative)
+                (root / relative).chmod(0o755)
             shutil.copyfile(frontend / "BUILD.json", root / "FRONTEND-BUILD.json")
             paths.append("FRONTEND-BUILD.json")
             frontend_record = "FRONTEND-BUILD.json"
@@ -233,7 +264,8 @@ def build(base, output, vkd3d_archive=None, vkd3d_source=None, frontend=None,
             "launch_defaults": {"DXVK_CONFIG": "dxvk.enableDescriptorBuffer = False",
                                 "DXVK_HUD": "devinfo,fps,frametimes,scale=1.25",
                                 "WINEDLLOVERRIDES": "d3d11,dxgi=n"},
-            "validation": {"inherited_binaries": "Vulkan and DXVK binaries copied byte-for-byte from source_runtime_id",
+            "validation": {"inherited_binaries": ("DXVK/D3D12/NGX unchanged; refreshed Vulkan frontend/backend recorded in FRONTEND-BUILD.json and BUILD.json"
+                                                   if renderer_update else "Vulkan and DXVK binaries copied byte-for-byte from source_runtime_id"),
                            "helper": "Rebuilt; run the setup/rollback tests on this output",
                            "external_wine_crossover": "Not qualified by packaging"},
         }
@@ -252,6 +284,8 @@ def build(base, output, vkd3d_archive=None, vkd3d_source=None, frontend=None,
                              ("nvk/wine-macos/setup.mm", "nvk/wine-macos/provider.py", "nvk/wine-macos/INSTALL.md")},
             "commands": commands, "files": files,
         }
+        if renderer_update:
+            record["renderer_update"] = renderer_update
         (root / "BUILD.json").write_text(json.dumps(record, indent=2) + "\n")
         with (root / "SHA256SUMS").open("w") as stream:
             for path in sorted(root.rglob("*")):
@@ -271,13 +305,14 @@ def main():
     parser.add_argument("--vkd3d-archive", type=Path, help="optional pinned vkd3d-proton 3.1 release archive")
     parser.add_argument("--vkd3d-source", type=Path, help="matching clean upstream source for license/provenance records")
     parser.add_argument("--frontend", type=Path, help="optional Wine frontend build using the same renderer")
+    parser.add_argument("--renderer-source", type=Path, help="explicit verified upstream renderer for a frontend/backend upgrade")
     parser.add_argument("--nvapi-archive", type=Path, help="optional pinned DXVK-NVAPI 0.9.2 archive")
     parser.add_argument("--nvapi-source", type=Path, help="matching clean DXVK-NVAPI source for its MIT license")
     parser.add_argument("--ngx-archive", type=Path, help="pinned NVIDIA 610.57.04 archive; only the unmodified NGX pair and license are copied")
     args = parser.parse_args()
     try:
         print(json.dumps(build(args.base, args.output, args.vkd3d_archive, args.vkd3d_source, args.frontend,
-                               args.nvapi_archive, args.nvapi_source, args.ngx_archive), indent=2))
+                               args.nvapi_archive, args.nvapi_source, args.ngx_archive, args.renderer_source), indent=2))
     except (OSError, ValueError, KeyError, tarfile.TarError, subprocess.CalledProcessError) as error:
         print("STOP: " + str(error), file=sys.stderr)
         return 1
