@@ -147,6 +147,50 @@ class ArmScripts(unittest.TestCase):
             ARM.run_cli('translate',[value],self.root)
             self.assertEqual(call.call_args.args[0],[str(cli),'translate',value]);self.assertNotIn('shell',call.call_args.kwargs)
 
+    def privileged_fixture(self, changed=False, mode='755', owner='0', symlink=False):
+        lib=self.root/'Library';lib.mkdir()
+        target=lib/'NullMoth/arm'
+        if symlink:
+            (lib/'NullMoth').symlink_to(self.root/'redirected')
+        marker=self.root/'installer-ran';record=self.root/'installer-mode'
+        data=io.BytesIO()
+        with tarfile.open(fileobj=data,mode='w:gz') as tar:
+            body=b'#!/bin/bash\nset -e\numask > "$ARM_TEST_MODE"\n/bin/mkdir -p "$ARM_TEST_PREFIX"\necho done > "$ARM_TEST_MARKER"\n'
+            info=tarfile.TarInfo('pkgroot/install.sh');info.size=len(body);info.mode=0o755
+            tar.addfile(info,io.BytesIO(body))
+        archive=self.root/'signed package $(literal).tar.gz';archive.write_bytes(data.getvalue())
+        expected=hashlib.sha256(data.getvalue()).hexdigest()
+        if changed:archive.write_bytes(b'changed after parent verified')
+        fake=self.root/'stat';fake.write_text('#!/bin/sh\nprintf \'%s %s\\n\' '+owner+' '+mode+'\n');fake.chmod(0o755)
+        code=ARM.SYSTEM_INSTALL.replace('/private/var/root/nvidia-arm.XXXXXXXX',str(self.root/'stage.XXXXXXXX'))
+        code=code.replace('/Library',str(lib)).replace('/usr/bin/stat',str(fake))
+        result=subprocess.run(['/bin/bash','-c',code,'fixture',str(archive),expected],capture_output=True,text=True,
+            env={**os.environ,'ARM_TEST_PREFIX':str(target),'ARM_TEST_MARKER':str(marker),'ARM_TEST_MODE':str(record)})
+        return result,marker,record
+
+    def test_privileged_pipeline_runs_only_private_verified_installer(self):
+        r,marker,record=self.privileged_fixture()
+        self.assertEqual(r.returncode,0,r.stdout+r.stderr);self.assertEqual(marker.read_text().strip(),'done')
+        self.assertEqual(record.read_text().strip(),'0022')
+        self.assertFalse(list(self.root.glob('stage.*')))
+
+    def test_copy_after_verification_is_rehashed_before_execution(self):
+        r,marker,record=self.privileged_fixture(changed=True)
+        self.assertNotEqual(r.returncode,0);self.assertIn('changed after authentication',r.stderr)
+        self.assertFalse(marker.exists());self.assertFalse(list(self.root.glob('stage.*')))
+
+    def test_system_shell_rejects_parent_symlink(self):
+        r,marker,record=self.privileged_fixture(symlink=True)
+        self.assertNotEqual(r.returncode,0);self.assertIn('symlink',r.stderr);self.assertFalse(marker.exists())
+
+    def test_system_shell_rejects_writable_parent(self):
+        r,marker,record=self.privileged_fixture(mode='777')
+        self.assertNotEqual(r.returncode,0);self.assertIn('untrusted',r.stderr);self.assertFalse(marker.exists())
+
+    def test_system_shell_rejects_foreign_parent_owner(self):
+        r,marker,record=self.privileged_fixture(owner='501')
+        self.assertNotEqual(r.returncode,0);self.assertIn('untrusted',r.stderr);self.assertFalse(marker.exists())
+
     def test_runtime_removal_never_reads_user_manifests_as_root(self):
         p=self.root/'uninstall.sh';p.write_text('fixture')
         with patch.object(ARM.os,'geteuid',return_value=501),patch.object(ARM.subprocess,'run',return_value=SimpleNamespace(returncode=0)) as run:

@@ -71,7 +71,13 @@ def build(output, version, archive=None, signature=None):
         else:
             fetch(pin['url'], archived); fetch(pin['signature_url'], sig)
         spec = importlib.util.spec_from_file_location('packaged_arm_apps', package / 'arm_apps.py')
-        module = importlib.util.module_from_spec(spec); spec.loader.exec_module(module)
+        module = importlib.util.module_from_spec(spec)
+        old_bytecode = sys.dont_write_bytecode
+        try:
+            sys.dont_write_bytecode = True
+            spec.loader.exec_module(module)
+        finally:
+            sys.dont_write_bytecode = old_bytecode
         data = module.verified_archive()
         with tempfile.TemporaryDirectory(prefix='arm-input-check-', dir=temporary) as unpacked:
             payload = module.unpack(data, unpacked)
@@ -93,7 +99,7 @@ def build(output, version, archive=None, signature=None):
         artifact = stage / name
         with tarfile.open(artifact, 'w:gz', format=tarfile.PAX_FORMAT) as tar:
             for path in [package, *sorted(package.rglob('*'))]:
-                if path.name == '.DS_Store' or path.name.startswith('._') or path.is_symlink():
+                if path.name in ('.DS_Store', '__pycache__') or path.suffix == '.pyc' or path.name.startswith('._') or path.is_symlink():
                     raise ValueError('unexpected metadata or symlink in scripts package')
                 info = tar.gettarinfo(str(path), path.relative_to(stage).as_posix())
                 info.uid = info.gid = 0; info.uname = info.gname = 'root'; info.mtime = 0

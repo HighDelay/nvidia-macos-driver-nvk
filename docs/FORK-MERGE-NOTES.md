@@ -119,8 +119,9 @@ arguments. Runtime uninstall never passes a user-writable translated-app manifes
 to root: it keeps translated copies, which the user can remove with `nm-arm remove`.
 
 Validate the wrapper with the macOS CLT's Python 3.9 as well as the host Python.
-Twenty-nine host cases cover authentication, archive boundaries, opt-in privilege
-and literal app paths. The unchanged upstream runtime installs and passes its
+Thirty-four host cases cover authentication, archive boundaries, opt-in privilege,
+literal app paths and the actual privileged shell body (including archive swaps,
+parent ownership/symlinks and its installer umask). The unchanged upstream runtime installs and passes its
 CPU/CLT/LLVM check in a user-owned test prefix on i5-11400F / Tahoe 26.7.1. The
 synthetic ARM-only app reaches the wrapper correctly but upstream refuses to
 translate it because this volume has 6 GiB free and requires at least 8 GiB.
