@@ -22,6 +22,34 @@ is `470e391` (2.6.6), so this update uses an ordinary three-way merge. Earlier
 upstream history was rewritten: old 2.6.5 `ceba63c` maps to `c6f5aa0`; do not
 replay already integrated history. The preceding 2.6.4 base was `f95f4d2`.
 
+## Capture destination reads, 2026-11-05
+
+Core Animation has no framebuffer fetch here (`fc_framebuffer_fetch=0`). It reads its
+destination by sampling the current attachment behind a render-target barrier.
+NVK draws a linear attachment through a tiled shadow when its pitch or offset is
+not 128-byte aligned, or the pass mixes tilings. Sampled views name the linear
+image, which the shadow only reaches at pass end, so that read returned the pass's
+starting contents and a transparent layer tile overwrote what was under it.
+
+WindowServer keeps exact IOSurface usage and the linear family import, so capture
+targets hit this for most widths; 64-byte row alignment makes roughly half of them
+unaligned. Applications widen usage onto a private image and miss it. Live
+1920-wide framebuffers are aligned, consistent with only captures looking wrong.
+
+Render-target `memoryBarrierWithScope:`, `textureBarrier` and an attachment's
+`memoryBarrierWithResources:` now restart a shadowed pass that has drawn since it
+began. Retain this until NVK can sample its shadow, and share
+`nvmtl_vk_pass_render_shadowed` with the framebuffer-fetch shadow test. Do not
+replace it with `_surfaceLinear` for WindowServer targets: that path moves
+publication off the kernel-marked GPU write.
+
+`tools/test_surface_render_feedback.m` uses the WindowServer name to select the
+import path. RTX 2060 / macOS 26.7.2 (25G332), release-flag build: 12 of 30 cases failed
+before and none after, covering three barrier forms, BGRA8 and RGBA16F. Aligned pitches keep their
+timing. Each shadowed barrier costs 0.13-0.22 ms at 936x541 to 1292x892. Screenshots
+taken on the unfixed driver agree: 363, 936 and 1292 wide have holes, 535 and 562 do not.
+No fixed WindowServer session or real capture has been tested, and blur loss is unproven.
+
 ## Managed IOSurface icon rendering, 2026-11-05
 
 Retain the stable tiled GPU backing for shader-writable Managed IOSurfaces,

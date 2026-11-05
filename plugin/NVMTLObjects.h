@@ -229,7 +229,7 @@ uint32_t nvmtl_geoms_from_descriptor(id desc, nvmtl_geom *out, uint32_t max, int
   uint32_t _visSlot; NSUInteger _visOffset;
   BOOL _visActive, _visPending;
   NSMutableArray *_visRecords;
-  nvk_pass _pass; nvk_rtsig _passSig; BOOL _hasRef, _refused;
+  nvk_pass _pass; nvk_rtsig _passSig; BOOL _hasRef, _refused, _passDrawn;
 } @end
 @interface NVMTLRenderCommandEncoder ()
 - (BOOL)nvmtlBuildPass:(MTLRenderPassDescriptor *)d;

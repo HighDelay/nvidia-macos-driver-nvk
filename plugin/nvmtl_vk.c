@@ -7058,8 +7058,8 @@ typedef struct nvmtl_render_shadow {
     nvk_image *target;
 } nvmtl_render_shadow;
 
-static int nvmtl_vk_cmd_begin_pass_body(nvk_cmdbuf *c, const nvk_pass *ps, nvk_pipeline *p);
-int nvmtl_vk_cmd_begin_pass(nvk_cmdbuf *c, const nvk_pass *ps, nvk_pipeline *p)
+// The linear colour attachments of a pass that NVK draws through its tiled shadow.
+static uint32_t nvmtl_pass_shadowed_attachments(const nvk_pass *ps)
 {
     int mixed = ps->dsview != NULL;
     uint32_t linear = 0;
@@ -7069,7 +7069,17 @@ int nvmtl_vk_cmd_begin_pass(nvk_cmdbuf *c, const nvk_pass *ps, nvk_pipeline *p)
         if (image->linear) { linear |= 1u << i; if (image->linear > 1) mixed = 1; }
         else mixed = 1;
     }
-    if (!linear || !mixed || !nvmtl_fbfetch_on())
+    return mixed ? linear : 0;
+}
+// A sampled view names the linear image, and the shadow only reaches that image when the pass ends, so a draw that
+// samples its own attachment reads the pass's starting contents. A render-target barrier has to end the pass.
+int nvmtl_vk_pass_render_shadowed(const nvk_pass *ps) { return nvmtl_pass_shadowed_attachments(ps) != 0; }
+
+static int nvmtl_vk_cmd_begin_pass_body(nvk_cmdbuf *c, const nvk_pass *ps, nvk_pipeline *p);
+int nvmtl_vk_cmd_begin_pass(nvk_cmdbuf *c, const nvk_pass *ps, nvk_pipeline *p)
+{
+    const uint32_t linear = nvmtl_pass_shadowed_attachments(ps);
+    if (!linear || !nvmtl_fbfetch_on())
         return nvmtl_vk_cmd_begin_pass_body(c, ps, p);
     if (c->in_rp || c->active_render_shadows) return -1;
     nvk_pass optimal = *ps;

@@ -3376,10 +3376,25 @@ static nvk_cmdbuf *nvmtl_hz_blit_open(NVMTLCommandBuffer *cb, id src, id dst) {
     BOOL visibility = _visActive || _visPending;
     [self nvmtlCloseVisibility];
     nvmtl_vk_cmd_end_render(&_cb->_c);
-    _begun = NO; _pass.load |= keep; _load |= keep; _visPending = visibility;
+    _begun = NO; _passDrawn = NO; _pass.load |= keep; _load |= keep; _visPending = visibility;
     nvmtl_vk_barrier_site(NVMTL_BARS_HAZARD_RESTART); nvmtl_vk_cmd_barrier(&_cb->_c);
     NVMTLRenderPipelineState *p = _ps;
     if (p) [self setRenderPipelineState:p];
+}
+// Core Animation reads its destination by sampling the attachment behind a render-target barrier when it has no
+// framebuffer fetch. An attachment drawn through NVK's shadow only reaches that sampled image when the pass ends, so the
+// barrier ends it. A capture surface has this pitch for most widths: an unfinished read lets a transparent part of a
+// layer overwrite what is under it. A pass with nothing drawn since it began has nothing to publish.
+- (BOOL)nvmtlPublishRenderShadows {
+    if (!_begun || !_passDrawn || !nvmtl_vk_pass_render_shadowed(&_pass)) return NO;
+    [self nvmtlHzRestart:NO];
+    return YES;
+}
+- (BOOL)nvmtlPassAttachment:(id<MTLResource>)resource {
+    if (![(id)resource isKindOfClass:[NVMTLTexture class]]) return NO;
+    NVMTLTexture *t = (NVMTLTexture *)resource;
+    for (uint32_t i = 0; i < NVMTL_NCOL; i++) if (_pass.col[i] == [t nvi]) return YES;
+    return NO;
 }
 // An indirect, patch or ICB draw, or a framebuffer-fetch pipeline: not checked by the model, so the pass is ordered by a
 // render pass's own dependencies from here on.
@@ -3504,6 +3519,7 @@ static BOOL nvmtl_pixel_sampler_update(NSMutableDictionary *states, NSString *in
     return selected;
 }
 - (BOOL)nvmtlBindSamplerPipeline {
+    _passDrawn = YES;
     if (!_ps) return NO;
     if (_cb->_c.hz_draw_due || _cb->_c.hz_wm_dirty) {   // hazard model: only a draw with something new is checked
       const int hzr = nvmtl_hz_draw(&_cb->_c);   // 1: restart behind a barrier; 2: a restart storm, keep a render pass
@@ -4112,6 +4128,7 @@ static NVMTLBuffer *nvmtl_bytes_ring(NVMTLCommandBuffer *cb, NSUInteger len, siz
     if (_begun) nvmtl_vk_cmd_set_cull(&_cb->_c, _cull);
 }
 - (void)executeCommandsInBuffer:(id<MTLIndirectCommandBuffer>)icb withRange:(NSRange)r {
+    _passDrawn = YES;
     NVMTLIndirectCommandBuffer *b = (NVMTLIndirectCommandBuffer *)icb;
     if (!b) { nvlog("executeCommandsInBuffer: nil"); return; }
     [self nvmtlHzForceFull];
@@ -4273,7 +4290,7 @@ static NVMTLBuffer *nvmtl_bytes_ring(NVMTLCommandBuffer *cb, NSUInteger len, siz
 - (void)useHeap:(id<MTLHeap>)h { nvmtl_use_heap(_cb, h); }
 - (void)useHeap:(id<MTLHeap>)h stages:(MTLRenderStages)st { (void)st; nvmtl_use_heap(_cb, h); }
 - (void)sampleCountersInBuffer:(id)sb atSampleIndex:(NSUInteger)i withBarrier:(BOOL)b { nvmtl_sample_counter(_cb, sb, i, self, b); }
-- (void)textureBarrier { nvmtl_vk_barrier_site(NVMTL_BARS_FENCE_API); nvmtl_vk_cmd_barrier(&_cb->_c); }
+- (void)textureBarrier { if ([self nvmtlPublishRenderShadows]) return; nvmtl_vk_barrier_site(NVMTL_BARS_FENCE_API); nvmtl_vk_cmd_barrier(&_cb->_c); }
 - (void)updateFence:(id<MTLFence>)f afterStages:(MTLRenderStages)st {}
 - (void)waitForFence:(id<MTLFence>)f beforeStages:(MTLRenderStages)st {
     // in a pass begun without a barrier the wait must order what came before the pass: restart it behind one
@@ -4281,8 +4298,14 @@ static NVMTLBuffer *nvmtl_bytes_ring(NVMTLCommandBuffer *cb, NSUInteger len, siz
     if (nvmtl_hz_mode() == 2) nvmtl_hz_force_full(&_cb->_c, 1);
     nvmtl_vk_barrier_site(NVMTL_BARS_FENCE_API); nvmtl_vk_cmd_barrier(&_cb->_c);
 }
-- (void)memoryBarrierWithScope:(MTLBarrierScope)scope afterStages:(MTLRenderStages)a beforeStages:(MTLRenderStages)b { nvmtl_vk_barrier_site(NVMTL_BARS_FENCE_API); nvmtl_vk_cmd_barrier(&_cb->_c); }
-- (void)memoryBarrierWithResources:(const id<MTLResource> __unsafe_unretained [])r count:(NSUInteger)n afterStages:(MTLRenderStages)a beforeStages:(MTLRenderStages)b { nvmtl_vk_barrier_site(NVMTL_BARS_FENCE_API); nvmtl_vk_cmd_barrier(&_cb->_c); }
+- (void)memoryBarrierWithScope:(MTLBarrierScope)scope afterStages:(MTLRenderStages)a beforeStages:(MTLRenderStages)b {
+    if ((scope & MTLBarrierScopeRenderTargets) && [self nvmtlPublishRenderShadows]) return;
+    nvmtl_vk_barrier_site(NVMTL_BARS_FENCE_API); nvmtl_vk_cmd_barrier(&_cb->_c);
+}
+- (void)memoryBarrierWithResources:(const id<MTLResource> __unsafe_unretained [])r count:(NSUInteger)n afterStages:(MTLRenderStages)a beforeStages:(MTLRenderStages)b {
+    for (NSUInteger i = 0; i < n; i++) if ([self nvmtlPassAttachment:r[i]]) { if ([self nvmtlPublishRenderShadows]) return; break; }
+    nvmtl_vk_barrier_site(NVMTL_BARS_FENCE_API); nvmtl_vk_cmd_barrier(&_cb->_c);
+}
 - (void)drawPrimitives:(MTLPrimitiveType)type indirectBuffer:(id<MTLBuffer>)buf indirectBufferOffset:(NSUInteger)off {
     NVMTLBuffer *nb = (NVMTLBuffer *)buf;
     if (!nb) { nvlog("drawPrimitives:indirectBuffer: nil"); return; }
