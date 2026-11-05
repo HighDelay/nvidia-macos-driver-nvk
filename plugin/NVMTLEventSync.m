@@ -56,7 +56,7 @@ static BOOL nvmtl_surface_pending_write(NVMTLCommandBuffer *cb, NVMTLTexture *t)
             NVMTLPendingSurfaceWrite *write = writes[key];
             NVMTLCommandBuffer *writer = write ? write->buffer : nil;
             NVMTLTexture *backing = write ? write->texture : nil;
-            const BOOL sameBacking = backing && (backing == t || (backing->_vramOn && t->_vramOn));
+            const BOOL sameBacking = backing && (backing == t || (backing->_vramOn && t->_vramOn && !backing->_surfaceLinear.img && !t->_surfaceLinear.img));
             if (writer && writer != cb && sameBacking && write->seed == IOSurfaceGetSeed(t->_surf)) return YES;
         }
         return NO;
@@ -212,7 +212,7 @@ static void nvmtl_ws_mark_pending(NVMTLCommandBuffer *cb) {
         for (NVMTLSubmissionPart *part in cb->_parts) {
             if (![part isKindOfClass:[NVMTLSubmissionPart class]]) continue;
             for (NVMTLTexture *t in part->surfaces)
-                if (t->_surf && t->_vramOn && !nvmtl_vk_surface_dirty((uint32_t)IOSurfaceGetID(t->_surf), (uint32_t)t->_plane)) [dirtied addObject:t];
+                if (t->_surf && t->_vramOn && !t->_surfaceLinear.img && !nvmtl_vk_surface_dirty((uint32_t)IOSurfaceGetID(t->_surf), (uint32_t)t->_plane)) [dirtied addObject:t];
         }
         holds->dirtied = dirtied;
     }

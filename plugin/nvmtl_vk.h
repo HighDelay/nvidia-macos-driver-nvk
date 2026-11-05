@@ -24,7 +24,10 @@ typedef struct { void *buf; void *mem; void *map; size_t size; size_t alloc; int
 typedef struct { void *img; void *mem; void *view; uint32_t w, h; size_t alloc; uint32_t layout; uint32_t mips; uint32_t fmt, bpp; uint32_t storage, mtl_type, layers; int placed; uint32_t bw, bh; uint32_t samples; uint32_t sysmem; uint32_t vkflags, usage;  uint32_t vfl;  uint64_t up_token;
                  void *pool; size_t poff, poollen; /* NVMTL_IMAGE_POOL: the pool block this image lives in and its reserved range */
                  size_t hz_off, hz_len;   /* placed: the image's byte range of mem, for the hazard model (0 = all of mem) */
-                 uint8_t hz_ut; } nvk_image;   /* hazard model: 0 not yet known, 1 tracked, 2 untracked (Metal hazardTrackingMode) */
+                 uint8_t hz_ut;
+                 uint8_t linear; /* buffer alias: 1 = 128-byte aligned, 2 = shadow required even without mixed tiling */
+                 uint8_t alias_a8; /* component mapping of a linear buffer image */
+               } nvk_image;   /* hazard model: 0 not yet known, 1 tracked, 2 untracked (Metal hazardTrackingMode) */
 #define NVMTL_NVAR 16
 #define NVMTL_NVAR_MAX 4096
 #define NVMTL_NCOL 8
@@ -140,6 +143,7 @@ typedef struct { void *cb; void *fb; void *pool; void *dset[2]; void *depth_view
                  nvmtl_fx_cb fx;   /* fault context: the last dispatches and the storage binds in force (nvmtl_fault_context.h) */
                  uint64_t fx_seq;  /* the queue-submit sequence number this command buffer was submitted with */
                  uint32_t begin_id; /* this command buffer's begin ordinal: what its per-dispatch witness words carry */
+                 void *render_shadows, *active_render_shadows; /* GPU-only feedback attachments; retired with this recording */
                } nvk_cmdbuf;
 int  nvmtl_vk_init(void);
 enum { NVMTL_STAGE_TEXTURE_SLOTS = 128, NVMTL_STAGE_SAMPLER_SLOTS = 32 };

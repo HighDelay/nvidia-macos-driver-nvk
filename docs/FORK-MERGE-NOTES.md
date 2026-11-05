@@ -22,6 +22,31 @@ is `470e391` (2.6.6), so this update uses an ordinary three-way merge. Earlier
 upstream history was rewritten: old 2.6.5 `ceba63c` maps to `c6f5aa0`; do not
 replay already integrated history. The preceding 2.6.4 base was `f95f4d2`.
 
+## Managed IOSurface icon rendering, 2026-11-05
+
+Retain the stable tiled GPU backing for shader-writable Managed IOSurfaces,
+shared by their texture wrappers, plus GPU copies to/from the family's linear
+publication image. Track GPU generations as well as CPU seeds; do not tag a
+CPU upload as updating the separate publication image. Keep failed copies
+unpublished, the weak backing cache and destruction order. Plain read-only
+imports retain the direct VRAM path and existing WindowServer optimizations.
+
+Keep the tiling-specific format queries and render/storage fallback checks.
+Mixed linear/tiled framebuffer-fetch passes use explicit tiled attachment views
+for both writes and reads, with GPU copy-back and command-buffer-owned lifetime.
+This prevents previous contents surviving in layered icons; clearing caches alone
+does not repair rendering. Existing corrupted icon entries need one regeneration
+after the repaired plugin is loaded by the icon services and Spotlight.
+
+Validation on RTX 2060 SUPER / 8 GiB BAR1 / Tahoe 26.7.1: 96 public-Metal GPU
+cases, 128 Shared/Managed scheduled handoffs and four Unknown-usage storage cases passed.
+Apple's fresh icon renderer and the normal Applications grid rendered correctly
+for the reproduced icons. No Sequoia or other-GPU result is implied. Run
+`tools/test_surface_render_formats.m` and the drawable-usage, buffer-view,
+publication, queue, schedule and import-lifetime harnesses before replacing this
+with any upstream equivalent. This is a local userland test; no release package
+or kext change accompanies it.
+
 ## Native Vulkan loader support, 2026-11-05
 
 Keep the three `vk_icd*` entry points, loader-interface negotiation at versions

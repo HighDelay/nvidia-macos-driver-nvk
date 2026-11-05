@@ -19,6 +19,8 @@ fixture=r'''
 typedef unsigned BOOL;
 typedef unsigned long NSUInteger;
 #define YES 1
+#define MTLResourceStorageModeShift 4
+#define MTLStorageModeManaged 1
 #define MTLTextureUsageUnknown 0
 #define MTLTextureUsageShaderRead 1
 #define MTLTextureUsageShaderWrite 2
@@ -26,13 +28,14 @@ typedef unsigned long NSUInteger;
 static const char *program;
 #define getprogname() program
 @@POLICY@@
-typedef struct { int storage; } nvk_image;
+#define VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT 0x10u
+typedef struct { int storage; unsigned usage; void *img; } nvk_image;
 typedef struct { int allocated; } nvk_buffer;
-typedef struct { uint64_t _vramBorn; nvk_buffer _vramBuf; BOOL _vramOn; uint32_t _surfSeed; BOOL _surfSynced; nvk_image _i; nvk_buffer _hostPages; } NVMTLTexture;
+typedef struct { uint64_t _vramBorn; nvk_buffer _vramBuf; BOOL _vramOn; uint32_t _surfSeed; BOOL _surfSynced; NSUInteger _ropt; nvk_image _surfaceLinear; nvk_image _i; nvk_buffer _hostPages; } NVMTLTexture;
 typedef void *IOSurfaceRef;
 static unsigned g_surf_vram,g_surf_private;
 static unsigned image_drops,buffer_drops,private_requests,alias_requests;
-static int drop_storage,alias_failure;
+static int drop_storage,drop_render,alias_failure,private_failure,tag_current;
 #define nvlog(...) ((void)0)
 static unsigned IOSurfaceGetPlaneCount(IOSurfaceRef s) { return 0; }
 static unsigned IOSurfaceGetBytesPerRow(IOSurfaceRef s) { return 2048; }
@@ -41,14 +44,14 @@ static unsigned IOSurfaceGetID(IOSurfaceRef s) { return 1; }
 static unsigned IOSurfaceGetSeed(IOSurfaceRef s) { return 7; }
 static int nvmtl_vk_surface_share_on(void) { return 1; }
 static int nvmtl_vk_format_is_storage(uint32_t f) { return 1; }
-static int nvmtl_vram_tag_current(IOSurfaceRef s, unsigned p, uint32_t seed) { return 0; }
+static int nvmtl_vram_tag_current(IOSurfaceRef s, unsigned p, uint32_t seed) { return tag_current; }
 static int nvmtl_vram_keep_get(int host,IOSurfaceRef s,NSUInteger p,size_t n,nvk_buffer *b,uint64_t *born) { b->allocated=!host;if(born)*born=10;return host?-1:0; }
-static int nvmtl_vk_image_create_buffer_alias(uint32_t w,uint32_t h,uint32_t f,uint32_t bpp,int a8,int storage,int render,nvk_buffer *b,size_t offset,size_t row,nvk_image *out) { alias_requests++;out->storage=storage&&!drop_storage;return alias_failure; }
+static int nvmtl_vk_image_create_buffer_alias(uint32_t w,uint32_t h,uint32_t f,uint32_t bpp,int a8,int storage,int render,nvk_buffer *b,size_t offset,size_t row,nvk_image *out) { alias_requests++;out->img=(void*)2;out->storage=storage&&!drop_storage;out->usage=render&&!drop_render?VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT:0;return alias_failure; }
 static void nvmtl_vk_image_destroy(nvk_image *i) { image_drops++;memset(i,0,sizeof *i); }
 static void nvmtl_vk_buffer_destroy(nvk_buffer *b) { assert(b->allocated);buffer_drops++;b->allocated=0; }
-static int nvmtl_vk_image_create_typed(uint32_t w,uint32_t h,uint32_t f,uint32_t bpp,int a8,unsigned mips,int storage,unsigned type,unsigned layers,nvk_image *out) { private_requests++;out->storage=storage;return 0; }
+static int nvmtl_vk_image_create_typed(uint32_t w,uint32_t h,uint32_t f,uint32_t bpp,int a8,unsigned mips,int storage,unsigned type,unsigned layers,nvk_image *out) { private_requests++;if(private_failure)return -1;out->img=(void*)3;out->storage=storage;return 0; }
 @@IMAGE@@
-static void reset(void) { image_drops=buffer_drops=private_requests=alias_requests=0;drop_storage=alias_failure=0; }
+static void reset(void) { image_drops=buffer_drops=private_requests=alias_requests=0;drop_storage=drop_render=alias_failure=private_failure=tag_current=0; }
 int main(int argc,char **argv) {
  assert(argc==2);program=argv[1];int ws=!strcmp(program,"WindowServer");
  assert(nvmtl_surface_usage(1,0,0)==(ws?1:5));
@@ -67,10 +70,32 @@ int main(int argc,char **argv) {
  memset(&t,0,sizeof t);reset();drop_storage=1;
  assert(!nvmtl_surface_image_create(&t,(void*)1,0,512,64,44,4,0,0));
  assert(t._vramOn && !t._i.storage && !private_requests && !image_drops && !buffer_drops);
+ // A format may support storage without render targets. Both
+ // initial writers and initial readers need one
+ // renderable private backing, including when their descriptor is Unknown.
+ for(unsigned storage=0;storage<2;storage++) {
+  memset(&t,0,sizeof t);reset();drop_render=1;
+  assert(!nvmtl_surface_image_create(&t,(void*)1,0,128,64,97,8,0,storage));
+  assert(!t._vramOn && t._i.storage && alias_requests==1 && private_requests==1 && buffer_drops==1 && image_drops==1);
+ }
  memset(&t,0,sizeof t);reset();alias_failure=1;
  assert(!nvmtl_surface_image_create(&t,(void*)1,0,512,64,44,4,0,1));
  assert(!t._vramOn && t._i.storage && private_requests==1 && buffer_drops==1 && !image_drops);
- puts("PASS: app/WindowServer and FBO policy, writable Unknown drawables, no-storage Unknown semantics, real storage fallback and exact cleanup");
+ // A fresh Managed GPU image must not inherit the shared image's "synced"
+ // state before importing its pixels. Its publication image stays owned.
+ memset(&t,0,sizeof t);reset();tag_current=1;t._ropt=MTLStorageModeManaged<<MTLResourceStorageModeShift;
+ assert(!nvmtl_surface_image_create(&t,(void*)1,0,128,64,97,8,0,1));
+ assert(t._vramOn && t._i.img==(void*)3 && t._surfaceLinear.img==(void*)2 && !t._surfSynced);
+ assert(private_requests==1 && !buffer_drops && !image_drops);
+ // Plain read-only imports, including WindowServer's, retain direct VRAM.
+ memset(&t,0,sizeof t);reset();tag_current=1;t._ropt=MTLStorageModeManaged<<MTLResourceStorageModeShift;
+ assert(!nvmtl_surface_image_create(&t,(void*)1,0,128,64,97,8,0,0));
+ assert(t._vramOn && !t._surfaceLinear.img && t._surfSynced && !private_requests);
+ // A tiled allocation failure releases both parts of the attempted import.
+ memset(&t,0,sizeof t);reset();private_failure=1;t._ropt=MTLStorageModeManaged<<MTLResourceStorageModeShift;
+ assert(nvmtl_surface_image_create(&t,(void*)1,0,128,64,97,8,0,1)==-1);
+ assert(!t._vramOn && !t._surfaceLinear.img && private_requests==2 && buffer_drops==1 && image_drops==1);
+ puts("PASS: app/WindowServer and FBO policy, Unknown semantics, real render/storage fallback and exact cleanup");
 }
 '''.replace('@@POLICY@@',policy).replace('@@IMAGE@@',image)
 with tempfile.TemporaryDirectory() as d:

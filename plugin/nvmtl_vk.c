@@ -7045,7 +7045,63 @@ static void nvmtl_clear_colour(VkClearColorValue *cv, uint32_t fmt, const float 
 }
 
 static void nvmtl_private_depth_layout(nvk_cmdbuf *, nvk_image *, VkImageLayout);
+// NVK renders a linear attachment through an internal tiled shadow when a
+// pass also has tiled attachments (or its linear pitch is not 128-byte aligned).
+// Input-attachment descriptors still name the linear image: [[color(n)]] then
+// reads the previous frame, rather than the clears/draws in that shadow. Use an
+// explicit optimal image for those feedback passes, for both render and input
+// views, and copy back on the GPU before publishing the original surface.
+// This is independent of process, pixel format and IOSurface cache identity.
+typedef struct nvmtl_render_shadow {
+    struct nvmtl_render_shadow *next, *active_next;
+    nvk_image image;
+    nvk_image *target;
+} nvmtl_render_shadow;
+
+static int nvmtl_vk_cmd_begin_pass_body(nvk_cmdbuf *c, const nvk_pass *ps, nvk_pipeline *p);
 int nvmtl_vk_cmd_begin_pass(nvk_cmdbuf *c, const nvk_pass *ps, nvk_pipeline *p)
+{
+    int mixed = ps->dsview != NULL;
+    uint32_t linear = 0;
+    for (uint32_t i = 0; i < NVMTL_NCOL; i++) {
+        const nvk_image *image = ps->col[i];
+        if (!image) continue;
+        if (image->linear) { linear |= 1u << i; if (image->linear > 1) mixed = 1; }
+        else mixed = 1;
+    }
+    if (!linear || !mixed || !nvmtl_fbfetch_on())
+        return nvmtl_vk_cmd_begin_pass_body(c, ps, p);
+    if (c->in_rp || c->active_render_shadows) return -1;
+    nvk_pass optimal = *ps;
+    nvmtl_render_shadow *active = NULL;
+    for (uint32_t i = 0; i < NVMTL_NCOL; i++) {
+        if (!(linear & (1u << i))) continue;
+        nvk_image *image = ps->col[i];
+        // Buffer image aliases are single-level, single-layer 2D images.
+        if (image->mips != 1 || image->layers != 1 || image->samples > 1 || ps->layers > 1)
+            return -1;
+        nvmtl_render_shadow *shadow = calloc(1, sizeof *shadow);
+        if (!shadow) return -1;
+        if (nvmtl_vk_image_create_typed(image->w, image->h, image->fmt, image->bpp,
+                                      image->alias_a8, 1, 0, 2, 1, &shadow->image)) {
+            free(shadow); return -1;
+        }
+        shadow->target = image;
+        shadow->next = c->render_shadows; c->render_shadows = shadow;
+        shadow->active_next = active; active = shadow;
+        // DontCare is represented as Load by our Metal pass model as well.
+        if ((ps->load & NVMTL_LOAD_COLOUR(i)) &&
+            nvmtl_vk_cmd_copy_image(c, image, 0, 0, &shadow->image, 0, 0, image->w, image->h)) return -1;
+        optimal.col[i] = &shadow->image;
+        if (nvmtl_vk_cmd_attachment_view_n(c, &shadow->image, 0, 0, 0, 1,
+                ps->colfmt[i], image->alias_a8, &optimal.colview[i], &optimal.colw[i], &optimal.colh[i])) return -1;
+    }
+    const int result = nvmtl_vk_cmd_begin_pass_body(c, &optimal, p);
+    if (!result) c->active_render_shadows = active;
+    return result;
+}
+
+static int nvmtl_vk_cmd_begin_pass_body(nvk_cmdbuf *c, const nvk_pass *ps, nvk_pipeline *p)
 {
     if (!p->rp || !ps->w || !ps->h) { nvlog("begin_render: apps2 no render pass or a %ux%u pass — pass REFUSED", ps->w, ps->h); return -1; }
     nvmtl_sample_pattern pattern = ps->sample_pattern;
@@ -7884,6 +7940,13 @@ void nvmtl_vk_cmd_end_render(nvk_cmdbuf *c) {
     nvmtl_order_barrier(c);
     nvmtl_dwit_mark(c, 0x8000u | (c->fx.total & 0x7FFFu));   // a render pass end: marked, not counted as a dispatch
     c->in_rp = 0; nvmtl_hz_pass_exit(c);
+    nvmtl_render_shadow *shadow = c->active_render_shadows;
+    c->active_render_shadows = NULL;
+    for (; shadow; shadow = shadow->active_next) {
+        nvk_image *image = shadow->target;
+        if (nvmtl_vk_cmd_copy_image(c, &shadow->image, 0, 0, image, 0, 0, image->w, image->h))
+            nvlog("feedback attachment: GPU copy back FAILED (%ux%u)", image->w, image->h);
+    }
     if (c->pt_open && c->pt_pool) { pvkCmdWriteTimestamp(c->cb, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, (VkQueryPool)c->pt_pool, 2 * c->pt_n + 1); c->pt_n++; c->pt_open = 0; g_pt_left--; }
     (void)nvmtl_counter_flush(c); }
 
@@ -7906,6 +7969,12 @@ static void nvmtl_cmd_retire(nvk_cmdbuf *c)
         pthread_mutex_unlock(&g_desc_lock);
     }
     free(c->sets); c->sets = NULL; c->nsets = c->capsets = 0; c->nobind = 0; c->skipped = 0;
+    nvmtl_render_shadow *shadow = c->render_shadows;
+    while (shadow) {
+        nvmtl_render_shadow *next = shadow->next;
+        nvmtl_vk_image_destroy(&shadow->image); free(shadow); shadow = next;
+    }
+    c->render_shadows = c->active_render_shadows = NULL;
     c->fetch_last_set = NULL;   // freed with the sets above
     free(c->table); c->table = NULL;
     nvmtl_address_page *page = c->address_pages;
@@ -10418,6 +10487,53 @@ int nvmtl_vk_buffer_create_placed(size_t size, nvk_heap *heap, size_t offset, nv
     return 0;
 }
 
+// Format capabilities belong to the image's actual tiling. NVK's DRM modifier
+// 0 supports colour attachments even when plain LINEAR tiling does not. Using
+// linearTilingFeatures for a modifier image silently dropped RenderTarget and
+// its required input-attachment usage for framebuffer fetch.
+// One physical device is fixed for this process; avoid querying/allocating for
+// every IOSurface wrapper and each candidate view format.
+static _Atomic uint64_t g_alias_feature_cache[2][256];
+static VkFormatFeatureFlags nvmtl_vk_buffer_tiling_features(PFN_vkGetPhysicalDeviceFormatProperties gfp, VkFormat format)
+{
+    const unsigned modifier = g_linmod != 0;
+    const unsigned index = (unsigned)format;
+    const uint64_t valid = 1ull << 32;
+    if (index < 256) {
+        const uint64_t cached = atomic_load_explicit(&g_alias_feature_cache[modifier][index], memory_order_acquire);
+        if (cached & valid) return (VkFormatFeatureFlags)cached;
+    }
+    VkFormatFeatureFlags features = 0;
+    if (!modifier) {
+        if (!gfp) return 0;
+        VkFormatProperties properties; memset(&properties, 0, sizeof properties);
+        gfp(g_pdev, format, &properties);
+        features = properties.linearTilingFeatures;
+    } else {
+        PFN_vkGetPhysicalDeviceFormatProperties2 query = (PFN_vkGetPhysicalDeviceFormatProperties2)
+            pvkGetInstanceProcAddr(g_inst, "vkGetPhysicalDeviceFormatProperties2");
+        if (!query) return 0;
+        VkDrmFormatModifierPropertiesListEXT list = { VK_STRUCTURE_TYPE_DRM_FORMAT_MODIFIER_PROPERTIES_LIST_EXT };
+        VkFormatProperties2 properties = { VK_STRUCTURE_TYPE_FORMAT_PROPERTIES_2, &list };
+        query(g_pdev, format, &properties);
+        const uint32_t capacity = list.drmFormatModifierCount;
+        if (!capacity) return 0;
+        VkDrmFormatModifierPropertiesEXT *modifiers = calloc(capacity, sizeof *modifiers);
+        if (!modifiers) return 0;
+        list.pDrmFormatModifierProperties = modifiers;
+        query(g_pdev, format, &properties);
+        for (uint32_t i = 0; i < list.drmFormatModifierCount && i < capacity; i++) {
+            if (!modifiers[i].drmFormatModifier && modifiers[i].drmFormatModifierPlaneCount == 1) {
+                features = modifiers[i].drmFormatModifierTilingFeatures;
+                break;
+            }
+        }
+        free(modifiers);
+    }
+    if (index < 256) atomic_store_explicit(&g_alias_feature_cache[modifier][index], valid | features, memory_order_release);
+    return features;
+}
+
 static int nvmtl_vk_image_create_buffer_alias_lifetime_body(uint32_t w, uint32_t h, uint32_t vkfmt, uint32_t bpp, int a8, int storage, int render,
                                        const nvk_buffer *b, size_t offset, size_t row_pitch, nvk_image *out);
 int nvmtl_vk_image_create_buffer_alias(uint32_t w, uint32_t h, uint32_t vkfmt, uint32_t bpp, int a8, int storage, int render,
@@ -10443,9 +10559,7 @@ static int nvmtl_vk_image_create_buffer_alias_lifetime_body(uint32_t w, uint32_t
     if (offset > b->size || (size_t)row_pitch * (h - 1) + (size_t)w * bpp > b->size - offset) {
         nvlog("buffer texture: %ux%u at offset %zu pitch %zu overruns the %zu-byte buffer", w, h, offset, row_pitch, b->size); return -1; }
     PFN_vkGetPhysicalDeviceFormatProperties gfp = (PFN_vkGetPhysicalDeviceFormatProperties)pvkGetInstanceProcAddr(g_inst, "vkGetPhysicalDeviceFormatProperties");
-    VkFormatProperties fp; memset(&fp, 0, sizeof fp);
-    if (gfp) gfp(g_pdev, (VkFormat)vkfmt, &fp);
-    VkFormatFeatureFlags lf = fp.linearTilingFeatures;
+    VkFormatFeatureFlags lf = nvmtl_vk_buffer_tiling_features(gfp, (VkFormat)vkfmt);
     if (!(lf & VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT)) { nvlog("buffer texture: VkFormat %u cannot be sampled LINEAR (features 0x%x)", vkfmt, (unsigned)lf); return -1; }
     int wantS = storage, wantR = render;
     storage = storage && !a8 && (lf & VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT);
@@ -10476,9 +10590,7 @@ static int nvmtl_vk_image_create_buffer_alias_lifetime_body(uint32_t w, uint32_t
         const VkFormatFeatureFlags need = nvmtl_vk_usage_features(ici.usage);
         int self_listed = 0;
         for (uint32_t i = 0; i < vtbln && nlist < (uint32_t)(sizeof vlist / sizeof *vlist); i++) {
-            VkFormatProperties pp; memset(&pp, 0, sizeof pp);
-            if (gfp) gfp(g_pdev, vtbl[i], &pp);
-            if ((pp.linearTilingFeatures & need) != need) continue;
+            if ((nvmtl_vk_buffer_tiling_features(gfp, vtbl[i]) & need) != need) continue;
             if ((uint32_t)vtbl[i] == vkfmt) self_listed = 1;
             vlist[nlist++] = vtbl[i];
             vmask |= 1u << i;
@@ -10533,6 +10645,8 @@ static int nvmtl_vk_image_create_buffer_alias_lifetime_body(uint32_t w, uint32_t
               (unsigned long long)mr.size, (unsigned long long)(mr.size - (b->size - offset)), b->size, offset);
     VKCK(pvkBindImageMemory(g_dev, (VkImage)out->img, (VkDeviceMemory)b->mem, at), "vkBindImageMemory(buffer texture)");
     out->mem = b->mem; out->placed = 1; out->alloc = 0; out->hz_off = at; out->hz_len = mr.size;
+    out->linear = (at % 128 || row_pitch % 128) ? 2 : 1;
+    out->alias_a8 = (uint8_t)a8;
     VkComponentMapping swz = nvmtl_a8_mapping(a8);
     VkImageViewCreateInfo vci = { VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO, NULL, 0, out->img, VK_IMAGE_VIEW_TYPE_2D,
         (VkFormat)vkfmt, swz, { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 } };

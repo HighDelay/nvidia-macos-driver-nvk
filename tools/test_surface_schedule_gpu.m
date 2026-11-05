@@ -1,6 +1,7 @@
 /* An unfenced IOSurface must be published before a scheduled handoff lets another
  * reader consume it. Run with the NVMTL device; metal_test_lookup.c can select a
- * private bundle. Pass 3 as an argument for the old-policy negative control.
+ * private bundle. Pass 3 for the old-policy negative control, or managed
+ * for the tiled Managed IOSurface publication regression.
  * clang -fobjc-arc tools/test_surface_schedule_gpu.m -framework Foundation \
  *   -framework Metal -framework IOSurface -o surface-schedule-test
  */
@@ -15,7 +16,8 @@ int main(int argc, char **argv) { @autoreleasepool {
         fprintf(stderr,"This probe requires the NVMTL device\n"); return 2;
     }
     // Release plugins sanitize inherited tuning variables at load time.
-    if (argc==2) setenv("NVMTL_SCHEDULE_AFTER_SURFACE_WRITES",argv[1],1);
+    const BOOL managed=argc==2 && !strcmp(argv[1],"managed");
+    if (argc==2 && !managed) setenv("NVMTL_SCHEDULE_AFTER_SURFACE_WRITES",argv[1],1);
     id<MTLCommandQueue> queue=[device newCommandQueue];
     unsigned stale=0, finalBad=0;
     for (unsigned frame=0; frame<64; ++frame) { @autoreleasepool {
@@ -29,7 +31,7 @@ int main(int argc, char **argv) { @autoreleasepool {
         MTLTextureDescriptor *td=[MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatBGRA8Unorm
             width:256 height:256 mipmapped:NO];
         td.usage=MTLTextureUsageRenderTarget|MTLTextureUsageShaderRead;
-        td.storageMode=MTLStorageModeShared;
+        td.storageMode=managed?MTLStorageModeManaged:MTLStorageModeShared;
         id<MTLTexture> texture=[device newTextureWithDescriptor:td iosurface:surface plane:0];
         if (!texture) return 4;
         MTLRenderPassDescriptor *pass=[MTLRenderPassDescriptor renderPassDescriptor];

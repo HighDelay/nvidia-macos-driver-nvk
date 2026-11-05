@@ -21,12 +21,12 @@ fixture = r'''
 typedef struct __IOSurface { unsigned seed; unsigned char cpu[4]; } Surface;
 typedef int IOReturn;
 enum { kIOSurfaceLockReadOnly = 1 };
-typedef struct { unsigned w,h,bpp; unsigned char gpu[4]; } Image;
+typedef struct { unsigned w,h,bpp; unsigned char gpu[4]; void *img; } Image;
 typedef struct { BOOL imported; } HostPages;
 static BOOL hostPagesAvailable;
 static size_t nvmtl_vk_host_import_align(void) { return 1; }
 static dispatch_semaphore_t entered, release_read;
-static unsigned uploads, gpu_seed;
+static unsigned uploads, gpu_seed, vram_generation=1, gpu_copies; static int copy_failure;
 static unsigned long long g_surfin_skip, g_surfin_copy;
 static uint32_t IOSurfaceGetSeed(IOSurfaceRef s) { return s->seed; }
 static unsigned IOSurfaceGetID(IOSurfaceRef s) { return 1; }
@@ -43,10 +43,10 @@ static void *IOSurfaceGetBaseAddressOfPlane(IOSurfaceRef s, uint32_t p) { return
 static size_t IOSurfaceGetBytesPerRowOfPlane(IOSurfaceRef s, uint32_t p) { return 4; }
 static void *IOSurfaceGetBaseAddress(IOSurfaceRef s) { return s->cpu; }
 static size_t IOSurfaceGetAllocSize(IOSurfaceRef s) { return sizeof s->cpu; }
-static uint32_t nvmtl_vram_gen(IOSurfaceRef s, NSUInteger p) { return 1; }
+static uint32_t nvmtl_vram_gen(IOSurfaceRef s, NSUInteger p) { return vram_generation; }
 static int nvmtl_vram_tag_current(IOSurfaceRef s, NSUInteger p, unsigned seed) { return gpu_seed == seed; }
 static void nvmtl_vram_tag_set(IOSurfaceRef s, NSUInteger p, unsigned seed) { gpu_seed=seed; }
-static unsigned nvmtl_vram_tag_bump(IOSurfaceRef s, NSUInteger p, unsigned seed) { return 1; }
+static unsigned nvmtl_vram_tag_bump(IOSurfaceRef s, NSUInteger p, unsigned seed) { gpu_seed=seed; return ++vram_generation; }
 // the kernel's VRAM mark: dirtyAnswer for the blocking one (1 = refused, the copy path), tryAnswer for the try that never
 // waits for the accelerator lock (1 = the lock was taken, -1 = refused); each call counted
 static int dirtyAnswer=1; static _Atomic int tryAnswer=-1;
@@ -60,6 +60,10 @@ static void nvmtl_frame_dump(const char *tag, void *base, size_t row, unsigned w
 static BOOL nvmtl_ws_kernel_waits(void){return NO;}
 static void nvmtl_ws_mark(uint32_t sid,BOOL pending){(void)sid;(void)pending;}
 static void nvtrace(const char *f,...){(void)f;}
+static int nvmtl_vk_copy_image(void *q, Image *src, unsigned sx, unsigned sy, Image *dst, unsigned dx, unsigned dy, unsigned w, unsigned h) {
+    gpu_copies++; if(copy_failure)return -1;
+    memcpy(dst->gpu,src->gpu,4); return 0;
+}
 static int nvmtl_vk_image_write(void *q, Image *i, void *base, size_t row) {
     memcpy(i->gpu,base,4); uploads++; return 0;
 }
@@ -81,7 +85,7 @@ static int nvmtl_vk_image_read_host(void *q, Image *img, void *base, size_t row,
 @interface NVMTLTexture : NSObject {
 @public NVMTLTexture *_parent; IOSurfaceRef _surf; BOOL _vramOn, _surfSynced;
     HostPages _hostPages;
-    uint32_t _surfSeed, _surfGen; NSUInteger _plane; Image _i; void *_q;
+    uint32_t _surfSeed, _surfGen; NSUInteger _plane; Image _i, _surfaceLinear; void *_q;
 }
 - (BOOL)nvmtlSurfaceCopyable;
 - (void)nvmtlSurfaceIn;
@@ -146,6 +150,24 @@ int main(int argc, char **argv) { @autoreleasepool {
     dirtyAnswer=0;
     assert([w nvmtlSurfaceOut] && tries==2 && blockingDirties==1);
     dirtyAnswer=1;
+    // Tiled Managed publication must copy into the family image before
+    // marking it current. A later GPU generation reloads it even at the same seed.
+    Surface managed={.seed=17}; NVMTLTexture *m=[NVMTLTexture new]; m->_surf=&managed; m->_vramOn=YES;
+    m->_i=(Image){.w=1,.h=1,.bpp=4,.gpu={3,17,41,255}};
+    m->_surfaceLinear=(Image){.w=1,.h=1,.bpp=4,.img=(void*)1};
+    dirtyAnswer=0;gpu_copies=0;
+    assert([m nvmtlSurfaceOut] && gpu_copies==1 && !memcmp(m->_i.gpu,m->_surfaceLinear.gpu,4));
+    memset(m->_surfaceLinear.gpu,82,4);vram_generation++;
+    [m nvmtlSurfaceIn];
+    assert(gpu_copies==2 && m->_i.gpu[0]==82 && m->_surfGen==vram_generation);
+    const unsigned previousUploads=uploads;
+    managed.seed++;memset(managed.cpu,93,4);[m nvmtlSurfaceIn];
+    assert(uploads==previousUploads+1 && m->_i.gpu[0]==93 && gpu_seed!=managed.seed);
+    // Failed copies cannot publish or bless an uninitialized tiled image.
+    copy_failure=1;const unsigned marksBefore=blockingDirties;
+    assert(![m nvmtlSurfaceOut] && blockingDirties==marksBefore);
+    m->_surfSynced=NO;gpu_seed=managed.seed;[m nvmtlSurfaceIn];assert(!m->_surfSynced);
+    copy_failure=0;[m nvmtlSurfaceIn];assert(m->_surfSynced && m->_i.gpu[0]==82);
     puts("PASS: overlapping publication preserves GPU pixels; later CPU edits import; a publication after the commit's "
          "VRAM mark never waits for the accelerator lock and retries a busy re-mark off its thread");
 } return 0; }
