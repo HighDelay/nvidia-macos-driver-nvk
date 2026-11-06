@@ -22,6 +22,44 @@ is `470e391` (2.6.6), so this update uses an ordinary three-way merge. Earlier
 upstream history was rewritten: old 2.6.5 `ceba63c` maps to `c6f5aa0`; do not
 replay already integrated history. The preceding 2.6.4 base was `f95f4d2`.
 
+## Multi-display flip and cursor repair, 2026-11-06
+
+Keep the per-head primary transaction monitor in `nvrm-head-gate.h`. The global
+display-management gate still protects shared state and NVKMS calls, but
+`waitFlipDone` releases all its recursive acquisitions while sleeping and
+restores them before polling completion. A reserved head serializes primary
+flips, modesets, gamma/LUT changes and power transitions; another head, cursor
+movement and allocation management can progress during a primary-flip wait.
+Cursor geometry/image requests wait for mode transitions, releasing management
+while they wait. Retain nested same-thread transactions and the framebuffer
+reference held by an accepted flip.
+
+Do not replace a completion wait with an early success. Keep the scanout
+memory duplicates, allocation cookies/epochs, prior-completion tests, fault
+retention and asynchronous NVAccel completion. Stop first prevents new primary
+work, drains its accepted head reservation, then unregisters callbacks and
+drains workers with no management/head reservation held. Preserve the cursor's
+`THREAD_CALL_OPTIONS_ONCE`, accepted-work retains and cancellation/drain code.
+
+The observed defect was reproduced on RTX 2060 SUPER / 8 GiB BAR1 / Tahoe 26.7.1
+with two 1080p 75 Hz displays. Kernel stacks show flip workers blocking one
+another and cursor workers behind the same global gate. The local candidate
+passes ASan/UBSan and TSan concurrency cases, two negative controls, 18 existing
+display regression entrypoints, transform/resolution checks and an isolated
+Tahoe kernel-collection link. The direct install preserves all eight existing
+collection extensions and their permanent paths, including macFUSE/HighPoint.
+After reboot, the candidate UUID was verified in the loaded framebuffer and the
+user confirmed normal desktop movement and cursor behavior on both displays.
+Sequoia execution and physical modeset/sleep/hotplug are not newly qualified.
+This is a source update with a direct local install; no package or release is
+prepared under the user's hold.
+
+Hardware VBlank registration and the existing timer fallback policy are unchanged.
+The head monitor uses the full-recursion drop/restore contract of
+[IORecursiveLockSleep](https://github.com/apple-oss-distributions/xnu/blob/main/iokit/Kernel/IOLocks.cpp).
+Local build, stack traces and installation/rollback records are under
+`out/records/multidisplay-20261106/`.
+
 ## Managed IOSurface icon rendering, 2026-11-05
 
 Retain the stable tiled GPU backing for shader-writable Managed IOSurfaces,

@@ -39,7 +39,7 @@ p0 = source.index('if (fSubmissionSeen) {', sc) + len('if (fSubmissionSeen) {')
 p1 = source.index('    const bool tracked', p0)
 prior_region = source[p0:p1]
 # the event-woken wait, lifted whole so the test runs the shipped loop
-w0 = source.index('static IOLock *sFlipWaitLock;')
+w0 = source.index('static IORecursiveLock *sFlipWaitLock;')
 w1 = source.index('\n}\n', source.index('bool NVRMNVDAFramebuffer::waitFlipDone(uint64_t limitUs)')) + 3
 waiter = source[w0:w1]
 statics = waiter[:waiter.index('void NVRMNVDAFramebuffer::flipWake')]
@@ -88,19 +88,20 @@ static void absolutetime_to_nanoseconds(uint64_t t, uint64_t *ns) { *ns = t; }
 static void nanoseconds_to_absolutetime(uint64_t ns, uint64_t *abs) { *abs = ns; }
 enum { kMicrosecondScale = 1000, kMillisecondScale = 1000000, THREAD_UNINT = 0 };
 using event_t = void *;
-struct IOLock { int held; };
-static IOLock gLockObj;
-static IOLock *IOLockAlloc() { return &gLockObj; }
-static void IOLockFree(IOLock *) {}
+// This fixture enters a reserved head with management held. The concurrent
+// reservation/drop/restore contract is exercised by test_display_head_concurrency.
+struct IORecursiveLock { int held=1; };
+static IORecursiveLock gLockObj;
+static IORecursiveLock *startLock() { return &gLockObj; }
+static bool IORecursiveLockHaveLock(IORecursiveLock *l) { return l->held; }
 static bool OSCompareAndSwapPtr(void *o, void *n, void *volatile *p) { if (*p != o) return false; *p = n; return true; }
-static void IOLockLock(IOLock *l) { l->held = 1; }
-static void IOLockUnlock(IOLock *l) { l->held = 0; }
 static void clock_interval_to_deadline(uint64_t v, uint64_t scale, uint64_t *out) { *out = (uint64_t)gClock + v * scale; }
 static int gSleeps = 0; static int64_t gLongestSleep = 0;
-static int IOLockSleepDeadline(IOLock *l, event_t, uint64_t deadline, int) {
-    assert(l->held && "the flip wait must sleep holding its lock");
+static int IORecursiveLockSleepDeadline(IORecursiveLock *l, event_t, uint64_t deadline, int) {
+    assert(l->held && "the flip wait must enter holding management");
+    l->held=0;
     int64_t d = (int64_t)deadline - gClock; if (d > gLongestSleep) gLongestSleep = d;
-    gSleeps++; if ((int64_t)deadline > gClock) gClock = (int64_t)deadline; return 0; }
+    gSleeps++; if ((int64_t)deadline > gClock) gClock = (int64_t)deadline; l->held=1; return 0; }
 STATICS
 
 static char gPresentMsg[8];
@@ -124,6 +125,7 @@ struct NvKmsKapiDisplayModeTimings { uint32_t pixelClockHz=0,hTotal=0,vTotal=0; 
 struct Rep { NvKmsFlipResult flipResult = NV_KMS_FLIP_RESULT_SUCCESS; };
 struct FB {
     Kms *fKms=nullptr; void *fDev=this; unsigned fHead=0; bool fSubmissionFaulted=false, fSubmissionSeen=false;
+    struct { bool owned() const { return true; } } fPrimaryGate;
     uint64_t fFlipSubmitAbs = 0; unsigned fLatchLateLogs = 0;
     int faultLogs = 0; const char *faultWhy = "";
     void flipFaultLog(const char *why) { faultLogs++; faultWhy = why; }
