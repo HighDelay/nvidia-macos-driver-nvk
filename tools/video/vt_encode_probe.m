@@ -16,12 +16,17 @@ static void encoded(void *context,void *source,OSStatus status,VTEncodeInfoFlags
     if(status||!sample||!CMSampleBufferDataIsReady(sample)||CMFormatDescriptionGetMediaSubType(CMSampleBufferGetFormatDescription(sample))!=r->codec){atomic_fetch_add(&r->errors,1);return;}
     atomic_fetch_add(&r->frames,1);atomic_fetch_add(&r->bytes,CMSampleBufferGetTotalSampleSize(sample));
 }
+#include "vt_service_test.h"
+
 int main(int argc,char **argv){@autoreleasepool{
-    require(argc==2,"usage: vt-encode-probe /path/to/libnvencvt.dylib");setvbuf(stdout,NULL,_IOLBF,0);
-    void *library=dlopen(argv[1],RTLD_NOW|RTLD_LOCAL);require(library!=NULL,"load additional codec library");
-    OSStatus (*reg)(int)=(void *)dlsym(library,"NVEncVT_Register");require(reg&&reg(1200)==noErr,"register additional decoders");
-    id<MTLDevice> device=MTLCreateSystemDefaultDevice();require(device!=nil,"create driver device for built-in codec registration");
-    printf("device=%s\n",device.name.UTF8String);
+    require(argc==2,"usage: vt-encode-probe /path/to/libnvencvt.dylib | encoder-service:/path/to/NVMTLDriver");setvbuf(stdout,NULL,_IOLBF,0);
+    void *service=vt_service_test(argv[1],"encoder");
+    if(!service) {
+        void *library=dlopen(argv[1],RTLD_NOW|RTLD_LOCAL);require(library!=NULL,"load additional codec library");
+        OSStatus (*reg)(int)=(void *)dlsym(library,"NVEncVT_Register");require(reg&&reg(1200)==noErr,"register additional decoders");
+        id<MTLDevice> device=MTLCreateSystemDefaultDevice();require(device!=nil,"create driver device for built-in codec registration");
+        printf("device=%s\n",device.name.UTF8String);
+    }
     for(unsigned hevc=0;hevc<2;hevc++){@autoreleasepool{
         Result r={0};r.codec=hevc?kCMVideoCodecType_HEVC:kCMVideoCodecType_H264;
         NSString *encoder=hevc?@"com.nvmtl.videoencoder.hevc.nvenc":@"com.nvmtl.videoencoder.avc.nvenc";
@@ -50,5 +55,5 @@ int main(int argc,char **argv){@autoreleasepool{
         VTCompressionSessionInvalidate(session);CFRelease(session);
         printf("%s: %s hardware=1 packets=%u errors=%u bytes=%llu\n",r.frames==8&&!r.errors&&r.bytes?"PASS":"FAIL",hevc?"HEVC":"H.264",atomic_load(&r.frames),atomic_load(&r.errors),atomic_load(&r.bytes));
         require(r.frames==8&&!r.errors&&r.bytes,"all frames encoded by retained driver codec");
-    }}return 0;
+    }}if(service)vt_service_isolation();return 0;
 }}

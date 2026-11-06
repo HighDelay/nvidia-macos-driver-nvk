@@ -29,6 +29,7 @@ class VideoRuntime(unittest.TestCase):
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_bytes(data)
         self.record = {'schema_version': 1, 'kind': 'nvenc-codecs', 'source': pin['source'], 'dependencies': pin['dependencies'],
+                       'registration_api': {'version': 2, 'symbol': 'NVEncVT_RegisterCodecs', 'decoder_scope': 1, 'encoder_scope': 2},
                        'overlay_sha256': STAGE.digest(ROOT / 'video' / pin['overlay']),
                        'target': {'os': 'macos', 'arch': 'x86_64', 'minimum_macos': '15.0'},
                        'turing_defaults': {'additional_decoders': ['vp08', 'vp09'], 'replace_stock_encoders': False, 'av1': False},
@@ -75,6 +76,12 @@ class VideoRuntime(unittest.TestCase):
     def test_changed_library_is_rejected(self):
         (self.runtime / 'libnvencvt.dylib').write_bytes(b'changed')
         with self.assertRaisesRegex(ValueError, 'hash mismatch'):
+            self.validate()
+
+    def test_unscoped_addon_is_rejected(self):
+        self.record.pop('registration_api')
+        self.write_record()
+        with self.assertRaisesRegex(ValueError, 'scoped registration API'):
             self.validate()
 
     def test_stale_overlay_is_rejected(self):

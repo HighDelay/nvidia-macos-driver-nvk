@@ -54,17 +54,20 @@ static void output(void *context,void *source,OSStatus status,VTDecodeInfoFlags 
 done:pthread_mutex_unlock(&r->mutex);
 }
 
+#include "vt_service_test.h"
+
 int main(int argc,char **argv){@autoreleasepool{
     require(argc==6||argc==7||argc==3,"usage: vt-codec-probe LIBRARY|installed INPUT.ivf REFERENCE.yuv DEPTH sync|async|reject [--minimal-output] | LIBRARY|installed capabilities");
     BOOL minimal=argc==7;
     if(minimal)require(!strcmp(argv[6],"--minimal-output"),"minimal browser output contract");
     setvbuf(stdout,NULL,_IOLBF,0);
+    void *service=vt_service_test(argv[1],"decoder");
     BOOL installed=!strcmp(argv[1],"installed");
     if(installed)require(MTLCreateSystemDefaultDevice()!=nil,"initialize installed driver");
-    void *library=dlopen(installed?"/Library/GPUBundles/NVMTLDriver.bundle/Contents/MacOS/libnvencvt.dylib":argv[1],installed?RTLD_LAZY|RTLD_LOCAL|RTLD_NOLOAD:RTLD_NOW|RTLD_LOCAL);
+    void *library=service?service:dlopen(installed?"/Library/GPUBundles/NVMTLDriver.bundle/Contents/MacOS/libnvencvt.dylib":argv[1],installed?RTLD_LAZY|RTLD_LOCAL|RTLD_NOLOAD:RTLD_NOW|RTLD_LOCAL);
     if(!library)fprintf(stderr,"dlopen: %s\n",dlerror());require(library!=NULL,installed?"driver loaded the codec addon automatically":"load codec library");
     OSStatus (*reg)(int)=(void *)dlsym(library,"NVEncVT_Register");require(reg!=NULL,"codec registration entrypoint");
-    OSStatus status=installed?noErr:reg(1200);printf("registration=%s status=%d\n",installed?"installed driver":"process-local",(int)status);require(status==noErr,"register Turing decoders");
+    OSStatus status=(installed||service)?noErr:reg(1200);printf("registration=%s status=%d\n",service?"decoder service":installed?"installed driver":"process-local",(int)status);require(status==noErr,"register Turing decoders");
     if(argc==3) {
         require(!strcmp(argv[2],"capabilities"),"capability mode");
         int *family=dlsym(library,"gNvencvtGpu");require(family&&*family==4,"probe is running on TU10x");
@@ -78,6 +81,7 @@ int main(int argc,char **argv){@autoreleasepool{
         printf("family=TU10x vp8_hw=%d vp9_hw=%d av1_hw=%d addon_encoders=%u\n",VTIsHardwareDecodeSupported('vp08'),VTIsHardwareDecodeSupported('vp09'),VTIsHardwareDecodeSupported('av01'),addonEncoders);
         require(VTIsHardwareDecodeSupported('vp08')&&VTIsHardwareDecodeSupported('vp09'),"Turing advertises both additional hardware decoders");
         require(!addonEncoders&&!VTIsHardwareDecodeSupported('av01'),"Turing keeps stock encoding and does not advertise AV1");
+        if(service)vt_service_isolation();
         return 0;
     }
     FILE *input=fopen(argv[2],"rb");require(input!=NULL,"open IVF input");uint8_t header[32];
@@ -117,5 +121,6 @@ int main(int argc,char **argv){@autoreleasepool{
     VTDecompressionSessionInvalidate(session);CFRelease(session);CFRelease(format);fclose(input);
     BOOL passed=reject?!r.frames&&(status||r.errors):!r.errors&&r.frames==r.expected;
     printf("%s: hardware=1 submitted=%u returned=%u expected=%u errors=%u dropped=%u mode=%s\n",passed?"PASS":"FAIL",submitted,r.frames,r.expected,r.errors,r.dropped,argv[5]);
+    if(service)vt_service_isolation();
     pthread_mutex_destroy(&r.mutex);return passed?0:1;
 }}

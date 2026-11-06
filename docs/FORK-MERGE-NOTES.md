@@ -1,5 +1,35 @@
 # Retained fork changes for upstream merges
 
+## Codec registration by process role, 2026-11-06
+
+Keep decoder/encoder service registration independent of Metal device creation.
+Start it only after `nvmtl_conf_settle()` completes; the asynchronous worker must
+not race configuration initialization. Built-in generation-specific libraries
+and the additional codec library register only the service's own role.
+
+Retain `NVEncVT_RegisterCodecs(rating, scope)` (1 decoder, 2 encoder, 3 both), the
+legacy combined wrapper, codec-disable settings and native sandboxed decoder
+delegation. The addon must use the same client policy as the built-in decoders;
+do not let its Ada/TU117 decoder factories bypass the QuickTime repair. Require
+the matching version-2 API in build/package records. Keep MX450 IDs `1f97`, `1f98`
+and `1f9c` excluded from both codec paths without excluding GTX 1650/MX550.
+
+Policy tests cover all existing addon families, service roles, disabled codecs,
+invalid scopes and retained codec sets. Isolated RTX 2060 SUPER / Tahoe tests
+register through the plugin constructor with one plugin image and no Vulkan
+renderer: H.264/HEVC hardware encoders return eight packets each, and VP8/VP9
+hardware decoders return twelve pixel-checked frames each in synchronous and
+asynchronous mode. The probe-only Metal-enumeration shim prevents the installed
+plugin loading alongside the candidate; never ship or apply it to applications.
+These are process-role probes, not tests inside Apple's actual XPC sandbox.
+
+Do not equate smooth Safari playback with hardware decode: the live GPU-process
+sample used `AppleH264SW`, and the sandbox denied executable mapping of
+`/Library/GPUBundles/NVMTLDriver.bundle`. Service registration does not override
+client codec discovery. No Safari sandbox change or general cross-GPU playback
+qualification is included. Retain the separate Safari renderer-lifetime repair.
+Local evidence is under `out/records/video-audit-20261106/`.
+
 ## Upstream 2.7.2 integration, 2026-11-06
 
 Integrate `18ba05f38b5eadea8b5ae05834bb51c61fb4c5c3` on top of fork `90b42b2`.

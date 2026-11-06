@@ -36,7 +36,7 @@ index a11a93a..3ea6360 100644
      if ((unsigned)d->width > d->maxW || (unsigned)d->height > d->maxH) { fprintf(stderr, "vp8dec: %dx%d is larger than the session\n", d->width, d->height); return -1; }
      const int surf = free_surface(d);
 diff --git a/vt/nvencvt.c b/vt/nvencvt.c
-index 8b25172..73b0644 100644
+index 8b25172..77be430 100644
 --- a/vt/nvencvt.c
 +++ b/vt/nvencvt.c
 @@ -66,7 +66,7 @@ static FILE *gLogF;   // NVENCVT_LOG: stderr; flag file /tmp/nvencvt.log (apps s
@@ -58,13 +58,14 @@ index 8b25172..73b0644 100644
  }
  
  static OSStatus register_one(FourCharCode codec, CFStringRef id, CFStringRef name, int rating)
-@@ -931,20 +932,37 @@ static void card_name_from(io_object_t d)
+@@ -931,20 +932,38 @@ static void card_name_from(io_object_t d)
  
  int gNvencvtGpu = GPU_NONE;   // what NVEncVT_Register found (vt/nvencvt_dec.c: AV1 on Ada and on GA10x)
  
 +static int pci_codec_family(unsigned vendor, unsigned device, unsigned classCode)
 +{
 +    if (vendor != 0x10de || (classCode >> 16) != 0x03) return GPU_NONE;
++    if (device == 0x1f97 || device == 0x1f98 || device == 0x1f9c) return GPU_NONE; // MX450: no NVENC/NVDEC
 +    if (device >= 0x2600 && device <= 0x28ff) return GPU_ADA;
 +    if (device >= 0x1f80 && device <= 0x1fff) return GPU_TU117;
 +    if (device >= 0x2200 && device <= 0x25ff) return GPU_AMPERE;
@@ -100,7 +101,17 @@ index 8b25172..73b0644 100644
              if (found > 0) card_name_from(d);
          }
          IOObjectRelease(d);
-@@ -1044,7 +1062,7 @@ __attribute__((visibility("default"))) OSStatus NVEncVT_Register(int rating)
+@@ -1038,13 +1057,15 @@ static void rename_encoders(const char *const ids[], const char *const names[],
+     LOG("rename: %d of %d encoder names set", done, n);
+ }
+ 
+-// registers the H.264 (avc1) and HEVC (hvc1) encoders; returns the H.264 registration's status
+-__attribute__((visibility("default"))) OSStatus NVEncVT_Register(int rating)
++// Scope 1 registers decoders, 2 encoders, 3 both. Decoder services must never
++// register encoders; native sandboxed clients keep decoder-service delegation.
++__attribute__((visibility("default"))) OSStatus NVEncVT_RegisterCodecs(int rating, unsigned scope)
+ {
++    if (!scope || (scope & ~3u)) return -50;
      int gpu = getenv("NVENCVT_ANY_GPU") ? GPU_ADA : pci_gpu_kind();
      if (gpu < 0) gpu = gpu_nvenc_kind();   // no PCI match (unusual): ask RM for the class list
      if (gpu <= 0) {
@@ -109,7 +120,25 @@ index 8b25172..73b0644 100644
          return kVTCouldNotFindVideoEncoderErr;
      }
      gNvencvtGpu = gpu;
-@@ -1079,8 +1097,11 @@ __attribute__((visibility("default"))) OSStatus NVEncVT_Register(int rating)
+@@ -1054,7 +1075,7 @@ __attribute__((visibility("default"))) OSStatus NVEncVT_Register(int rating)
+     // session for the parameter sets and another for the frames, and wrote Apple's parameter sets with our slices
+     // (undecodable files; T7.06). Such processes keep Apple's encoders; nvenc-run (injection) registers before any session.
+     // NVENCVT_BT=1 logs the call stack, NVENCVT_LATE=1 registers anyway.
+-    {
++    if (scope & 2u) {
+         void *bt[64]; const int nb = backtrace(bt, 64); bool inCreate = false;
+         for (int i = 0; i < nb; i++) {
+             Dl_info di;
+@@ -1065,7 +1086,7 @@ __attribute__((visibility("default"))) OSStatus NVEncVT_Register(int rating)
+         if (inCreate && !getenv("NVENCVT_LATE")) {
+             LOG("loaded inside VTCompressionSessionCreate (%s): not registering the encoders", getprogname());
+             extern OSStatus NVDecVT_Register(int rating);
+-            NVDecVT_Register(rating);
++            if (scope & 1u) NVDecVT_Register(rating);
+             return kVTCouldNotFindVideoEncoderErr;
+         }
+     }
+@@ -1079,8 +1100,12 @@ __attribute__((visibility("default"))) OSStatus NVEncVT_Register(int rating)
      // GA10x (RTX 30): the NVENC there is not Ada's, and our encoder setups are written for NVENC 8.2 (Ada) and 6.6
      // (TU117). Registering them anyway would make VideoToolbox pick an encoder that cannot start (NullMoth's own
      // encoders stay for these cards), so only the decoders register on GA10x. NVENCVT_AMPERE_ENC=1 tries them anyway.
@@ -117,20 +146,27 @@ index 8b25172..73b0644 100644
 -    if (!encoders) LOG("GA10x (RTX 30): the decoders only (NVENCVT_AMPERE_ENC=1 registers the encoders too)");
 +    // TU10x keeps the driver's matched H.264/HEVC encoders. Its NVDEC has
 +    // VP8/VP9, but its NVENC cannot encode them or AV1.
-+    const bool encoders = codec_external_encoder(gpu);
-+    if (gpu == GPU_TU10X) LOG("TU10x: additional VP8/VP9 decoders; keeping the driver's H.264/HEVC encoders");
-+    else if (!encoders) LOG("GA10x (RTX 30): the decoders only (NVENCVT_AMPERE_ENC=1 registers the encoders too)");
++    const bool encoders = (scope & 2u) && codec_external_encoder(gpu);
++    if (!(scope & 2u)) LOG("decoder-only registration");
++    else if (gpu == GPU_TU10X) LOG("TU10x: keeping the driver's H.264/HEVC encoders");
++    else if (gpu == GPU_AMPERE && !encoders) LOG("GA10x (RTX 30): keeping the driver's H.264/HEVC encoders (NVENCVT_AMPERE_ENC=1 overrides)");
      OSStatus st = encoders ? register_one(kCMVideoCodecType_H264, CFSTR(ENCODER_ID), na, rating) : kVTCouldNotFindVideoEncoderErr;
      OSStatus sh = !encoders || getenv("NVENCVT_NO_HEVC") ? kVTCouldNotFindVideoEncoderErr
                  : register_one(kCMVideoCodecType_HEVC, CFSTR(ENCODER_ID_HEVC), nh, rating);
-@@ -1095,8 +1116,8 @@ __attribute__((visibility("default"))) OSStatus NVEncVT_Register(int rating)
+@@ -1095,8 +1120,14 @@ __attribute__((visibility("default"))) OSStatus NVEncVT_Register(int rating)
      if (!s1) { ids[nreg] = ENCODER_ID_AV1; names[nreg] = nameAv1; codecs[nreg++] = "AV1"; }
      rename_encoders(ids, names, codecs, nreg);
      extern OSStatus NVDecVT_Register(int rating);   // vt/nvencvt_dec.c: the H.264 decoder (NVDEC), same rating
 -    NVDecVT_Register(rating);
 -    return st;
-+    const OSStatus decStatus = NVDecVT_Register(rating);
-+    return encoders ? st : decStatus;
++    const OSStatus decStatus = (scope & 1u) ? NVDecVT_Register(rating) : kVTCouldNotFindVideoDecoderErr;
++    return encoders ? st : (scope & 1u) ? decStatus : kVTCouldNotFindVideoEncoderErr;
++}
++
++// Preserve the existing standalone/injected API.
++__attribute__((visibility("default"))) OSStatus NVEncVT_Register(int rating)
++{
++    return NVEncVT_RegisterCodecs(rating, 3u);
  }
  
  // System-wide settings for apps that do not get our environment variables (started from the Dock / Finder):

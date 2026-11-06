@@ -219,9 +219,16 @@ static bool nvmtl_accel_armed(void)
 // one: on an RTX 3070 Laptop (issue #65, measured against Apple's software codecs) H.264 decode showed shifted macroblock
 // rows and a green stripe, and both encoders produced torn pictures. The decoder's only difference is its untiling mode
 // (1 = Blackwell, 0 = classic), so earlier GPUs load libnvdec_h264_t2d.dylib, the same library with mode 0 (51 dB on
-// GA104). The encoders are not registered on them, so apps use Apple's encoder until they are fixed for those GPUs.
+// GA104). The matched per-generation encoder libraries are selected separately below.
 // Set from the I/O registry where no Metal device (and so no Vulkan device name) exists: -1 = unknown, use the name.
 static int g_video_blackwell = -1;
+static _Atomic uint32_t g_video_profile_device;
+// MX450 has neither video engine despite belonging to the TU117 PCI family.
+// Keep other devices on their existing generation/class checks.
+static bool nvmtl_video_pci_has_codecs(uint32_t device)
+{
+    return device != 0x1f97 && device != 0x1f98 && device != 0x1f9c;
+}
 // One string from the per-generation profile NVRM publishes on the GPU's PCI device ("nvrm-gpu-profile": chip,
 // generation, engine classes, scan-out model, video layout). False when the driver is older than the profile or the key
 // is missing; callers then keep their previous rule.
@@ -236,11 +243,31 @@ static bool nvmtl_gpu_profile_string(CFStringRef key, char *out, size_t n)
         if (CFGetTypeID(d) == CFDictionaryGetTypeID()) {
             CFTypeRef v = CFDictionaryGetValue((CFDictionaryRef)d, key);
             if (v && CFGetTypeID(v) == CFStringGetTypeID()) ok = CFStringGetCString((CFStringRef)v, out, (CFIndex)n, kCFStringEncodingUTF8);
+            if (ok) {
+                CFTypeRef device = IORegistryEntryCreateCFProperty(o, CFSTR("device-id"), kCFAllocatorDefault, 0);
+                if (device && CFGetTypeID(device) == CFDataGetTypeID() && CFDataGetLength(device) >= 4) {
+                    uint32_t value = 0;
+                    CFDataGetBytes(device, CFRangeMake(0, 4), (UInt8 *)&value);
+                    atomic_store_explicit(&g_video_profile_device, value, memory_order_relaxed);
+                }
+                if (device) CFRelease(device);
+            }
         }
         CFRelease(d);
     }
     IOObjectRelease(it);
     return ok;
+}
+static bool nvmtl_video_has_codecs(void)
+{
+    static bool available = true;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        char layout[32];
+        if (nvmtl_gpu_profile_string(CFSTR("video-layout"), layout, sizeof layout))
+            available = nvmtl_video_pci_has_codecs(atomic_load_explicit(&g_video_profile_device, memory_order_relaxed) & 0xffffu);
+    });
+    return available;
 }
 // True when the generation the driver published is this one, whatever family follows it. The TU11x cards publish
 // "Turing GTX 16" where the TU10x ones publish plain "Turing", so an exact compare left every GTX 16 card without a
@@ -305,6 +332,21 @@ static bool nvmtl_is_decode_service(const char *me)
 {
     return me && strncmp(me, "VTDecoderXPCService", 19) == 0;
 }
+static bool nvmtl_is_encode_service(const char *me)
+{
+    return me && strncmp(me, "VTEncoderXPCService", 19) == 0;
+}
+// The addon may supply encoders and decoders independently. A codec service
+// receives only its own role; native sandboxed clients retain decoder delegation.
+static unsigned nvmtl_nvencvt_scope(const char *me, bool decoderAllowed)
+{
+    if (!me || !strcmp(me, "WindowServer")) return 0;
+    unsigned scope = nvmtl_is_decode_service(me) ? 1u :
+        nvmtl_is_encode_service(me) ? 2u : 2u | (decoderAllowed ? 1u : 0u);
+    if (getenv("NVMTL_NO_NVDEC")) scope &= ~1u;
+    if (getenv("NVMTL_NO_NVENC")) scope &= ~2u;
+    return scope;
+}
 static bool nvmtl_is_chromium_gpu_process(void)
 {
     int argc = *_NSGetArgc();
@@ -355,6 +397,7 @@ static void nvmtl_nvdec_register(void)
         const char *me = getprogname();
         if (getenv("NVMTL_NO_NVDEC")) { nvlog("nvdec: NVMTL_NO_NVDEC set - not registering in %s", me); return; }
         if (!strcmp(me, "WindowServer")) return;
+        if (!nvmtl_video_has_codecs()) { nvlog("video: this GPU has no media engines - not registering codecs"); return; }
         if (!nvmtl_can_register_decoder(me)) {
             nvlog("nvdec: %s cannot access the accelerator RM bridge - leaving H.264 to VTDecoderXPCService", me);
             return;
@@ -387,6 +430,7 @@ static void nvmtl_nvenc_register(void)
         const char *lib = nvmtl_nvenc_library_for_this_gpu();
         if (!lib) { nvlog("nvenc: no encoder library for %s - H.264 encode stays on Apple's encoder", nvmtl_vk_device_name()); return; }
         if (!strcmp(me, "WindowServer")) return;
+        if (!nvmtl_video_has_codecs()) { nvlog("video: this GPU has no media engines - not registering codecs"); return; }
         typedef int32_t (*RegFn)(uint32_t, CFDictionaryRef, void *);
         RegFn reg = (RegFn)dlsym(RTLD_DEFAULT, "VTRegisterVideoEncoderWithInfo");
         if (!reg) { nvlog("nvenc: VideoToolbox is not loaded in %s - not registering", me); return; }
@@ -442,6 +486,12 @@ static void nvmtl_nvencvt_register(void)
             if (!named) return;
         }
         if (!strcmp(me, "WindowServer")) return;     // the codec registrars all stay out of it
+        if (!nvmtl_video_has_codecs()) return;
+        // Match the built-in decoder policy for the addon too. Registering its
+        // decoder factories in native sandboxed players bypassed service
+        // delegation on Ada/TU117 and could reintroduce the QuickTime freeze.
+        unsigned scope = nvmtl_nvencvt_scope(me, nvmtl_can_register_decoder(me));
+        if (!scope) return;
         Dl_info di;
         if (!dladdr((const void *)nvmtl_nvencvt_register, &di) || !di.dli_fname) { nvlog("nvencvt: dladdr failed - not registering"); return; }
         char dir[1024], path[1200];
@@ -455,13 +505,18 @@ static void nvmtl_nvencvt_register(void)
         if (!h) { nvlog("nvencvt: dlopen %s FAILED: %s", path, dlerror()); return; }
         typedef int32_t (*RegFn)(int);
         RegFn r = (RegFn)dlsym(h, "NVEncVT_Register");
-        if (!r) { nvlog("nvencvt: %s has no NVEncVT_Register", path); return; }
+        typedef int32_t (*ScopedRegFn)(int, unsigned);
+        ScopedRegFn scoped = (ScopedRegFn)dlsym(h, "NVEncVT_RegisterCodecs");
+        if (!scoped && (!r || scope != 3u)) {
+            nvlog("nvencvt: %s needs the matching scoped codec addon (scope %u) - not registering", me, scope);
+            return;
+        }
         int rating = 1100;                           // above our own 1000, so the opt-in one wins where it is asked for
         const char *rv = getenv("NVMTL_NVENCVT_RATING");
         if (rv) { int v = atoi(rv); if (v > 0) rating = v; }
-        int32_t st = r(rating);
-        nvlog("nvencvt: external encoder %s in %s (NVEncVT_Register -> %d, rating %d, %s)",
-              st ? "NOT registered" : "REGISTERED", me, (int)st, rating, path);
+        int32_t st = scoped ? scoped(rating, scope) : r(rating);
+        nvlog("nvencvt: external codecs %s in %s (registration -> %d, rating %d, scope %u, %s)",
+              st ? "NOT registered" : "REGISTERED", me, (int)st, rating, scope, path);
     });
 }
 static void nvmtl_nvdec_hevc_register(void)
@@ -471,6 +526,7 @@ static void nvmtl_nvdec_hevc_register(void)
         const char *me = getprogname();
         if (getenv("NVMTL_NO_NVDEC_HEVC")) { nvlog("nvdec: NVMTL_NO_NVDEC_HEVC set - not registering HEVC in %s", me); return; }
         if (!strcmp(me, "WindowServer")) return;
+        if (!nvmtl_video_has_codecs()) { nvlog("video: this GPU has no media engines - not registering codecs"); return; }
         if (!nvmtl_can_register_decoder(me)) {
             nvlog("nvdec: %s cannot access the accelerator RM bridge - leaving HEVC to VTDecoderXPCService", me);
             return;
@@ -494,19 +550,22 @@ static void nvmtl_nvdec_hevc_register(void)
               st ? "NOT registered" : "REGISTERED", me, (int)st, path);
     });
 }
-// GH #175: with Chrome's GPU sandbox on, decoding runs in VTDecoderXPCService. Metal maps this bundle there (the
-// process holds the bundle's mappings but never creates a Metal device), but the decoders were registered only when a Metal
-// device came up, so that process never had them and H.264 fell to AppleH264SW. The decoder libraries open NVRM
-// themselves (IOKit; nothing from the Vulkan device), as NVIDIA's own decoder is a per-process capability needing no
-// render device. So in that one process register them at load, telling Blackwell apart by the GPU's PCI device id
-// instead of the Vulkan device name.
+// VideoToolbox services work on behalf of sandboxed apps without creating a Metal
+// render device. Register each service's codecs at load, using the GPU's published
+// profile (or PCI ID fallback) instead of a Vulkan device name. The codec libraries
+// open the RM bridge themselves and need no Vulkan context.
 static void nvmtl_nvdec_hevc_register(void);
-__attribute__((constructor)) static void nvmtl_nvdec_in_decode_service(void)
+static void nvmtl_nvenc_hevc_register(void);
+// Called by the configuration constructor after nvrm610.conf is fully applied.
+// Starting an asynchronous task in an earlier constructor could race that read.
+static void nvmtl_nvdec_in_decode_service(void)
 {
     const char *me = getprogname();
-    if (!nvmtl_is_decode_service(me) || getenv("NVMTL_NO_NVDEC")) return;
+    const bool decoder = nvmtl_is_decode_service(me), encoder = nvmtl_is_encode_service(me);
+    if (!decoder && !encoder) return;
     // off the loader's thread: the registration dlopens the decoder library
     dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
+        if (getenv(decoder ? "NVMTL_NO_NVDEC" : "NVMTL_NO_NVENC")) return;
         uint32_t dev = 0;
         io_iterator_t it = IO_OBJECT_NULL;
         if (IOServiceGetMatchingServices(kIOMainPortDefault, IOServiceMatching("IOPCIDevice"), &it) == KERN_SUCCESS) {
@@ -527,10 +586,16 @@ __attribute__((constructor)) static void nvmtl_nvdec_in_decode_service(void)
         char layout[32];
         if (nvmtl_gpu_profile_string(CFSTR("video-layout"), layout, sizeof layout)) g_video_blackwell = !strcmp(layout, "blackwell");
         else g_video_blackwell = dev >= 0x2b00 && dev < 0x3000;   // no profile (older NVRM): the GB20x device-id block
-        nvlog("nvdec: decode service, GPU 10de:%04x (%s): registering the decoders at load", dev,
+        nvlog("video: %s service, GPU 10de:%04x (%s): registering codecs at load", decoder ? "decoder" : "encoder", dev,
               g_video_blackwell ? "Blackwell" : "before Blackwell");
-        nvmtl_nvdec_register();
-        nvmtl_nvdec_hevc_register();
+        if (decoder) {
+            nvmtl_nvdec_register();
+            nvmtl_nvdec_hevc_register();
+        } else {
+            nvmtl_nvenc_register();
+            nvmtl_nvenc_hevc_register();
+        }
+        nvmtl_nvencvt_register(); // Only this service's role, without creating a Metal device.
     });
 }
 static void nvmtl_nvenc_hevc_register(void)
@@ -542,6 +607,7 @@ static void nvmtl_nvenc_hevc_register(void)
         const char *lib = nvmtl_nvenc_hevc_library_for_this_gpu();
         if (!lib) { nvlog("nvenc: no HEVC encoder library for %s - HEVC encode stays on Apple's encoder", nvmtl_vk_device_name()); return; }
         if (!strcmp(me, "WindowServer")) return;
+        if (!nvmtl_video_has_codecs()) { nvlog("video: this GPU has no media engines - not registering codecs"); return; }
         typedef int32_t (*RegFn)(uint32_t, CFDictionaryRef, void *);
         RegFn reg = (RegFn)dlsym(RTLD_DEFAULT, "VTRegisterVideoEncoderWithInfo");
         if (!reg) { nvlog("nvenc: VideoToolbox is not loaded in %s - not registering HEVC", me); return; }

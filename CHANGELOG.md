@@ -1,5 +1,6 @@
 ## Fork changes after 2.7.2 (unreleased)
 
+- Register additional video codecs in encoder/decoder services without requiring a Metal device; preserve sandboxed-player delegation and exclude MX450 models without media engines.
 - Publish shadowed render targets at Metal barriers so capture destination reads see earlier writes, including clears and draws after internal pass restarts. Preserve the aligned-surface path.
 
 ## Fork integration of 2.7.2

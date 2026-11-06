@@ -144,6 +144,9 @@ def validate_video_runtime(root):
     fields = json.loads((root / "NVENC-BUILD.json").read_text())
     pin = json.loads((REPO / "video/nvenc-source.json").read_text())
     require(fields.get("schema_version") == 1 and fields.get("kind") == "nvenc-codecs", "invalid codec runtime schema")
+    require(fields.get("registration_api") == {"version": 2, "symbol": "NVEncVT_RegisterCodecs",
+                                               "decoder_scope": 1, "encoder_scope": 2},
+            "codec runtime lacks the matching scoped registration API")
     require(fields.get("source") == pin["source"] and fields.get("dependencies") == pin["dependencies"],
             "codec runtime source/dependencies do not match this checkout")
     require(fields.get("overlay_sha256") == digest(REPO / "video" / pin["overlay"]), "codec source overlay mismatch")

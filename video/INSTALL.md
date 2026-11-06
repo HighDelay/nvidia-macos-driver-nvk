@@ -12,14 +12,21 @@ hardware capabilities. Ada, TU117 and Ampere retain the upstream codec selection
 the new VP8 VideoToolbox adapter is enabled for TU10x only. Ada keeps its upstream
 H.264/HEVC/AV1 encoders. Ampere keeps the driver's H.264/HEVC encoders and the
 addon's upstream VP9/AV1 decoders. TU117 keeps its upstream H.264/HEVC encoders.
+MX450 PCI IDs `1f97`, `1f98` and `1f9c` have no NVENC/NVDEC engines and are
+excluded. Other families retain their existing codec sets; hardware support alone
+does not mean every format/profile has a VideoToolbox adapter in this driver.
+Check NVIDIA's [hardware matrix](https://developer.nvidia.com/video-encode-decode-support-matrix).
 
 ## Installed driver
 
 Packages built with `--video-runtime` include `libnvencvt.dylib` beside the Metal
 plugin and a source/license record in `/Library/GPUBundles/nvmtl/video`.
-`NVMTL_NVENCVT=1` in `/Library/GPUBundles/nvmtl/nvrm610.conf` enables the addon when
-an application creates its Metal device. A pre-existing explicit setting is
-preserved. Restart the application after changing this setting; no reboot is
+`NVMTL_NVENCVT=1` in `/Library/GPUBundles/nvmtl/nvrm610.conf` enables the addon.
+Applications register it when creating a Metal device; VideoToolbox encoder and
+decoder services also register their own codec role at plugin load, without a
+render device. Configuration is applied before service registration. Native
+sandboxed players retain decoder-service delegation. A pre-existing explicit
+setting is preserved. Restart the application after changing it; no reboot is
 needed for a userland codec update.
 
 Applications must request VideoToolbox decoding for that codec. A registered
@@ -30,6 +37,12 @@ Edge 156 VP9 YouTube playback at **2160p60** is verified on RTX 2060 SUPER / Tah
 with VideoToolbox decoding and ANGLE enabled. If an earlier GPU crash forced
 software rendering, fully quit and reopen the browser after updating.
 [Browser repair and validation](../docs/BROWSER-VIDEO-DECODING.md).
+
+Safari needs separate verification: smooth playback does not establish NVDEC use.
+On the tested Tahoe/Safari setup, its GPU process denied executable mapping of
+`NVMTLDriver.bundle`, and the sampled H.264 playback used `AppleH264SW`. Registering
+codecs in the decoder service alone does not change the client's decoder choice.
+This update does not claim Safari hardware decoding or disable its sandbox.
 
 For command-line tools, preload the codec before their first VideoToolbox
 session. For example, with an existing compatible FFmpeg installation:
@@ -70,6 +83,9 @@ Pass `--video-runtime ../nvenc-runtime` to `build/stage_package.py`
 alongside the normal Minecraft, Wine and driver build inputs, then complete the
 normal Zink/combined package steps. Keep this runtime in future complete driver
 packages. No kernel or CGL changes are required for the codec library.
+The builder and package verifier require the matching scoped registration API
+(`NVEncVT_RegisterCodecs`, version 2); rebuild an older addon before packaging it
+with this plugin.
 
 ## Validation
 
@@ -82,6 +98,9 @@ H.264/HEVC hardware encoders each produced eight valid packets in a smoke test.
 
 Ada, Ampere and TU117 codec registration is regression-tested with recorded OS
 calls; those cards and Sequoia have not received hardware codec testing here.
+Constructor-only service-role probes also pass on the RTX 2060 SUPER, including
+VP8/VP9 pixel comparisons and H.264/HEVC hardware encoding without a Metal render
+device. These probes do not reproduce an Apple XPC service's sandbox.
 See the [initial validation](../docs/VIDEO-CODECS-VALIDATION.json),
 [browser follow-up](../docs/BROWSER-VIDEO-DECODING.json) and the probes in
 [`tools/video`](../tools/video). The probe's `installed` argument checks automatic

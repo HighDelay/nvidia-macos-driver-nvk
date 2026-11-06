@@ -108,6 +108,8 @@ def build(source, output, fetch=False):
         run('codesign', '--force', '--sign', '-', '--timestamp=none', binary)
         run('codesign', '--verify', '--strict', binary)
         run('lipo', binary, '-verify_arch', 'x86_64')
+        if '_NVEncVT_RegisterCodecs' not in run('nm', '-gU', binary):
+            raise ValueError('Codec library lacks scoped registration')
         platform = run('vtool', '-show-build', binary)
         if not re.search(r'\bminos 15\.0\b', platform):
             raise ValueError('Unexpected codec deployment target')
@@ -139,6 +141,8 @@ def build(source, output, fetch=False):
         shutil.copyfile(ROOT / 'video/INSTALL.md', work / 'INSTALL.md')
         record = {'schema_version': 1, 'kind': 'nvenc-codecs', 'source': PIN['source'], 'dependencies': PIN['dependencies'],
                   'overlay_sha256': sha(patch), 'source_files': inputs, 'version': version,
+                  'registration_api': {'version': 2, 'symbol': 'NVEncVT_RegisterCodecs',
+                                       'decoder_scope': 1, 'encoder_scope': 2},
                   'target': {'os': 'macos', 'arch': 'x86_64', 'minimum_macos': '15.0'},
                   'installation': {'library': '/Library/GPUBundles/NVMTLDriver.bundle/Contents/MacOS/libnvencvt.dylib',
                                    'records': '/Library/GPUBundles/nvmtl/video'},

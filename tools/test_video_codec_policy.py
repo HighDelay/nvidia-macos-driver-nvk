@@ -40,6 +40,11 @@ int main(void) {
  assert(pci_codec_family(0x10de,0x1e84,0x030000)==GPU_TU10X);
  assert(pci_codec_family(0x10de,0x2184,0x030000)==GPU_TU10X);
  assert(pci_codec_family(0x10de,0x1f82,0x030000)==GPU_TU117);
+ assert(pci_codec_family(0x10de,0x1f97,0x030000)==GPU_NONE);
+ assert(pci_codec_family(0x10de,0x1f98,0x030000)==GPU_NONE);
+ assert(pci_codec_family(0x10de,0x1f9c,0x030000)==GPU_NONE);
+ assert(pci_codec_family(0x10de,0x1f99,0x030000)==GPU_TU117); // Adjacent GTX1650 retains codecs.
+ assert(pci_codec_family(0x10de,0x1f9f,0x030000)==GPU_TU117); // MX550 has media engines.
  assert(pci_codec_family(0x10de,0x2489,0x030000)==GPU_AMPERE);
  assert(pci_codec_family(0x10de,0x2704,0x030200)==GPU_ADA);
  assert(pci_codec_family(0x10de,0x228e,0x040300)==GPU_NONE); // HDMI audio is not a GPU
@@ -77,7 +82,8 @@ with tempfile.TemporaryDirectory(prefix='nvenc-policy-') as directory:
 decoder = (args.source / 'vt/nvencvt_dec.c').read_text()
 definitions = '\n'.join(re.findall(r'^#define (?:ENCODER_ID|DECODER_ID)[^\n]+', source + '\n' + decoder, re.M))
 codec_enums = '\n'.join(re.findall(r'^enum \{ CODEC_[^;]+;', decoder, re.M))
-registrars = method(source, '__attribute__((visibility("default"))) OSStatus NVEncVT_Register(')
+registrars = method(source, '__attribute__((visibility("default"))) OSStatus NVEncVT_RegisterCodecs(')
+registrars += '\n' + method(source, '__attribute__((visibility("default"))) OSStatus NVEncVT_Register(')
 registrars += '\n' + method(decoder, 'OSStatus NVDecVT_Register(')
 registration_fixture = r'''
 #include <VideoToolbox/VideoToolbox.h>
@@ -143,10 +149,19 @@ int main(void){
  for(unsigned n=0;n<sizeof families/sizeof *families;n++){
   selected=families[n];encoders=decoders=0;OSStatus status=NVEncVT_Register(1100);
   assert((status==noErr)==(selected!=GPU_NONE));assert(encoders==expectedEncoder[n]);assert(decoders==expectedDecoder[n]);
+  for(unsigned scope=1;scope<=3;scope++){
+   encoders=decoders=0;status=NVEncVT_RegisterCodecs(1100,scope);
+   unsigned ee=(scope&2)?expectedEncoder[n]:0,dd=(scope&1)?expectedDecoder[n]:0;
+   assert(encoders==ee&&decoders==dd);
+   assert((status==noErr)==(ee!=0||dd!=0));
+  }
  }
+ encoders=decoders=0;
+ assert(NVEncVT_RegisterCodecs(1100,0)!=noErr&&NVEncVT_RegisterCodecs(1100,4)!=noErr);
+ assert(!encoders&&!decoders);
  selected=GPU_TU10X;encoders=decoders=0;setenv("NVENCVT_TURING_ALL_DEC","1",1);
  assert(NVEncVT_Register(1100)==noErr&&encoders==0&&decoders==(legacy|8));
- puts("PASS: complete registrar sets retain Ada H264/HEVC/AV1, TU117 H264/HEVC, Ampere VP9/AV1 and add TU10x VP8/VP9 only");
+ puts("PASS: complete registrar sets retain Ada/TU117/Ampere/TU10x codecs; decoder-only, encoder-only, combined and invalid scopes");
 }
 '''.replace('@@ENUM@@', enum).replace('@@CODEC_ENUMS@@', codec_enums).replace('@@DEFINITIONS@@', definitions)
 registration_fixture = registration_fixture.replace('@@ENCODER_POLICY@@', method(source, 'static bool codec_external_encoder(')).replace('@@REGISTRARS@@', registrars)

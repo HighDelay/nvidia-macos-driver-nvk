@@ -244,7 +244,10 @@ static void nvmtl_conf_settle(void)
     nvlog("profile: %s (%s): %u setting(s) applied, %u left as the user set them%s; shader cache %s", me, bid, set, kept,
           p->shader_from ? "; one kernel edit armed" : "", air[0] ? air : (getenv("NVMTL_AIRCACHE") ?: "shared"));
 }
-__attribute__((constructor)) static void nvmtl_conf_knobs(void) { nvmtl_conf_settle(); }
+__attribute__((constructor)) static void nvmtl_conf_knobs(void) {
+    nvmtl_conf_settle();
+    nvmtl_nvdec_in_decode_service();
+}
 static int nvmtl_dontcare_clears(void) {
     static int on = -1;
     if (on < 0) { const char *e = getenv("NVMTL_DONTCARE_CLEARS"); on = (e && *e && *e != '0') ? 1 : 0; }

@@ -79,6 +79,22 @@ int main(int argc, char **argv) {
                     scenario == 8 || scenario == 18 || scenario == 19 || scenario == 22;
     assert(nvmtl_can_register_decoder(name) == expected);
     assert(nvmtl_can_register_decoder(name) == expected); // both codec registrations share one check
+    unsigned scope=!name?0u:nvmtl_is_decode_service(name)?1u:(2u|(expected?1u:0u));
+    assert(nvmtl_nvencvt_scope(name,expected)==scope);
+    assert(nvmtl_nvencvt_scope("WindowServer",true)==0);
+    assert(nvmtl_nvencvt_scope(NULL,true)==0);
+    assert(nvmtl_nvencvt_scope("VTEncoderXPCService",true)==2);
+    assert(nvmtl_nvencvt_scope("VTEncoderXPCService.x86_64",false)==2);
+    assert(nvmtl_nvencvt_scope("VTDecoderXPCService",false)==1);
+    setenv("NVMTL_NO_NVDEC","1",1);
+    assert(nvmtl_nvencvt_scope(name,expected)==(scope&~1u));
+    unsetenv("NVMTL_NO_NVDEC");setenv("NVMTL_NO_NVENC","1",1);
+    assert(nvmtl_nvencvt_scope(name,expected)==(scope&~2u));
+    setenv("NVMTL_NO_NVDEC","1",1);assert(!nvmtl_nvencvt_scope(name,expected));
+    unsetenv("NVMTL_NO_NVENC");unsetenv("NVMTL_NO_NVDEC");
+    assert(!nvmtl_video_pci_has_codecs(0x1f97)&&!nvmtl_video_pci_has_codecs(0x1f98)&&!nvmtl_video_pci_has_codecs(0x1f9c));
+    assert(nvmtl_video_pci_has_codecs(0x1f99)&&nvmtl_video_pci_has_codecs(0x1f9f));
+    assert(nvmtl_video_pci_has_codecs(0x1f06)&&nvmtl_video_pci_has_codecs(0x2484)&&nvmtl_video_pci_has_codecs(0x2684)&&nvmtl_video_pci_has_codecs(0x2b85));
     if (scenario <= 1 || (scenario >= 9 && scenario <= 17) || scenario == 20 || scenario == 21) {
         assert(!opens && !closes && !matches && !releases && !logs);
         assert(queries == (scenario == 1 ? 0 : 2));
@@ -123,16 +139,17 @@ def main():
     )
     with tempfile.TemporaryDirectory(prefix="nvmtl-video-registration-") as tmp:
         src, exe = Path(tmp) / "test.m", Path(tmp) / "test"
-        src.write_text(HARNESS.replace("PRODUCTION", SOURCE[START:END]))
+        media_start = SOURCE.index("static bool nvmtl_video_pci_has_codecs(")
+        media_end = SOURCE.index("\n}", media_start) + 2
+        src.write_text(HARNESS.replace("PRODUCTION", SOURCE[media_start:media_end] + '\n' + SOURCE[START:END]))
         subprocess.run(["xcrun", "clang", "-fobjc-arc", "-O2", str(src),
                         "-framework", "Foundation", "-o", str(exe)], check=True)
         for index, case in enumerate(cases):
             subprocess.run([str(exe), str(index)], check=True, stdout=subprocess.DEVNULL)
             print("PASS", case)
-    for codec, end in (("nvmtl_nvdec_register", "nvmtl_nvenc_register"),
-                       ("nvmtl_nvdec_hevc_register", "// GH #175:")):
-        body = SOURCE[SOURCE.index("static void " + codec + "(void)") :]
-        body = body[:body.index(end)]
+    for codec in ("nvmtl_nvdec_register", "nvmtl_nvdec_hevc_register"):
+        start = SOURCE.index("static void " + codec + "(void)\n{")
+        body = SOURCE[start:SOURCE.index("\n}\n", start) + 3]
         assert "if (!nvmtl_can_register_decoder(me))" in body
         assert body.index('"WindowServer"') < body.index("nvmtl_can_register_decoder(me)")
         assert "NVMTL_NO_NVDEC" in body
