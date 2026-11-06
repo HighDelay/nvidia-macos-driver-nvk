@@ -24,6 +24,14 @@ struct IOService {};
 enum { kIOPMAckImplied=0, kIOFBNotifyDidPowerOn=1, kIOFBNotifyWillPowerOff=2 };
 static bool disabled=false, lockAvailable=true;
 static std::recursive_mutex displayLock;
+using IORecursiveLock = std::recursive_mutex;
+static IORecursiveLock *startLock() { return &displayLock; }
+static bool IORecursiveLockHaveLock(IORecursiveLock *) { return lockAvailable; }
+static void *IOThreadSelf() { static char thread; return &thread; }
+enum { THREAD_UNINT=0 };
+static void IORecursiveLockSleep(IORecursiveLock *,void *,unsigned) { assert(false && "unexpected concurrent power-policy fixture"); }
+static void IORecursiveLockWakeup(IORecursiveLock *,void *,bool) {}
+HEAD_GATE_INCLUDE
 struct NVRMDisplayGate {
     NVRMDisplayGate() { displayLock.lock(); }
     ~NVRMDisplayGate() { displayLock.unlock(); }
@@ -33,6 +41,7 @@ static bool PE_parse_boot_argn(const char*,char*,unsigned long) { return disable
 static int OSAddAtomic(int n,int *value) { int old=*value;*value+=n;return old; }
 #define FBLOG(...) ((void)0)
 struct NVRMNVDAFramebuffer {
+    NVRMHeadGateState fPrimaryGate;
     bool fHeadSlept=false, fModeSet=true, sleepOK=true, wakeOK=true;
     bool fPowerOn=true, pagingState=true, fSysSlept=false, gpuReady=true;
     unsigned familyWakes=0;
@@ -92,7 +101,8 @@ int main() {
 '''
 with tempfile.TemporaryDirectory() as directory:
     path = pathlib.Path(directory)
-    (path / 'test.cpp').write_text(fixture + methods + checks)
+    include = '#include "' + str(root / 'kexts/NVRMFB/fb/nvrm-head-gate.h') + '"'
+    (path / 'test.cpp').write_text(fixture.replace('HEAD_GATE_INCLUDE', include) + methods + checks)
     subprocess.run(['clang++', '-std=c++17', '-pthread', str(path / 'test.cpp'),
                     '-o', str(path / 'test')], check=True)
     subprocess.run([str(path / 'test')], check=True)

@@ -8,8 +8,8 @@ import re
 import subprocess
 from test_support import ROOT, FB, method
 
-BASE = "55f9263e2a62fc7b84b1d4ffead29c426bc98a40"
-RUNTIME_BASE = "f10c4685cef027f46b92f5b11c0b6635ea309930"
+BASE = "03f7ddd13f11f2ea43769f47c8f53b6e4e03990c"
+RUNTIME_BASE = BASE
 
 def historical(path, commit=BASE):
     return subprocess.check_output(["git", "show", commit + ":" + path], cwd=ROOT)
@@ -20,9 +20,9 @@ def same_methods(path, signatures):
     for signature in signatures:
         assert method(before, signature) == method(after, signature), (path, signature)
 
-# Runtime/build code is unchanged by upstream 2.6.4. Use the separately reviewed
-# D3D12/DLSS integration checkpoint; keep the earlier framebuffer/plugin checkpoint
-# below. Documentation is reviewed independently of these implementation checks.
+# Freeze the validated hotfix before the multi-display repair. Runtime, plugin
+# and accelerator optimizations stay unchanged; only the reviewed head-monitor
+# additions below are permitted in the framebuffer methods.
 for path in subprocess.check_output(["git", "ls-tree", "-r", "--name-only", RUNTIME_BASE,
                                      "nvk", "runtime", "build"], cwd=ROOT, text=True).splitlines():
     if not path.endswith(".md"):
@@ -31,6 +31,23 @@ assert (ROOT / "translator/wrapper/src/uniform_cbuf.rs").read_bytes() == histori
 
 fb_path = "kexts/NVRMFB/fb/nvrm-fb.cpp"
 old = historical(fb_path).decode()
+
+
+def without_head_monitor(body):
+    # The executable concurrency regression covers these additions. Keep the
+    # original method bodies, cursor drain and publication behavior exact.
+    for line in [
+        '    NVRMHeadGate primary(startLock(), fPrimaryGate, true);\n',
+        '    NVRMHeadGate primary(startLock(), fPrimaryGate, !pure);\n',
+        '    if (!primary.valid() || OSAddAtomic(0, &fStopping)) return false;\n',
+        '    if (!primary.valid() || OSAddAtomic(0, &fStopping) || fSubmissionFaulted) return false;\n',
+        '    if (!primary.valid()) return false;\n',
+        '    NVRMHeadGate::waitForCursor(startLock(), fPrimaryGate);\n',
+        '    retain();\n    NVRMCallReference callReference(this);\n',
+    ]:
+        body = body.replace(line, '')
+    return body
+
 for name in ["cursorInit", "cursorFire", "cursorApply", "scheduleCall",
              "setCursorState", "setCursorImageLocked", "publishCursorGeometry",
              "vramGrant", "vramRelease", "getApertureRange", "getVRAMRange", "headOff",
@@ -39,21 +56,26 @@ for name in ["cursorInit", "cursorFire", "cursorApply", "scheduleCall",
              "getCurrentDisplayMode", "setDetailedTimings", "dtIsCurrent", "publishRotatedSizes",
              "edidModeFor", "addKmsRefreshModes"]:
     signature = "NVRMNVDAFramebuffer::" + name + "("
-    assert method(FB, signature) == method(old, signature), name
+    assert without_head_monitor(method(FB, signature)) == method(old, signature), name
 
-# Audio adds two notification removals and its worker to cleanup; the cursor's
-# separate accepted-work drain must remain byte-for-byte intact.
+# Drain the accepted primary transaction before callbacks are unregistered.
+# Existing cursor accepted-work accounting and cancellation stay exact.
 stop = method(FB, "NVRMNVDAFramebuffer::stop(")
-for line in ["    if (fAudioReady) { fAudioReady->remove(); fAudioReady = nullptr; }\n",
-             "    if (fCodecReady) { fCodecReady->remove(); fCodecReady = nullptr; }\n"]:
-    assert stop.count(line) == 1
-    stop = stop.replace(line, "")
-assert stop.replace("&fConnectNotify, &fAudioCall}", "&fConnectNotify}") == method(old, "NVRMNVDAFramebuffer::stop(")
+drain = '''    // No new primary transaction may start after fStopping. Wait for the
+    // accepted one before removing completion callbacks or other head state.
+    // Drop both guards before draining workers that can enter this same head.
+    {
+        NVRMDisplayGate gate;
+        if (gate.valid()) { NVRMHeadGate primary(startLock(), fPrimaryGate, true); }
+    }
+'''
+assert stop.count(drain) == 1
+assert stop.replace(drain, '') == method(old, "NVRMNVDAFramebuffer::stop(")
 for name in ["applyMode", "flipToMemory"]:
     signature = "NVRMNVDAFramebuffer::" + name + "("
-    assert ''.join(method(FB, signature).replace("(NvU16)", "").split()) == ''.join(method(old, signature).split()), name
+    assert without_head_monitor(method(FB, signature)) == method(old, signature), name
 power = method(FB, "NVRMNVDAFramebuffer::setHeadPower(")
-assert power.replace("{ fHeadSlept = false; publishDisplayAudioProperties(); }", "fHeadSlept = false;") == method(old, "NVRMNVDAFramebuffer::setHeadPower(")
+assert without_head_monitor(power) == method(old, "NVRMNVDAFramebuffer::setHeadPower(")
 init = method(FB, "NVRMNVDAFramebuffer::kapiInit(")
 assert init.count("validateInitialDviMode();") == 1
 assert init.index("validateInitialDviMode();") < init.index("fBootW = fW")

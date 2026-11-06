@@ -1,4 +1,9 @@
-## Fork integration of 2.7.1 (unreleased)
+## Fork integration of 2.7.2 (unreleased)
+
+- Add upstream's macOS 26 Metal compatibility and kernel mapping/security repairs while retaining the fork's rendering and performance fixes.
+- Adapt the optional Intel-panel bridge to the new kernel-only display API; retain Safari playback, multi-monitor/cursor, Photo Booth, capture, native Zink and codec repairs. See [merge notes](docs/FORK-MERGE-NOTES.md#upstream-272-integration-2026-11-06).
+
+## Fork integration of 2.7.1
 
 - Retain native Zink, Photo Booth, ANGLE/capture, bounded shader-cache, video and Wine/NVK repairs while incorporating upstream renderer, lifetime and shader changes.
 - Keep growing allocation/image diagnostics behind the diagnostic opt-in in release builds.
@@ -7,6 +12,20 @@
 - Screenshots and window captures keep traffic lights, window corners and Control Center icons: a draw that reads its own IOSurface target now sees the draws before it when the row pitch is not 128-byte aligned.
 
 # Changelog
+
+## 2.7.2
+
+- Apps built for macOS 26 that read a pipeline's required threadgroup size no longer quit with an "unrecognized selector" error. Compute pipelines report the size they were created with, and a required size also sets the pipeline's maximum threads per threadgroup.
+- The depth bounds test works. Before, setting depth bounds on a render encoder did nothing, so pixels that should have been skipped were drawn. Pixels are now skipped when the depth already stored in the depth attachment is outside the bounds, as on Apple GPUs.
+- Texture views can be made from a texture view descriptor (macOS 26), with a pixel format, mip levels, slices, and a swizzle.
+- Setting a colour attachment map on a Metal 3 render encoder no longer stops the app. As on Apple GPUs, the map has no effect on a Metal 3 pipeline.
+- Fragment barycentrics are reported only on GPUs whose Vulkan driver provides them, so an app never builds a pipeline the GPU cannot run. On AMD GCN 3 and 4 the Vulkan driver now uses half-precision arithmetic where the hardware has it.
+- The 2.x driver is built for macOS 15 and macOS 26. On any other macOS version it creates no Metal device.
+- AMD and Intel GPU driver (test program, opt-in): AMD GPUs no longer stop at start-up after "register mmio size" (a PCI bridge lookup could loop forever). Safe start-up for RDNA 2, 3 and 3.5, GCN 1 to 3, Polaris cards macOS has no driver for, and Vega APUs. AMD GPUs that Apple's own drivers already run are left alone.
+- Security: fixed races in the NVIDIA kernel driver that let a logged-in user crash the Mac or corrupt kernel memory by binding, mapping, and closing GPU connections at the same time.
+- Security: the display driver no longer publishes kernel addresses where any app can read them.
+- Security: GPU profiling and channel priority now need an administrator. They were open to every user.
+- Security: a setuid or root process ignores the driver's environment settings, and a release build only loads a library named by one from a root-only folder.
 
 ## 2.7.1
 

@@ -28,6 +28,11 @@ extern "C" {
 #include <sys/proc.h>
 #include <sys/kauth.h>
 #include <sys/sysctl.h>
+#include <libkern/version.h>
+
+// The 2.x driver is built for macOS 15 (Darwin 24) and macOS 26 (Darwin 25) only; on any other kernel NVRM
+// claims nothing, so NVRMFB and NVRMAGDC, which attach to it, never start either.
+static bool nvrm_kernel_supported(void) { return version_major == 24 || version_major == 25; }
 
 #include "nvrm_gpuva_abi.h"
 #define NVRM_SS_KERNEL_ABI 1
@@ -76,9 +81,7 @@ static void nvrm_display_publish(IOService *provider, NvU32 gpuId)
         NVRMDisplay *nub = OSTypeAlloc(NVRMDisplay);
         if (!nub) break;
         if (!nub->init()) { nub->release(); break; }
-        nub->setProperty("nvkms-kapi", (unsigned long long)(uintptr_t)kapi, 64);
         nub->setProperty("gpu-id", (unsigned long long)gpuId, 32);
-        nub->setProperty("phys-for-va", (unsigned long long)(uintptr_t)&nv_xnu_phys_for_kernel_va, 64);
         nub->setProperty("fb-index", (unsigned long long)i, 32);
         if (!nub->attach(provider)) { nub->release(); break; }
         nub->registerService();
@@ -322,6 +325,9 @@ private:
     int  fBound = -1;
     SInt32 fCleaned = 0;
     IOLock *fGate = nullptr;      // serialises this client's methods against its own teardown
+    // Guards fMmap and nothing else. It is separate from fGate because RM writes another client's context from inside
+    // that client's neighbour's esc(), and because bind does not hold fGate. Nothing that takes another lock runs under it.
+    IOLock *fMapLock = nullptr;
     // Held across esc() and clientMemoryForType() and across the teardown in clientClose. The RM
     // callbacks below it (nv_add_mapping_context_to_file and friends) must NOT take it: they run
     // nested inside esc() for this same client and IOLock is not recursive.
@@ -345,6 +351,8 @@ public:
     int  boundFd() const { return fBound; }
     bool everBound() const { return fEverBound; }
     int  index() const { return fFd; }
+    bool cleaned() const { return fCleaned != 0; }
+    IOLock *mapLock() const { return fMapLock; }
 };
 extern "C" nv_file_private_t *nv_xnu_lookup_fd(NvS32 fd, void **priv, NvBool *isCtl)
 {
@@ -354,6 +362,10 @@ extern "C" nv_file_private_t *nv_xnu_lookup_fd(NvS32 fd, void **priv, NvBool *is
     IOLockLock(gNvClientsLock);
     for (int i = 0; i < NV_XNU_MAX_CLIENTS && !c; i++) { NVRMUserClient *k = gNvClients[i]; if (k && k->pid() == pid && k->boundFd() == (int)fd) c = k; }
     for (int i = 0; i < NV_XNU_MAX_CLIENTS && !c; i++) { NVRMUserClient *k = gNvClients[i]; if (k && k->pid() == pid && !k->everBound() && k->index() == (int)fd) c = k; }
+    // The caller keeps this client until nv_xnu_put_client. Taken under the table lock: clientClose empties the slot
+    // under the same lock, so a client still in the table cannot have been freed.
+    if (c && c->cleaned()) c = NULL;
+    if (c) c->retain();
     IOLockUnlock(gNvClientsLock);
     if (!c) return NULL;
     if (priv) *priv = c;
@@ -364,6 +376,17 @@ static void nvMmapContextClear(nv_alloc_mapping_context_t *c)
 {
     if (c->memArea.pRanges) kern_os_free(c->memArea.pRanges);
     bzero(c, sizeof *c);
+}
+extern "C" void nv_xnu_put_client(void *priv) { if (priv) ((OSObject *)priv)->release(); }
+extern "C" void nv_xnu_mmap_lock(void *priv)
+{
+    NVRMUserClient *c = OSDynamicCast(NVRMUserClient, (OSObject *)priv);
+    if (c && c->mapLock()) IOLockLock(c->mapLock());
+}
+extern "C" void nv_xnu_mmap_unlock(void *priv)
+{
+    NVRMUserClient *c = OSDynamicCast(NVRMUserClient, (OSObject *)priv);
+    if (c && c->mapLock()) IOLockUnlock(c->mapLock());
 }
 extern "C" nv_alloc_mapping_context_t *nv_xnu_mmap_context(void *priv)
 {
@@ -396,6 +419,7 @@ static inline bool nvrmNameIsUnknown(const char *s)
 IOService *NVRM::probe(IOService *provider, SInt32 *score)
 {
     { if (nvrm_driver_off()) return NULL; }
+    if (!nvrm_kernel_supported()) { LOG("Darwin %d is not supported by this driver: not claiming the GPU", version_major); return NULL; }
     IOService *res = super::probe(provider, score);
     IOPCIDevice *pci = OSDynamicCast(IOPCIDevice, provider);
     if (!pci) return NULL;
@@ -418,6 +442,7 @@ IOService *NVRM::probe(IOService *provider, SInt32 *score)
 bool NVRM::start(IOService *provider)
 {
     { if (nvrm_driver_off()) return false; }
+    if (!nvrm_kernel_supported()) return false;
     nvrm_guard_count_start();
     if (!super::start(provider)) return false;
     fPCI = OSDynamicCast(IOPCIDevice, provider);
@@ -1772,6 +1797,13 @@ IOReturn NVRM::callPlatformFunction(const OSSymbol *fn, bool wait, void *p1, voi
         if (fn->isEqualTo(NVRM_SS_FN_PAGEOFF))
             return nvrm_surfshare_pageoff((struct NVRMSurfPageoff *)p1, &fNv) ? kIOReturnIOError : kIOReturnSuccess;
     }
+    if (fn && fn->isEqualTo(NVRM_DISPLAY_PTRS_FN)) {
+        NVRMDisplayPointers *ptrs = (NVRMDisplayPointers *)p1;
+        if (!ptrs || ptrs->version != NVRM_DISPLAY_PTRS_ABI_VERSION) return kIOReturnBadArgument;
+        ptrs->kapi = nvkms_xnu_kapi_table();
+        ptrs->physForVa = (void *)&nv_xnu_phys_for_kernel_va;
+        return ptrs->kapi ? kIOReturnSuccess : kIOReturnNotReady;
+    }
     return IOService::callPlatformFunction(fn, wait, p1, p2, p3, p4);
 }
 
@@ -1794,6 +1826,8 @@ bool NVRMUserClient::initWithTask(task_t owningTask, void *securityID, UInt32 ty
     fIsCtl = (type == 0);
     fGate = IOLockAlloc();
     if (!fGate) return false;
+    fMapLock = IOLockAlloc();
+    if (!fMapLock) return false;
     nvu_memset(&fNvfp, 0, sizeof fNvfp);
     fNvfp.ctl_nvfp_priv = this;
     if (!gNvClientsLock) gNvClientsLock = IOLockAlloc();
@@ -1849,7 +1883,9 @@ IOReturn NVRMUserClient::clientClose(void)
         // IOMemoryDescriptor::withPhysicalAddress - so freeing it here let a process map whatever
         // landed in the reused block. Marking the context dead is enough; free() does the release,
         // and IOKit only gets there once no method can still be running.
+        IOLockLock(fMapLock);
         fMmap.valid = NV_FALSE;
+        IOLockUnlock(fMapLock);
         if (nv_xnu_chat()) kprintf("NVRM-xnu: client fd %d closed\n", fFd);
     }
     terminate();
@@ -1859,13 +1895,34 @@ void NVRMUserClient::free(void)
 {
     if (fMmap.memArea.pRanges) { kern_os_free(fMmap.memArea.pRanges); fMmap.memArea.pRanges = NULL; }
     if (fGate) { IOLockFree(fGate); fGate = nullptr; }
+    if (fMapLock) { IOLockFree(fMapLock); fMapLock = nullptr; }
     super::free();
 }
 IOReturn NVRMUserClient::clientMemoryForType(UInt32 type, IOOptionBits *options, IOMemoryDescriptor **memory)
 {
     Gate g(fGate);
-    nv_alloc_mapping_context_t *c = &fMmap;
-    if (!c->valid) { kprintf("NVRM-xnu: map on fd %d with no mapping context\n", fFd); return kIOReturnBadArgument; }
+    // Everything below reads this private copy. RM or a bind can replace the live context at any moment, and the ranges
+    // that are checked must be the ranges that are mapped.
+    nv_alloc_mapping_context_t snapshot;
+    MemoryRange *ranges = NULL;
+    IOLockLock(fMapLock);
+    if (!fMmap.valid) {
+        IOLockUnlock(fMapLock);
+        kprintf("NVRM-xnu: map on fd %d with no mapping context\n", fFd);
+        return kIOReturnBadArgument;
+    }
+    snapshot = fMmap;
+    if (!fIsCtl) {
+        const NvU64 count = snapshot.memArea.numRanges;
+        if (count == 0 || count > 4096 || !snapshot.memArea.pRanges) { IOLockUnlock(fMapLock); return kIOReturnBadArgument; }
+        ranges = (MemoryRange *)kern_os_malloc((size_t)(sizeof(MemoryRange) * count));
+        if (!ranges) { IOLockUnlock(fMapLock); return kIOReturnNoMemory; }
+        nvu_memcpy(ranges, snapshot.memArea.pRanges, (size_t)(sizeof(MemoryRange) * count));
+    }
+    IOLockUnlock(fMapLock);
+    snapshot.memArea.pRanges = ranges;
+    struct FreeRanges { MemoryRange *p; ~FreeRanges() { if (p) kern_os_free(p); } } freeRanges = { ranges };
+    nv_alloc_mapping_context_t *c = &snapshot;
     IOMemoryDescriptor *md = NULL;
     NvU32 caching = c->caching;
     if (fIsCtl) {
@@ -2019,9 +2076,15 @@ IOReturn NVRMUserClient::sBindFd(OSObject *target, void *reference, IOExternalMe
     // could be used for a new mapping. Not on detach (a negative value): the userland driver detaches a
     // connection it keeps alive for mappings that are still live, and clearing the context there left those
     // mappings unreleasable, so VRAM filled up and stayed full after the process exited.
-    if (me->fBound >= 0 && me->fMmap.valid) {
-        kprintf("NVRM-xnu: client %d re-bound to fd %d with a stale mapping context - cleared\n", me->fFd, me->fBound);
-        nvMmapContextClear(&me->fMmap);
+    // Under the mapping lock: two binds at once both saw valid and freed the same block, and a bind during a map freed
+    // the ranges that map was reading, so what it checked and what it mapped could differ.
+    if (me->fBound >= 0) {
+        IOLockLock(me->fMapLock);
+        if (me->fMmap.valid) {
+            kprintf("NVRM-xnu: client %d re-bound to fd %d with a stale mapping context - cleared\n", me->fFd, me->fBound);
+            nvMmapContextClear(&me->fMmap);
+        }
+        IOLockUnlock(me->fMapLock);
     }
     if (nv_xnu_chat()) kprintf("NVRM-xnu: client %d bound to pid %d fd %d\n", me->fFd, me->fPid, me->fBound);
     return kIOReturnSuccess;
