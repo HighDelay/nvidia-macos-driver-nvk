@@ -527,7 +527,8 @@ static void nvmtl_nvencvt_register(void)
         typedef int32_t (*RegFn)(int);
         RegFn r = (RegFn)dlsym(h, "NVEncVT_Register");
         if (!r) { nvlog("nvencvt: %s has no NVEncVT_Register", path); return; }
-        int rating = 1100;                           // above our own 1000, so the opt-in one wins where it is asked for
+        nvmtl_codec_sandbox_handles((const void *)r, path);   // its RM bridge opens /dev/null too (VP8/VP9 in Gecko RDD)
+        int rating = 1100;                          // above our own 1000, so the opt-in one wins where it is asked for
         const char *rv = getenv("NVMTL_NVENCVT_RATING");
         if (rv) { int v = atoi(rv); if (v > 0) rating = v; }
         int32_t st = r(rating);
