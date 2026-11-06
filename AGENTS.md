@@ -114,10 +114,11 @@ unless the user explicitly requests replacement. The already-approved
 
 Use [the Wine native NVK release](https://github.com/HighDelay/nvidia-macos-driver/releases/tag/v2.6.2-wine-nvk)
 as the delivery and release-description reference. Keep the Minecraft README link at the top,
-immediately followed by this Wine/CrossOver heading:
+immediately followed by these Wine/CrossOver and MPV headings in every driver release:
 
 ```markdown
 ### For Wine/Crossover native NVK, please read [this](https://github.com/HighDelay/nvidia-macos-driver#wine--crossover-native-vulkan)
+### For MPV and applications that select a custom Vulkan library. [Setup guide](https://github.com/HighDelay/nvidia-macos-driver-nvk/blob/main/nvk/native-macos/APPLICATIONS.md).
 ```
 
 Keep `What has been added` with relevant commit links, actual test results/hardware, the all-app
