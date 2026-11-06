@@ -1,5 +1,43 @@
 # Retained fork changes for upstream merges
 
+## Safari MediaSource visibility repair (2026-11-06)
+
+Retain `NVMTLWebKit.m` and its call after successful NVIDIA NVMTL device creation.
+Intel Safari can use a software VP9 decompression session while its renderer
+preferences predict otherwise. Visibility changes then flush queued video and
+stop the shared audio/video timebase until frames are re-enqueued. This reproduced
+with local, fully buffered MediaSource fixtures as well as YouTube; 360p also paused.
+
+The adapter selects WebKit's existing `MediaSourcePrefersDecompressionSession`
+mode through its ephemeral preference-update API. Keep the exact Safari process
+and bundle check, main-thread initialization, runtime feature/signature checks,
+same-image API lookup and pinned callback lifetime. Apply it to existing views and
+new/replaced configurations. Do not replace this with video-frame JavaScript,
+persistent browser defaults, private C++ object offsets or suppression of real
+flush/error notifications. `NVMTL_WEBKIT_STABLE_VIDEO=0` in `nvrm610.conf` disables
+the adapter after relaunching Safari.
+
+Preserve native decoder-service delegation, Chromium's sandbox/bridge checks,
+codec ratings, generation selection and the separate protected-content setting.
+This changes renderer lifetime, not NVDEC/NVENC registration or codec binaries;
+Safari VP9 hardware-decoder discovery remains separately unqualified.
+
+On RTX 2060 SUPER / 8 GiB BAR1 / Tahoe 26.7.1 / Safari 27.0, the clock-only VP9
+scrolling test improved from 3.220 to 7.800 seconds of media progress over 7.800
+seconds of wall time. H.264 stayed at 7.800 seconds. Renderer flush requests fell
+from 26 to zero; both clips had over 49 seconds buffered during scrolling. The
+user also confirmed continuous YouTube playback while scrolling, switching tabs
+and minimizing an overlapping Edge window after a normal Safari launch.
+
+The real WebKit API harness passes with ASan/UBSan against both system WebKit
+and Safari's staged WebKit, including autosave-named preferences without writes
+to user defaults, existing/new/nil/replaced configurations and unchanged protected
+content flags. Hardware VP8/VP9 pixel comparisons and H.264/HEVC encoder/decoder
+roundtrips pass. Codec payloads are byte-identical to the preceding installation.
+Other GPUs and Sequoia playback have not been tested for this repair; an absent
+feature or unfamiliar API leaves WebKit unchanged. Local records and rollback
+instructions are under `out/records/safari-video-repair-20261106/`.
+
 ## Merge policy
 
 Keep the fork's Tahoe fixes, existing performance optimizations, OpenGL/Minecraft changes and

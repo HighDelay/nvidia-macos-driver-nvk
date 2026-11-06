@@ -174,6 +174,7 @@ static void nvmtl_alloc_failed(const char *what) {
 @end
 #import "NVMTLObjects.h"
 static void nvmtl_photobooth_install(void);
+static void nvmtl_webkit_install(void);
 void nvmtl_vendor_compile_airs(NSDictionary<NSString *, NSString *> *airs,
                                NSDictionary<NSString *, NSString *> *stages);
 void nvmtl_vendor_attach_sass(id device, id pipelineState, id function);
@@ -678,6 +679,7 @@ static void nvmtl_install_hw_resource_pools(id dev)
     nvmtl_gl_caps_enable();
     nvmtl_photobooth_install();
     if (nvmtl_vk_vendor() == 0x10de) {   /* NVDEC/NVENC are NVIDIA engines reached through NVRM */
+        nvmtl_webkit_install();
         nvmtl_nvdec_register();
         nvmtl_nvenc_register();
         nvmtl_nvdec_hevc_register();
@@ -2543,6 +2545,7 @@ static NSInteger nvmtl_apple_family_max(void)
 
 #import "NVMTLDevice_contract.m"
 #import "NVMTLPhotoBooth.m"
+#import "NVMTLWebKit.m"
 
 #import "NVMTLObjects.m"
 #import "NVMTLForward.m"
