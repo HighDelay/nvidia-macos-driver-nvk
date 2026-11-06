@@ -6,7 +6,15 @@
 #import <Metal/Metal.h>
 #import <IOSurface/IOSurface.h>
 #include <IOKit/IOKitLib.h>
+#include <mach-o/dyld.h>
+#include <mach-o/loader.h>
+#include <mach-o/nlist.h>
+#include <mach/mach.h>
+#include <mach/mach_vm.h>
+#include <sys/sysctl.h>
 #include <dlfcn.h>
+#include <cerrno>
+#include <cstdarg>
 #include <fcntl.h>
 #include <unistd.h>
 #include <algorithm>
@@ -115,6 +123,127 @@ template<class T> T dproc(VkDevice d, const char *name) { return reinterpret_cas
 #define DP(dev, name) dproc<PFN_vk##name>((dev)->raw, "vk" #name)
 #define IP(inst, name) iproc<PFN_vk##name>((inst)->raw, "vk" #name)
 
+// Browser GPU-process sandboxes (Firefox/Zen) deny reading /dev/null and the
+// hw.pagesize sysctl. The NVK RM bridge uses a read-only /dev/null descriptor
+// only as an owned handle number, and Mesa sizes system memory through
+// sysconf(_SC_PHYS_PAGES), which Darwin's libc derives from hw.pagesize.
+// Inside those sandboxes NVK enumerated no device, Zink could not choose a
+// physical device and CGL fell back, forcing Firefox to software WebRender.
+// A read-only pipe end at EOF stands in for the denied null descriptor, as in
+// the Metal plugin's ICD path; failed page queries fall back to vm_page_size
+// and hw.memsize. Other paths, modes, errors and sysconf names are unchanged.
+int sandbox_open(const char *path, int flags, ...) {
+   mode_t mode = 0;
+   if (flags & O_CREAT) { va_list args; va_start(args, flags); mode = (mode_t)va_arg(args, int); va_end(args); }
+   int fd = open(path, flags, mode);
+   if (fd >= 0 || !path || strcmp(path, "/dev/null") || (flags & ~O_CLOEXEC) != O_RDONLY ||
+       (errno != EPERM && errno != EACCES)) return fd;
+   int ends[2];
+   if (pipe(ends)) return -1;
+   close(ends[1]);
+   if ((flags & O_CLOEXEC) && fcntl(ends[0], F_SETFD, FD_CLOEXEC) < 0) {
+      int error = errno; close(ends[0]); errno = error; return -1;
+   }
+   return ends[0];
+}
+
+long sandbox_sysconf(int name) {
+   const int saved = errno;
+   const long value = sysconf(name);
+   if (value != -1 || (name != _SC_PAGESIZE && name != _SC_PHYS_PAGES)) return value;
+   if (name == _SC_PAGESIZE) { errno = saved; return static_cast<long>(vm_page_size); }
+   // Darwin's libc derives _SC_PHYS_PAGES from the hw.pagesize sysctl. Use the
+   // byte total from hw.memsize, which those sandboxes allow, or the host info.
+   uint64_t bytes = 0;
+   size_t length = sizeof(bytes);
+   if (sysctlbyname("hw.memsize", &bytes, &length, nullptr, 0) || length != sizeof(bytes) || !bytes) {
+      host_basic_info_data_t info{};
+      mach_msg_type_number_t count = HOST_BASIC_INFO_COUNT;
+      mach_port_t host = mach_host_self();
+      const kern_return_t result = host_info(host, HOST_BASIC_INFO, reinterpret_cast<host_info_t>(&info), &count);
+      mach_port_deallocate(mach_task_self(), host);
+      if (result != KERN_SUCCESS || !info.max_mem) return value;
+      bytes = info.max_mem;
+   }
+   errno = saved;
+   return static_cast<long>(bytes / vm_page_size);
+}
+
+// Redirect the _open/_sysconf symbol pointers of one loaded image only.
+void redirect_sandbox_imports(const mach_header_64 *header, intptr_t slide) {
+   const symtab_command *symtab = nullptr;
+   const dysymtab_command *dysymtab = nullptr;
+   const segment_command_64 *linkedit = nullptr;
+   const load_command *command = reinterpret_cast<const load_command *>(header + 1);
+   for (uint32_t i = 0; i < header->ncmds; ++i) {
+      if (command->cmd == LC_SYMTAB) symtab = reinterpret_cast<const symtab_command *>(command);
+      else if (command->cmd == LC_DYSYMTAB) dysymtab = reinterpret_cast<const dysymtab_command *>(command);
+      else if (command->cmd == LC_SEGMENT_64 &&
+               !strcmp(reinterpret_cast<const segment_command_64 *>(command)->segname, SEG_LINKEDIT))
+         linkedit = reinterpret_cast<const segment_command_64 *>(command);
+      command = reinterpret_cast<const load_command *>(reinterpret_cast<const char *>(command) + command->cmdsize);
+   }
+   if (!symtab || !dysymtab || !linkedit || !dysymtab->nindirectsyms) return;
+   const uintptr_t base = static_cast<uintptr_t>(slide) + linkedit->vmaddr - linkedit->fileoff;
+   const auto *symbols = reinterpret_cast<const nlist_64 *>(base + symtab->symoff);
+   const auto *strings = reinterpret_cast<const char *>(base + symtab->stroff);
+   const auto *indirect = reinterpret_cast<const uint32_t *>(base + dysymtab->indirectsymoff);
+   command = reinterpret_cast<const load_command *>(header + 1);
+   for (uint32_t i = 0; i < header->ncmds; ++i) {
+      if (command->cmd == LC_SEGMENT_64) {
+         const auto *segment = reinterpret_cast<const segment_command_64 *>(command);
+         const auto *sections = reinterpret_cast<const section_64 *>(segment + 1);
+         for (uint32_t s = 0; s < segment->nsects; ++s) {
+            const uint32_t type = sections[s].flags & SECTION_TYPE;
+            if (type != S_LAZY_SYMBOL_POINTERS && type != S_NON_LAZY_SYMBOL_POINTERS) continue;
+            void **slots = reinterpret_cast<void **>(static_cast<uintptr_t>(slide) + sections[s].addr);
+            const uint64_t count = sections[s].size / sizeof(void *);
+            for (uint64_t n = 0; n < count; ++n) {
+               const uint64_t entry = sections[s].reserved1 + n;
+               if (entry >= dysymtab->nindirectsyms) break;
+               const uint32_t index = indirect[entry];
+               if (index & (INDIRECT_SYMBOL_ABS | INDIRECT_SYMBOL_LOCAL) || index >= symtab->nsyms) continue;
+               const char *name = strings + symbols[index].n_un.n_strx;
+               void *replacement = !strcmp(name, "_open") ? reinterpret_cast<void *>(&sandbox_open) :
+                                   !strcmp(name, "_sysconf") ? reinterpret_cast<void *>(&sandbox_sysconf) : nullptr;
+               if (!replacement || slots[n] == replacement) continue;
+               mach_vm_address_t region = reinterpret_cast<mach_vm_address_t>(&slots[n]);
+               mach_vm_size_t region_size = 0;
+               vm_region_basic_info_data_64_t info{};
+               mach_msg_type_number_t info_count = VM_REGION_BASIC_INFO_COUNT_64;
+               mach_port_t object = MACH_PORT_NULL;
+               if (mach_vm_region(mach_task_self(), &region, &region_size, VM_REGION_BASIC_INFO_64,
+                                  reinterpret_cast<vm_region_info_t>(&info), &info_count, &object) != KERN_SUCCESS)
+                  continue;
+               const bool writable = info.protection & VM_PROT_WRITE;
+               const mach_vm_address_t page = reinterpret_cast<mach_vm_address_t>(&slots[n]) & ~(mach_vm_address_t)(vm_page_size - 1);
+               if (!writable && mach_vm_protect(mach_task_self(), page, vm_page_size, false,
+                                                VM_PROT_READ | VM_PROT_WRITE | VM_PROT_COPY) != KERN_SUCCESS)
+                  continue;
+               slots[n] = replacement;
+               if (!writable) mach_vm_protect(mach_task_self(), page, vm_page_size, false, info.protection);
+            }
+         }
+      }
+      command = reinterpret_cast<const load_command *>(reinterpret_cast<const char *>(command) + command->cmdsize);
+   }
+}
+
+bool path_has_suffix(const char *path, const char *suffix) {
+   const size_t length = strlen(path), suffix_length = strlen(suffix);
+   return length >= suffix_length && !strcmp(path + length - suffix_length, suffix);
+}
+
+void redirect_renderer_sandbox_imports(const std::string &renderer) {
+   for (uint32_t i = 0, count = _dyld_image_count(); i < count; ++i) {
+      const char *name = _dyld_get_image_name(i);
+      const mach_header *header = _dyld_get_image_header(i);
+      if (!name || !header || header->magic != MH_MAGIC_64) continue;
+      if (renderer != name && !path_has_suffix(name, "/libnvk_zink.dylib")) continue;
+      redirect_sandbox_imports(reinterpret_cast<const mach_header_64 *>(header), _dyld_get_image_vmaddr_slide(i));
+   }
+}
+
 bool initialize() {
    std::call_once(backend_once, [] {
 #ifdef NVKBRIDGE_WINE
@@ -129,6 +258,7 @@ bool initialize() {
       path += "libnvk_renderer.dylib";
       backend = dlopen(path.c_str(), RTLD_NOW | RTLD_LOCAL | RTLD_FIRST);
       if (!backend) { fprintf(stderr, "NVK Bridge: renderer load failed: %s\n", dlerror()); return; }
+      redirect_renderer_sandbox_imports(path);
       backend_gipa = reinterpret_cast<PFN_vkGetInstanceProcAddr>(dlsym(backend, "vk_icdGetInstanceProcAddr"));
       stage_import = reinterpret_cast<StageImport>(dlsym(backend, "nvmtl_nvk_stage_import"));
       surface_dirty = reinterpret_cast<SurfaceDirty>(dlsym(backend, "nvmtl_nvk_surface_dirty"));
@@ -685,7 +815,7 @@ VkResult copy_frame(const std::shared_ptr<Chain> &c,uint32_t index,VkSemaphore h
    if (req.size>size) return VK_ERROR_OUT_OF_DEVICE_MEMORY;
    int mt=memory_type(*d,req.memoryTypeBits,VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);if (mt<0) return VK_ERROR_OUT_OF_DEVICE_MEMORY;
    VkImportMemoryFdInfoKHR imported{VK_STRUCTURE_TYPE_IMPORT_MEMORY_FD_INFO_KHR};
-   imported.handleType=VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_FD_BIT;imported.fd=open("/dev/null",O_RDONLY|O_CLOEXEC);
+   imported.handleType=VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_FD_BIT;imported.fd=sandbox_open("/dev/null",O_RDONLY|O_CLOEXEC);
    if (imported.fd<0) return VK_ERROR_OUT_OF_HOST_MEMORY;
    VkMemoryAllocateInfo allocation{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
    allocation.pNext=&imported;allocation.allocationSize=req.size;allocation.memoryTypeIndex=mt;
