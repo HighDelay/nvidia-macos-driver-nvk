@@ -51,8 +51,11 @@ def main():
     sdk = subprocess.check_output(['xcrun', '--show-sdk-path'], text=True).strip()
     headers = Path(sdk) / 'System/Library/Frameworks/OpenGL.framework/Headers'
     prototypes = {}
-    for header in ['gl3.h', 'gl.h', 'glext.h']:
-        for ret, name, params in re.findall(PROTOTYPE, (headers / header).read_text()):
+    for header in ['gl3.h', 'gl3ext.h', 'gl.h', 'glext.h']:
+        # Strip comments and preprocessor lines; gl3ext.h defines GLAPI as extern.
+        text = re.sub(r'/\*.*?\*/', ' ', (headers / header).read_text(), flags=re.S)
+        text = re.sub(r'^\s*#.*$', '', text, flags=re.M)
+        for ret, name, params in re.findall(PROTOTYPE, text):
             # Prefer core declarations when Apple assigns aliases one slot.
             prototypes.setdefault(name, (ret.strip(), name, params.strip()))
     required = {'glMapBufferRange', 'glFlushMappedBufferRange', 'glVertexAttribDivisor',
@@ -172,7 +175,7 @@ def main():
     (args.output / 'cgl-dispatch-map.json').write_text(json.dumps({
         'macos': subprocess.check_output(['sw_vers'], text=True),
         'source': 'local LLDB static disassembly of libGL public stubs',
-        'headers': ['gl3.h', 'gl.h', 'glext.h'],
+        'headers': ['gl3.h', 'gl3ext.h', 'gl.h', 'glext.h'],
         'context_prefix_bytes': 0x1e80, 'slots': slots,
         'aliases': {hex(slot): names for slot, names in shared.items() if len(names) > 1},
         'capabilities': capabilities,
