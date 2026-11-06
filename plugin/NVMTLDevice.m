@@ -219,20 +219,47 @@ static bool nvmtl_accel_armed(void)
 #include <mach/mach_vm.h>
 #include "nvmtl_fd_token.h"
 static int nvmtl_rebind_import(const void *inside, const char *symbol, void *repl);
+#include <sys/resource.h>
+// The kernel finds an RM connection by (pid, bound fd number), first match winning. The video libraries close such a
+// handle before their connection is gone, so a decoder opening while another one tears down could be given the same
+// number and send its RM calls to the dying connection: Firefox tears its HEVC probe session down on another thread
+// while it creates the VP9 one, and the VP9 channel's DMA map failed ("vp9dec: channel failed", -12911) in every
+// run. Handles take numbers from a rotating window in the upper half of the descriptor table instead, so a number
+// returns only after the rest of the window was used. Unchanged when the window cannot be used.
+static int nvmtl_codec_token_fd(int fd, int flags)
+{
+    struct rlimit rl;
+    if (fd < 0 || getrlimit(RLIMIT_NOFILE, &rl) || rl.rlim_cur < 128) return fd;
+    const int top = rl.rlim_cur > 4096 ? 4096 : (int)rl.rlim_cur, base = top / 2, span = top - base;
+    static _Atomic unsigned next;
+    for (int tries = 0; tries < 4; tries++) {
+        const int want = base + (int)(atomic_fetch_add(&next, 1u) % (unsigned)span);
+        const int moved = fcntl(fd, (flags & O_CLOEXEC) ? F_DUPFD_CLOEXEC : F_DUPFD, want);
+        if (moved >= 0) {
+            const int saved = errno;
+            close(fd);
+            errno = saved;
+            return moved;
+        }
+    }
+    return fd;
+}
 // The NVDEC/NVENC libraries carry an older copy of NVK's RM bridge, which opens /dev/null read-write only to own a handle
 // number (bound to the bridge connection, then closed; never read or written). Gecko's RDD sandbox allows no
 // /dev/null access at all, so StartSession failed ("nvd264: open /dev/nvidiactl failed") and VideoToolbox fell
 // back to software. Give those opens the same read-only null or pipe-end handle NVK's ICD gets. Every other path,
-// mode or error keeps open()'s own result.
+// mode or error keeps open()'s own result; /dev/null handles get a token number (above).
 static int nvmtl_codec_open(const char *path, int flags, ...)
 {
     mode_t mode = 0;
     if (flags & O_CREAT) { va_list args; va_start(args, flags); mode = (mode_t)va_arg(args, int); va_end(args); }
     int fd = open(path, flags, mode);
+    const bool null_dev = path && !strcmp(path, "/dev/null");
+    if (fd >= 0) return null_dev ? nvmtl_codec_token_fd(fd, flags) : fd;
     const int access = flags & O_ACCMODE;
-    if (fd >= 0 || !path || strcmp(path, "/dev/null") || (flags & ~(O_ACCMODE | O_CLOEXEC)) ||
-        (access != O_RDONLY && access != O_RDWR) || (errno != EACCES && errno != EPERM)) return fd;
-    return nvmtl_icd_open(path, O_RDONLY | (flags & O_CLOEXEC));
+    if (!null_dev || (flags & ~(O_ACCMODE | O_CLOEXEC)) || (access != O_RDONLY && access != O_RDWR) ||
+        (errno != EACCES && errno != EPERM)) return fd;
+    return nvmtl_codec_token_fd(nvmtl_icd_open(path, O_RDONLY | (flags & O_CLOEXEC)), flags);
 }
 static void nvmtl_codec_sandbox_handles(const void *inside, const char *path)
 {
@@ -527,7 +554,7 @@ static void nvmtl_nvencvt_register(void)
         typedef int32_t (*RegFn)(int);
         RegFn r = (RegFn)dlsym(h, "NVEncVT_Register");
         if (!r) { nvlog("nvencvt: %s has no NVEncVT_Register", path); return; }
-        nvmtl_codec_sandbox_handles((const void *)r, path);   // its RM bridge opens /dev/null too (VP8/VP9 in Gecko RDD)
+        nvmtl_codec_sandbox_handles((const void *)r, path);   // its RM bridge opens /dev/null tokens too
         int rating = 1100;                          // above our own 1000, so the opt-in one wins where it is asked for
         const char *rv = getenv("NVMTL_NVENCVT_RATING");
         if (rv) { int v = atoi(rv); if (v > 0) rating = v; }
