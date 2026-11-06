@@ -168,11 +168,19 @@ replace it with `_surfaceLinear` for WindowServer targets: that path moves
 publication off the kernel-marked GPU write.
 
 `tools/test_surface_render_feedback.m` uses the WindowServer name to select the
-import path. RTX 2060 / macOS 26.7.2 (25G332), release-flag build: 12 of 30 cases failed
-before and none after, covering three barrier forms, BGRA8 and RGBA16F. Aligned pitches keep their
-timing. Each shadowed barrier costs 0.13-0.22 ms at 936x541 to 1292x892. Screenshots
-taken on the unfixed driver agree: 363, 936 and 1292 wide have holes, 535 and 562 do not.
-No fixed WindowServer session or real capture has been tested, and blur loss is unproven.
+import path, and repeats each size on a buffer texture of the same pitch. A surface
+only takes the family import while the kernel can wire its VRAM into BAR1. With a
+256 MB BAR1 nearly full (`debug.nvrmfb_vram_mapped_bytes` 241.6 of 242.2 MB), imports
+were refused with `VK_ERROR_INVALID_EXTERNAL_HANDLE`, surfaces fell back to private
+images and passed unfixed. The surface rows therefore prove nothing on their own:
+read the path each row prints. Buffer rows always draw through the shadow.
+
+RTX 2060 / macOS 26.7.2 (25G332), 2.7.2 kexts, release-flag build merged with 2.7.2,
+three runs: every row on a shadow failed before (12 to 15 of 60) and none after, covering
+three barrier forms, BGRA8 and RGBA16F. Aligned pitches keep their timing. Each shadowed
+barrier cost 0.13-0.22 ms at 936x541 to 1292x892 before the merge. Screenshots taken on
+the unfixed driver agree: 363, 936 and 1292 wide have holes, 535 and 562 do not. No fixed
+WindowServer session or real capture has been tested, and blur loss is unproven.
 
 ## Managed IOSurface icon rendering, 2026-11-05
 

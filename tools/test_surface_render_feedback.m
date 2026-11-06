@@ -1,6 +1,8 @@
 // Draw into a WindowServer-style IOSurface, order the writes with a render-target barrier, then sample the attachment
 // from a later draw of the same pass. Core Animation reads its destination this way; a read that misses the earlier
 // draws lets the transparent part of a layer overwrite what is under it.
+// A surface takes the family import only while the kernel can wire its VRAM into BAR1, so a full BAR1 budget moves it to a
+// private image and hides the case. Each size also runs on a buffer texture with the same pitch, which is always linear.
 // clang -fobjc-arc -O2 tools/test_surface_render_feedback.m -o surface_render_feedback \
 //   -framework Foundation -framework Metal -framework IOSurface -framework IOKit
 // surface_render_feedback /absolute/path/NVMTLDriver [rounds=4]
@@ -9,6 +11,7 @@
 #import <IOSurface/IOSurface.h>
 #import <IOKit/IOKitLib.h>
 #import <objc/message.h>
+#import <objc/runtime.h>
 #include <dlfcn.h>
 #include <math.h>
 #include <stdio.h>
@@ -17,6 +20,7 @@
 #include <unistd.h>
 
 enum { BARRIER_SCOPE, BARRIER_TEXTURE, BARRIER_RESOURCES, BARRIER_COUNT };
+enum { BACKING_SURFACE, BACKING_BUFFER, BACKING_COUNT };
 static const char *const barrier_name[BARRIER_COUNT] = { "scope", "texture", "resources" };
 
 static void barrier(id<MTLRenderCommandEncoder> e, id<MTLTexture> t, int kind) {
@@ -24,6 +28,11 @@ static void barrier(id<MTLRenderCommandEncoder> e, id<MTLTexture> t, int kind) {
         [e memoryBarrierWithScope:MTLBarrierScopeRenderTargets afterStages:MTLRenderStageFragment beforeStages:MTLRenderStageFragment];
     else if (kind == BARRIER_TEXTURE) ((void (*)(id, SEL))objc_msgSend)(e, NSSelectorFromString(@"textureBarrier"));
     else { id<MTLResource> r[1] = { t }; [e memoryBarrierWithResources:r count:1 afterStages:MTLRenderStageFragment beforeStages:MTLRenderStageFragment]; }
+}
+
+static int family_import(id texture) {
+    Ivar v = class_getInstanceVariable(object_getClass(texture), "_vramOn");
+    return v && *(BOOL *)((char *)(__bridge void *)texture + ivar_getOffset(v));
 }
 
 static void read_pixel(const uint8_t *row, NSUInteger x, int half, float out[4]) {
@@ -72,7 +81,7 @@ int main(int argc, char **argv) { @autoreleasepool {
     const struct { NSUInteger w, h; } sizes[] = { {936, 541}, {363, 475}, {1292, 892}, {1920, 1080}, {1024, 768} };
     const struct { MTLPixelFormat format; uint32_t fourcc; uint32_t bytes; const char *name; } formats[] = {
         { MTLPixelFormatBGRA8Unorm, 'BGRA', 4, "BGRA8" }, { MTLPixelFormatRGBA16Float, 'RGhA', 8, "RGBA16F" } };
-    unsigned failed = 0, passed = 0;
+    unsigned failed = 0, passed = 0, family = 0, surfaces = 0, shadowed = 0;
     for (unsigned f = 0; f < sizeof formats / sizeof formats[0]; f++) {
         MTLRenderPipelineDescriptor *pd = [MTLRenderPipelineDescriptor new];
         pd.vertexFunction = [lib newFunctionWithName:@"v"]; pd.colorAttachments[0].pixelFormat = formats[f].format;
@@ -81,14 +90,18 @@ int main(int argc, char **argv) { @autoreleasepool {
         pd.fragmentFunction = [lib newFunctionWithName:@"over"];
         id<MTLRenderPipelineState> over = [dev newRenderPipelineStateWithDescriptor:pd error:&error];
         if (!solid || !over) { fprintf(stderr, "pipeline: %s\n", error.description.UTF8String); return 2; }
-        for (unsigned s = 0; s < sizeof sizes / sizeof sizes[0]; s++) for (int kind = 0; kind < BARRIER_COUNT; kind++) {
+        for (unsigned s = 0; s < sizeof sizes / sizeof sizes[0]; s++) for (int kind = 0; kind < BARRIER_COUNT; kind++)
+        for (int backing = 0; backing < BACKING_COUNT; backing++) {
             const NSUInteger w = sizes[s].w, h = sizes[s].h;
             IOSurfaceRef surface = IOSurfaceCreate((__bridge CFDictionaryRef)@{ (id)kIOSurfaceWidth: @(w), (id)kIOSurfaceHeight: @(h),
                 (id)kIOSurfaceBytesPerElement: @(formats[f].bytes), (id)kIOSurfacePixelFormat: @(formats[f].fourcc) });
             if (!surface) return 2;
             MTLTextureDescriptor *td = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:formats[f].format width:w height:h mipmapped:NO];
             td.usage = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead;
-            id<MTLTexture> target = [dev newTextureWithDescriptor:td iosurface:surface plane:0];
+            const size_t pitch = IOSurfaceGetBytesPerRow(surface);
+            id<MTLBuffer> memory = backing == BACKING_BUFFER ? [dev newBufferWithLength:pitch * h options:MTLResourceStorageModePrivate] : nil;
+            id<MTLTexture> target = memory ? [memory newTextureWithDescriptor:td offset:0 bytesPerRow:pitch]
+                                           : [dev newTextureWithDescriptor:td iosurface:surface plane:0];
             MTLTextureDescriptor *rd = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:formats[f].format width:w height:h mipmapped:NO];
             rd.usage = MTLTextureUsageShaderRead; rd.storageMode = MTLStorageModeShared;
             id<MTLTexture> readback = [dev newTextureWithDescriptor:rd];
@@ -126,14 +139,16 @@ int main(int argc, char **argv) { @autoreleasepool {
                 [readback getBytes:pixels bytesPerRow:row fromRegion:MTLRegionMake2D(0, 0, w, h) mipmapLevel:0];
                 bad += check(pixels, row, w, h, formats[f].bytes == 8, worst);
             }
-            const size_t pitch = IOSurfaceGetBytesPerRow(surface);
-            printf("%-7s %4lux%-4lu pitch %5zu %s %-9s %s", formats[f].name, (unsigned long)w, (unsigned long)h, pitch, pitch % 128 ? "shadow" : "direct",
-                   barrier_name[kind], bad ? "FAIL" : "ok");
+            const int linear = backing == BACKING_BUFFER || family_import(target);
+            if (backing == BACKING_SURFACE) { surfaces++; family += linear != 0; }
+            if (linear && pitch % 128) shadowed++;
+            printf("%-7s %4lux%-4lu pitch %5zu %-7s %-7s %-9s %s", formats[f].name, (unsigned long)w, (unsigned long)h, pitch,
+                   backing == BACKING_BUFFER ? "buffer" : "surface", !linear ? "private" : pitch % 128 ? "shadow" : "direct", barrier_name[kind], bad ? "FAIL" : "ok");
             if (bad) { printf(" %u bad samples, first %.3f %.3f %.3f %.3f", bad, worst[0], worst[1], worst[2], worst[3]); failed++; } else passed++;
             printf("\n");
             free(pixels); CFRelease(surface);
         }
     }
-    printf("%u passed, %u failed\n", passed, failed);
-    return failed != 0;
+    printf("%u passed, %u failed, %u drawn through a shadow, %u of %u surfaces took the family import\n", passed, failed, shadowed, family, surfaces);
+    return failed != 0 || !shadowed;
 } }

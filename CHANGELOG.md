@@ -1,3 +1,7 @@
+## Fork changes after 2.7.2 (unreleased)
+
+- Screenshots and window captures keep traffic lights, window corners and Control Center icons: a draw that reads its own IOSurface target now sees the draws before it when the row pitch is not 128-byte aligned.
+
 ## Fork integration of 2.7.2 (unreleased)
 
 - Add upstream's macOS 26 Metal compatibility and kernel mapping/security repairs while retaining the fork's rendering and performance fixes.
@@ -9,7 +13,6 @@
 - Keep growing allocation/image diagnostics behind the diagnostic opt-in in release builds.
 - Bundle NMXAudio as a separate Tahoe installer option, default No; preserve independent audio installations and retain managed opt-ins on updates.
 - Keep ARM translation separate from the driver package; 1401 uses the standalone `nm-arm` CLI.
-- Screenshots and window captures keep traffic lights, window corners and Control Center icons: a draw that reads its own IOSurface target now sees the draws before it when the row pitch is not 128-byte aligned.
 
 # Changelog
 
