@@ -1,5 +1,51 @@
 # Retained fork changes for upstream merges
 
+## Upstream 2.7.2 integration, 2026-11-06
+
+Integrate `18ba05f38b5eadea8b5ae05834bb51c61fb4c5c3` on top of fork `90b42b2`.
+Resolve three textual conflicts: keep both depth-bounds state and the fork's
+GPU feedback attachments in `nvk_cmdbuf`, retain vertex-stride invalidation
+alongside depth-state restoration after a pipeline bind, and combine the Intel
+panel's kernel includes. Keep the per-recording pipeline/descriptor/resource
+caches, bounded lowering cache, submit-ahead, surface publication and quarantine.
+
+Upstream removes kernel pointers from IORegistry. Port the fork's Intel-panel
+`kapiInit` to the versioned `nvDisplayPointers` kernel call, reject failed requests,
+and copy only the GPU ID when publishing panel nubs. Preserve its leases, RAM
+scanout opt-in, brightness, parent claim, cancellation/drain and rollback. Apply
+upstream's supported-kernel check to the fork's additional claim class too, before
+it can take the firmware display category. Audit the five root-only panel/copy
+sysctls explicitly; retain the audit's unlisted-key and `CTLFLAG_ANYBODY` controls.
+
+Take the new Metal required-size getters, depth bounds, descriptor-based views,
+Metal 3 attachment-map behavior, capability checks, inherited-environment/library
+policy, mapping locks/snapshots/retains and profiling access restrictions. These
+do not replace the fork's existing repairs. Zink/CGL/Minecraft, native Vulkan,
+Wine/DXVK/vkd3d/DLSS, codec overlay, translator, optional-component installers,
+Safari adapter, Photo Booth adapter and submission/callback implementations are
+byte-identical to `90b42b2`. The removed exact-build Zink guard stays removed;
+upstream's major-OS support policy does not add a minor-version CGL whitelist.
+
+The release plugin builds for macOS 15.0, both accelerator variants build, and
+framebuffer, Intel panel, primary selector, DRM and changed RM sources compile.
+The focused host suite passes 39 entrypoints, plus capability and environment
+tests. On RTX 2060 SUPER / 8 GiB BAR1 / Tahoe 26.7.1, isolated GPU tests pass 20
+new-feature cases, 96 IOSurface cases, 15 sampler cases, 128 surface handoffs
+without stale pixels, 32 Core Image frames and 64 custom-drawable presentations.
+The preceding plugin fails six new-feature assertions as the negative control.
+Core-only and optional-panel/audio kernel collections both link separately.
+
+Future packaging must use the verified official **2.7.2 NVRM**: an older RM does
+not provide the new display-pointer API. The official archive's SHA-256 and pinned
+Ed25519 signature were checked; its RM sources match this integration. Rebuild
+the fork framebuffer, both accelerators, panel and plugin rather than substituting
+stock binaries. This validation does not install anything or qualify a new boot,
+Sequoia execution, physical laptop/RAM scanout, or AMD/Intel rendering. The current
+driver and kernel collection remain unchanged. Source/build records are under
+`out/records/upstream-2.7.2-20261106/`; the isolated checkout is under
+`/Volumes/Games/upstream-272-review-20261106/`. Package installation and boot
+testing are separate from these source-integration checks.
+
 ## Safari MediaSource visibility repair (2026-11-06)
 
 Retain `NVMTLWebKit.m` and its call after successful NVIDIA NVMTL device creation.
@@ -54,11 +100,13 @@ Before each merge:
 4. Build the affected components and check their behavior, resource lifetime and synchronization.
    Record which fork changes upstream now covers, what remains local and the validation limits.
 
-The current upstream base is **2.7.1 at `6b4752c51b0719862fb46471d383317ef7ecc6f0`**,
-integrated on 2026-11-04 from the release tag. Its common ancestor with this fork
-is `470e391` (2.6.6), so this update uses an ordinary three-way merge. Earlier
-upstream history was rewritten: old 2.6.5 `ceba63c` maps to `c6f5aa0`; do not
-replay already integrated history. The preceding 2.6.4 base was `f95f4d2`.
+The current upstream base is **2.7.2 at `18ba05f38b5eadea8b5ae05834bb51c61fb4c5c3`**,
+integrated on 2026-11-06 from the release tag. This update uses an ordinary
+three-way merge with `6b4752c51b0719862fb46471d383317ef7ecc6f0` (2.7.1) as
+the common ancestor. The preceding 2.7.1 integration used `470e391` (2.6.6)
+as its common ancestor. Earlier upstream history was rewritten: old 2.6.5
+`ceba63c` maps to `c6f5aa0`; do not replay already integrated history. The
+preceding 2.6.4 base was `f95f4d2`.
 
 ## Multi-display flip and cursor repair, 2026-11-06
 

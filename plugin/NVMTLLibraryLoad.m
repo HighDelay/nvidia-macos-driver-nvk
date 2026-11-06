@@ -1009,7 +1009,7 @@ NSSet<NSString *> *nvmtl_mtlb_extern_names_uncached(NSData *raw)
     const uint8_t *b = raw.bytes; NSUInteger n = raw.length;
     if (n < 0x28 || memcmp(b, "MTLB", 4) != 0) return out;
     uint64_t off = 0; memcpy(&off, b + 0x18, 8);
-    if (off + 4 > n) return out;
+    if (off > n - 4) return out;   /* n >= 0x28 above; off + 4 would wrap for an offset near 2^64 */
     uint32_t count = 0; memcpy(&count, b + off, 4);
     NSUInteger pos = (NSUInteger)off + 4;
     for (uint32_t k = 0; k < count && pos + 4 <= n; k++) {
@@ -3235,6 +3235,8 @@ static NSString *nvmtl_mesh_text(uint8_t *p, size_t n) {
     mi->_tgMesh = nvmtl_air_max_tg(mf) ?: md.maxTotalThreadsPerMeshThreadgroup;
     mi->_tgObj = of ? (nvmtl_air_max_tg(of) ?: md.maxTotalThreadsPerObjectThreadgroup) : 0;
     mi->_gridAsk = md.maxTotalThreadgroupsPerMeshGrid;
+    ps->_reqMesh = nvmtl_desc_size(md, @selector(requiredThreadsPerMeshThreadgroup));
+    ps->_reqObj = of ? nvmtl_desc_size(md, @selector(requiredThreadsPerObjectThreadgroup)) : MTLSizeMake(0, 0, 0);
     if (!of) {
         mi->_capi = 16384;
         NVMTLComputePipelineState *ki = nil, *unused = nil; NSString *w2 = nil;

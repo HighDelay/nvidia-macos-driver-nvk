@@ -36,6 +36,7 @@ extern "C" {
 #include <sys/sysctl.h>
 #include <sys/errno.h>
 extern "C" int sysctlbyname(const char *, void *, size_t *, void *, size_t);
+#include <libkern/version.h>
 
 #define IFBLOG(fmt, ...) IOLog("NMIntelFB: " fmt "\n", ##__VA_ARGS__)
 
@@ -691,6 +692,7 @@ static bool ifb_firmware_supported(IOPCIDevice *pci)
 
 IOService *NMIntelFB::probe(IOService *provider, SInt32 *score)
 {
+    if (version_major != 24 && version_major != 25) return nullptr;   /* the 2.x line supports macOS 15 (Darwin 24) and macOS 26 (Darwin 25) only */
 #ifdef NMINTELFB_VIRTUAL
     if (!provider->getProperty("nm-intel-panel")) return nullptr;   // only the nub the loader published
     // test build: a virtual 1920x1080 "panel" in system memory, so the NVIDIA -> Intel frame path can be proven on a
@@ -945,16 +947,21 @@ static IfbVram gIfbVram[2048];
 
 static void ifb_kapi_event(const struct NvKmsKapiEvent *) {}
 
-// The NVRMDisplay nubs NVRM publishes carry the NVKMS function table, the GPU id and RM's VA-to-physical lookup
-// (what NVRMFB starts from). Ownership is not grabbed: it is for mode sets, and NVRMFB may still hold it.
+// The NVRMDisplay nub provides the GPU id and forwards the kernel-only display-pointer request to NVRM.
+// Ownership is not grabbed: it is for mode sets, and NVRMFB may still hold it.
 bool NMIntelFB::kapiInit(IOService *nub)
 {
     if (!ifb_knob("nullmoth-intelfb-kapi", 1)) return false;
-    OSNumber *k = OSDynamicCast(OSNumber, nub->getProperty("nvkms-kapi"));
+    NVRMDisplayPointers displayPtrs = {};
+    displayPtrs.version = NVRM_DISPLAY_PTRS_ABI_VERSION;
+    const OSSymbol *displayPtrsFn = OSSymbol::withCString(NVRM_DISPLAY_PTRS_FN);
+    IOReturn displayStatus = displayPtrsFn ? nub->callPlatformFunction(displayPtrsFn, false, &displayPtrs, nullptr, nullptr, nullptr)
+                                          : kIOReturnNoMemory;
+    OSSafeReleaseNULL(displayPtrsFn);
+    if (displayStatus != kIOReturnSuccess) { IFBLOG("display-pointer request failed: 0x%x", displayStatus); return false; }
     OSNumber *g = OSDynamicCast(OSNumber, nub->getProperty("gpu-id"));
-    OSNumber *pv = OSDynamicCast(OSNumber, nub->getProperty("phys-for-va"));
-    fKms = k ? reinterpret_cast<NvKmsKapiFunctionsTable *>(k->unsigned64BitValue()) : nullptr;
-    fPhysForVa = pv ? reinterpret_cast<NvU64 (*)(const void *)>(pv->unsigned64BitValue()) : nullptr;
+    fKms = static_cast<NvKmsKapiFunctionsTable *>(displayPtrs.kapi);
+    fPhysForVa = reinterpret_cast<NvU64 (*)(const void *)>(displayPtrs.physForVa);
     uint64_t bar = 0;
     IOService *rm = nub->getProvider();
     if (IOPCIDevice *pci = rm ? OSDynamicCast(IOPCIDevice, rm->getProvider()) : nullptr)
@@ -1274,6 +1281,7 @@ OSDefineMetaClassAndStructors(NMIntelFBClaim, IOService)
 
 IOService *NMIntelFBClaim::probe(IOService *provider, SInt32 *score)
 {
+    if (version_major != 24 && version_major != 25) return nullptr;
     IOPCIDevice *pci = OSDynamicCast(IOPCIDevice, provider);
     uint8_t ver = 0;
     if (!pci || !ifb_knob("nullmoth-intelfb-nvparent", 1) ||
@@ -1284,6 +1292,7 @@ IOService *NMIntelFBClaim::probe(IOService *provider, SInt32 *score)
 
 bool NMIntelFBClaim::start(IOService *provider)
 {
+    if (version_major != 24 && version_major != 25) return false;
     IOPCIDevice *pci = OSDynamicCast(IOPCIDevice, provider);
     if (!pci || !IOService::start(provider)) return false;
     IOLockLock(gIfbLock);
@@ -1360,7 +1369,7 @@ void NMIntelFBClaim::publishThread(void *p, wait_result_t)
     bool ok = nub && nub->init() && (!connected || !connected->unsigned32BitValue()) &&
               !__atomic_load_n(&me->fCancel, __ATOMIC_ACQUIRE);
     if (ok) {
-        const char *keys[] = {"nvkms-kapi", "gpu-id", "phys-for-va"};
+        const char *keys[] = {"gpu-id"};
         for (const char *key : keys)
             if (OSObject *v = nub0->getProperty(key)) nub->setProperty(key, v);
         nub->setProperty("fb-index", 4ull, 32);
@@ -1608,7 +1617,7 @@ static int nmintelfb_attach_sysctl SYSCTL_HANDLER_ARGS
     if (!nub0 || !nvrm) { OSSafeReleaseNULL(nub0); OSSafeReleaseNULL(nvrm); IFBLOG("attach: no NVRMDisplay 0 / NVRM"); return ENODEV; }
     IOService *nub = OSDynamicCast(IOService, OSMetaClass::allocClassWithName("NVRMDisplay"));
     if (!nub || !nub->init()) { OSSafeReleaseNULL(nub); nub0->release(); nvrm->release(); return ENOMEM; }
-    static const char *const kCopy[] = {"nvkms-kapi", "gpu-id", "phys-for-va"};
+    static const char *const kCopy[] = {"gpu-id"};
     for (const char *k : kCopy) if (OSObject *v = nub0->getProperty(k)) nub->setProperty(k, v);
     nub->setProperty("fb-index", 4ull, 32);
     nub->setProperty("nm-intel-panel", kOSBooleanTrue);
@@ -1625,6 +1634,7 @@ SYSCTL_PROC(_debug, OID_AUTO, nmintelfb_attach, CTLTYPE_INT | CTLFLAG_RW | CTLFL
             nmintelfb_attach_sysctl, "I", "1 = attach the virtual panel under the NVIDIA display device (test build)");
 bool NMIntelFBLoader::start(IOService *provider)
 {
+    if (version_major != 24 && version_major != 25) return false;   /* the 2.x line supports macOS 15 (Darwin 24) and macOS 26 (Darwin 25) only */
     if (!IOService::start(provider)) return false;
     sysctl_register_oid(&sysctl__debug_nmintelfb_attach);
     IFBLOG("loader idle until debug.nmintelfb_attach=1");
