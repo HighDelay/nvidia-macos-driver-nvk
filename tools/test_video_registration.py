@@ -17,6 +17,8 @@ HARNESS = r'''
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <mach/mach.h>
+#include <mach/mach_vm.h>
 typedef uint32_t io_service_t, io_connect_t;
 typedef int IOReturn;
 #define IO_OBJECT_NULL 0
@@ -25,10 +27,21 @@ typedef int IOReturn;
 #define kIOReturnNotFound 1
 static int scenario, queries, opens, closes, releases, matches, logs;
 static int program_argc = 2;
-static char *argument_storage[4] = {"VideoApp", "--type=gpu-process", NULL, NULL};
+static char *argument_storage[6] = {"VideoApp", "--type=gpu-process", NULL, NULL, NULL, NULL};
 static char **program_argv = argument_storage;
 static int *_NSGetArgc(void) { return &program_argc; }
 static char ***_NSGetArgv(void) { return &program_argv; }
+// exec lays the argument strings out back to back; Gecko's CheckArg then shifts the pointer array
+static char packed_arguments[256];
+static void gecko_arguments(const char *type, const char *flag, int removed) {
+    const char *args[5] = {"plugin-container", flag, "1", "4", type};
+    char *p = packed_arguments;
+    for (int i = 0; i < 5; i++) { strcpy(p, args[i]); argument_storage[i] = p; p += strlen(p) + 1; }
+    program_argc = 5;
+    for (int r = 0; r < removed; r++) {
+        for (int i = 1; i < 5; i++) argument_storage[i] = argument_storage[i + 1];
+    }
+}
 static bool nvmtl_is_sandboxed(void) { queries++; return scenario != 0; }
 static void nvlog(const char *fmt, ...) { logs++; }
 #undef mach_task_self
@@ -75,11 +88,29 @@ int main(int argc, char **argv) {
     if (scenario == 20) program_argc = -1;
     if (scenario == 21) { program_argc = 3; argument_storage[2] = "--type=renderer"; }
     if (scenario == 22) { program_argc = 3; argument_storage[1] = "--type=renderer"; argument_storage[2] = "--type=gpu-process"; }
+    if (scenario >= 23 && scenario <= 30) {
+        name = "plugin-container";
+        const char *type = scenario == 24 || scenario == 29 ? "gpu" : scenario == 25 ? "tab" :
+                           scenario == 26 ? "utility" : "rdd";
+        gecko_arguments(type, scenario == 27 ? "-appDir" : "-parentPid",
+                        scenario == 28 ? 2 : scenario == 29 ? 4 : scenario == 30 ? 2 : 0);
+        if (scenario == 30) { strcpy(argument_storage[0] + strlen(argument_storage[0]) + 1, "-parentpid"); }
+    }
+    if (scenario < 23 && program_argv && program_argc > 0) {
+        // the other scenarios get exec's layout too, so the Gecko walk reads exactly these strings
+        char *p = packed_arguments;
+        for (int i = 0; i < program_argc && i < 6; i++) {
+            const char *a = argument_storage[i] ? argument_storage[i] : "";
+            strcpy(p, a); if (argument_storage[i]) argument_storage[i] = p; p += strlen(a) + 1;
+        }
+    }
     bool expected = scenario == 0 || scenario == 1 || scenario == 5 || scenario == 7 ||
-                    scenario == 8 || scenario == 18 || scenario == 19 || scenario == 22;
+                    scenario == 8 || scenario == 18 || scenario == 19 || scenario == 22 ||
+                    scenario == 23 || scenario == 24 || scenario == 28 || scenario == 29;
     assert(nvmtl_can_register_decoder(name) == expected);
     assert(nvmtl_can_register_decoder(name) == expected); // both codec registrations share one check
-    if (scenario <= 1 || (scenario >= 9 && scenario <= 17) || scenario == 20 || scenario == 21) {
+    if (scenario <= 1 || (scenario >= 9 && scenario <= 17) || (scenario >= 20 && scenario <= 21) ||
+        (scenario >= 25 && scenario <= 27) || scenario == 30) {
         assert(!opens && !closes && !matches && !releases && !logs);
         assert(queries == (scenario == 1 ? 0 : 2));
     } else {
@@ -120,6 +151,14 @@ def main():
         "invalid argument count does not qualify",
         "last process-type switch wins when it selects a renderer",
         "last process-type switch wins when it selects the GPU process",
+        "sandboxed Gecko RDD process registers after both bridge opens succeed",
+        "sandboxed Gecko GPU process registers after both bridge opens succeed",
+        "Gecko content process receives no decoder exception",
+        "Gecko utility process receives no decoder exception",
+        "a trailing rdd argument without -parentPid does not qualify",
+        "Gecko RDD still qualifies after CheckArg removed -parentPid from argv",
+        "Gecko GPU process qualifies after CheckArg removed every flag and the type",
+        "the original strings decide: a different flag in the removed slot does not qualify",
     )
     with tempfile.TemporaryDirectory(prefix="nvmtl-video-registration-") as tmp:
         src, exe = Path(tmp) / "test.m", Path(tmp) / "test"

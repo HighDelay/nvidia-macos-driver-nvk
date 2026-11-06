@@ -215,6 +215,30 @@ static bool nvmtl_accel_armed(void)
 #include <dlfcn.h>
 #include <libgen.h>
 #include <crt_externs.h>
+#include <mach/mach.h>
+#include <mach/mach_vm.h>
+#include "nvmtl_fd_token.h"
+static int nvmtl_rebind_import(const void *inside, const char *symbol, void *repl);
+// The NVDEC/NVENC libraries carry an older copy of NVK's RM bridge, which opens /dev/null read-write only to own a handle
+// number (bound to the bridge connection, then closed; never read or written). Gecko's RDD sandbox allows no
+// /dev/null access at all, so StartSession failed ("nvd264: open /dev/nvidiactl failed") and VideoToolbox fell
+// back to software. Give those opens the same read-only null or pipe-end handle NVK's ICD gets. Every other path,
+// mode or error keeps open()'s own result.
+static int nvmtl_codec_open(const char *path, int flags, ...)
+{
+    mode_t mode = 0;
+    if (flags & O_CREAT) { va_list args; va_start(args, flags); mode = (mode_t)va_arg(args, int); va_end(args); }
+    int fd = open(path, flags, mode);
+    const int access = flags & O_ACCMODE;
+    if (fd >= 0 || !path || strcmp(path, "/dev/null") || (flags & ~(O_ACCMODE | O_CLOEXEC)) ||
+        (access != O_RDONLY && access != O_RDWR) || (errno != EACCES && errno != EPERM)) return fd;
+    return nvmtl_icd_open(path, O_RDONLY | (flags & O_CLOEXEC));
+}
+static void nvmtl_codec_sandbox_handles(const void *inside, const char *path)
+{
+    int rb = nvmtl_rebind_import(inside, "_open", (void *)nvmtl_codec_open);
+    if (rb <= 0) nvlog("video: sandbox handle fallback missing: _open not rebound in %s (%d)", path, rb);
+}
 // The video libraries tile and untile frames in the Blackwell (GB20x) layout. Earlier GPUs' NVDEC/NVENC use the classic
 // one: on an RTX 3070 Laptop (issue #65, measured against Apple's software codecs) H.264 decode showed shifted macroblock
 // rows and a green stripe, and both encoders produced torn pictures. The decoder's only difference is its untiling mode
@@ -317,13 +341,58 @@ static bool nvmtl_is_chromium_gpu_process(void)
     }
     return gpu;
 }
+// Gecko (Firefox, Zen, LibreWolf...) decodes media in child processes started as
+// `plugin-container ... -parentPid <pid> ... <type>`, with the process type as the last argument.
+// RDD is the media decoder; the GPU process decodes there when Gecko is configured to.
+// Gecko's CheckArg (toolkit/xre/CmdLineAndEnvUtils.h) removes every flag it consumes from argv by shifting the
+// pointer array, so by the time VideoToolbox maps this bundle *_NSGetArgv() no longer holds -parentPid or the
+// process type (measured in Zen's RDD: no decoder registered, sandbox on or off). The strings stay where exec put
+// them, one after another from argv[0], and argc is main's unchanged count. Walk those strings, bounded by the
+// memory region that holds them (the leaf mapping: a shared-cache submap reports as one readable entry even where
+// parts are PROT_NONE) so a rewritten argv[0] cannot send the walk into unmapped memory.
+// Returns 1 for RDD, 2 for the GPU process, 0 otherwise.
+static int nvmtl_gecko_decoder_process_type(void)
+{
+    int argc = *_NSGetArgc();
+    char **argv = *_NSGetArgv();
+    if (!argv || argc < 3 || argc > 4096 || !argv[0]) return 0;
+    const mach_vm_address_t at = (mach_vm_address_t)(uintptr_t)argv[0];
+    mach_vm_address_t region = at;
+    mach_vm_size_t size = 0;
+    natural_t depth = 0;
+    vm_region_submap_info_data_64_t info;
+    for (;;) {
+        mach_msg_type_number_t count = VM_REGION_SUBMAP_INFO_COUNT_64;
+        region = at;
+        if (mach_vm_region_recurse(mach_task_self_, &region, &size, &depth, (vm_region_recurse_info_t)&info,
+                                   &count) != KERN_SUCCESS || region > at) return 0;
+        if (!info.is_submap) break;
+        if (++depth > 8) return 0;
+    }
+    if (!(info.protection & VM_PROT_READ)) return 0;
+    const char *p = argv[0], *end = (const char *)(uintptr_t)(region + size), *type = NULL;
+    bool child = false;
+    for (int i = 0; i < argc; i++) {
+        if (p >= end) return 0;
+        size_t n = strnlen(p, (size_t)(end - p));
+        if (p + n >= end) return 0;                         // unterminated within the region: not exec's strings
+        if (i > 0 && i < argc - 1 && !strcmp(p, "-parentPid")) child = true;
+        type = p;
+        p += n + 1;
+    }
+    if (!child || !type) return 0;
+    return !strcmp(type, "rdd") ? 1 : !strcmp(type, "gpu") ? 2 : 0;
+}
+static bool nvmtl_is_gecko_decoder_process(void) { return nvmtl_gecko_decoder_process_type() != 0; }
 static bool nvmtl_can_register_decoder(const char *me)
 {
     if (nvmtl_is_decode_service(me) || !nvmtl_is_sandboxed()) return true;
     // Native sandboxed players keep upstream's service delegation even if they can open the bridge. QuickTime's
     // in-process NVDEC path can freeze its picture while the playback clock advances. Only Chromium's GPU process
     // needs the local capability registration below; identify the process type rather than an app-name allowlist.
-    if (!nvmtl_is_chromium_gpu_process()) return false;
+    // Gecko's RDD/GPU processes take the same probe. Their stock sandbox allows (iokit-connection "IOAccelerator"),
+    // which covers both bridge clients; the decoders' denied /dev/null handle is replaced in nvmtl_codec_open.
+    if (!nvmtl_is_chromium_gpu_process() && !nvmtl_is_gecko_decoder_process()) return false;
     // Chromium checks local VideoToolbox hardware support before it creates a decoder. Skipping registration
     // makes H.264 disappear from that check; it does not send the query to VTDecoderXPCService. A sandboxed GPU
     // process can already use our accelerator's RM bridge. Check both client types used by the decoder libraries
@@ -371,6 +440,7 @@ static void nvmtl_nvdec_register(void)
         if (!h) { nvlog("nvdec: dlopen %s FAILED: %s", path, dlerror()); return; }
         void *fac = dlsym(h, "NVDecH264_CreateInstance");
         if (!fac) { nvlog("nvdec: %s has no NVDecH264_CreateInstance", path); return; }
+        nvmtl_codec_sandbox_handles(fac, path);
         NSDictionary *info = @{ @"CMClassImplementationID": @"com.nvmtl.videodecoder.avc.nvdec",
                                 @"VTRating": @1000, @"VTIsHardwareAccelerated": @YES };
         int32_t st = reg('avc1', (__bridge CFDictionaryRef)info, fac);
@@ -399,6 +469,7 @@ static void nvmtl_nvenc_register(void)
         if (!h) { nvlog("nvenc: dlopen %s FAILED: %s", path, dlerror()); return; }
         void *fac = dlsym(h, "NVEncH264_CreateInstance");
         if (!fac) { nvlog("nvenc: %s has no NVEncH264_CreateInstance", path); return; }
+        nvmtl_codec_sandbox_handles(fac, path);
         NSDictionary *info = @{ @"CMClassImplementationID": @"com.nvmtl.videoencoder.avc.nvenc",
                                 @"CMClassImplementationName": @"NVIDIA NVENC H.264",
                                 @"VTRating": @1000, @"VTIsHardwareAccelerated": @YES };
@@ -487,6 +558,7 @@ static void nvmtl_nvdec_hevc_register(void)
         if (!h) { nvlog("nvdec: dlopen %s FAILED: %s", path, dlerror()); return; }
         void *fac = dlsym(h, "NVDecHEVC_CreateInstance");
         if (!fac) { nvlog("nvdec: %s has no NVDecHEVC_CreateInstance", path); return; }
+        nvmtl_codec_sandbox_handles(fac, path);
         NSDictionary *info = @{ @"CMClassImplementationID": @"com.nvmtl.videodecoder.hevc.nvdec",
                                 @"VTRating": @1000, @"VTIsHardwareAccelerated": @YES };
         int32_t st = reg('hvc1', (__bridge CFDictionaryRef)info, fac);
@@ -504,9 +576,19 @@ static void nvmtl_nvdec_hevc_register(void);
 __attribute__((constructor)) static void nvmtl_nvdec_in_decode_service(void)
 {
     const char *me = getprogname();
-    if (!nvmtl_is_decode_service(me) || getenv("NVMTL_NO_NVDEC")) return;
-    // off the loader's thread: the registration dlopens the decoder library
-    dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
+    const int gecko_type = nvmtl_is_decode_service(me) ? 0 : nvmtl_gecko_decoder_process_type();
+    const bool gecko = gecko_type != 0;
+    if ((!nvmtl_is_decode_service(me) && !gecko) || getenv("NVMTL_NO_NVDEC")) return;
+    // Gecko's decoder process maps this bundle without creating a Metal device, like the decode service.
+    // The capability probe in nvmtl_can_register_decoder still decides whether its sandbox reaches NVRM.
+    // off the loader's thread: the registration dlopens the decoder library. Gecko is the exception:
+    // VideoToolbox loads this bundle inside the RDD process's first VTIsHardwareDecodeSupported('avc1'), from
+    // its GPU filter after it has already copied the decoder list, so that one answer stays 0 whatever we do.
+    // Firefox's HEVC check, a test session made right after it returns, does see a registration made here
+    // before the loader returns; a background one can lose that race.
+    void (^work)(void) = ^{
+        if (gecko && !dlsym(RTLD_DEFAULT, "VTRegisterVideoDecoderWithInfo"))
+            dlopen("/System/Library/Frameworks/VideoToolbox.framework/VideoToolbox", RTLD_LAZY | RTLD_GLOBAL);
         uint32_t dev = 0;
         io_iterator_t it = IO_OBJECT_NULL;
         if (IOServiceGetMatchingServices(kIOMainPortDefault, IOServiceMatching("IOPCIDevice"), &it) == KERN_SUCCESS) {
@@ -527,11 +609,15 @@ __attribute__((constructor)) static void nvmtl_nvdec_in_decode_service(void)
         char layout[32];
         if (nvmtl_gpu_profile_string(CFSTR("video-layout"), layout, sizeof layout)) g_video_blackwell = !strcmp(layout, "blackwell");
         else g_video_blackwell = dev >= 0x2b00 && dev < 0x3000;   // no profile (older NVRM): the GB20x device-id block
-        nvlog("nvdec: decode service, GPU 10de:%04x (%s): registering the decoders at load", dev,
+        nvlog("nvdec: %s, GPU 10de:%04x (%s): registering the decoders at load", gecko ? "Gecko decoder process" : "decode service", dev,
               g_video_blackwell ? "Blackwell" : "before Blackwell");
         nvmtl_nvdec_register();
         nvmtl_nvdec_hevc_register();
-    });
+    };
+    // Only RDD has the start-up HEVC check to win; a Gecko GPU process maps this bundle from Metal device setup,
+    // where registering under the loader lock buys nothing, so it stays on the background queue.
+    if (gecko_type == 1) work();
+    else dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), work);
 }
 static void nvmtl_nvenc_hevc_register(void)
 {
@@ -554,6 +640,7 @@ static void nvmtl_nvenc_hevc_register(void)
         if (!h) { nvlog("nvenc: dlopen %s FAILED: %s", path, dlerror()); return; }
         void *fac = dlsym(h, "NVEncHEVC_CreateInstance");
         if (!fac) { nvlog("nvenc: %s has no NVEncHEVC_CreateInstance", path); return; }
+        nvmtl_codec_sandbox_handles(fac, path);
         NSDictionary *info = @{ @"CMClassImplementationID": @"com.nvmtl.videoencoder.hevc.nvenc",
                                 @"CMClassImplementationName": @"NVIDIA NVENC HEVC",
                                 @"VTRating": @1000, @"VTIsHardwareAccelerated": @YES };
