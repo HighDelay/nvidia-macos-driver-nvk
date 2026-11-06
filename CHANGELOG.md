@@ -1,4 +1,8 @@
-## Fork integration of 2.7.2 (unreleased)
+## Fork changes after 2.7.2 (unreleased)
+
+- Publish shadowed render targets at Metal barriers so capture destination reads see earlier writes, including clears and draws after internal pass restarts. Preserve the aligned-surface path.
+
+## Fork integration of 2.7.2
 
 - Add upstream's macOS 26 Metal compatibility and kernel mapping/security repairs while retaining the fork's rendering and performance fixes.
 - Adapt the optional Intel-panel bridge to the new kernel-only display API; retain Safari playback, multi-monitor/cursor, Photo Booth, capture, native Zink and codec repairs. See [merge notes](docs/FORK-MERGE-NOTES.md#upstream-272-integration-2026-11-06).

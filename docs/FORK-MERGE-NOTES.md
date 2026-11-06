@@ -146,6 +146,69 @@ The head monitor uses the full-recursion drop/restore contract of
 Local build, stack traces and installation/rollback records are under
 `out/records/multidisplay-20261106/`.
 
+## Capture destination reads, 2026-11-05
+
+Core Animation has no framebuffer fetch here (`fc_framebuffer_fetch=0`). It reads its
+destination by sampling the current attachment behind a render-target barrier.
+NVK draws a linear attachment through a tiled shadow when its pitch or offset is
+not 128-byte aligned, or the pass mixes tilings. Sampled views name the linear
+image, which the shadow only reaches at pass end, so that read returned the pass's
+starting contents and a transparent layer tile overwrote what was under it.
+
+WindowServer keeps exact IOSurface usage and the linear family import, so capture
+targets hit this for most widths; 64-byte row alignment makes roughly half of them
+unaligned. Applications widen usage onto a private image and miss it. Live
+1920-wide framebuffers are aligned, consistent with only captures looking wrong.
+
+Render-target `memoryBarrierWithScope:`, `textureBarrier` and an attachment's
+`memoryBarrierWithResources:` now restart a shadowed pass with unpublished writes.
+Both attachment clears and draws count as writes. Retain this until NVK can sample its shadow, and share
+`nvmtl_vk_pass_render_shadowed` with the framebuffer-fetch shadow test. Do not
+replace it with `_surfaceLinear` for WindowServer targets: that path moves
+publication off the kernel-marked GPU write.
+
+`tools/test_surface_render_feedback.m` uses the WindowServer name to select the
+import path, and repeats each size on a buffer texture of the same pitch. A surface
+only takes the family import while the kernel can wire its VRAM into BAR1. With a
+256 MB BAR1 nearly full (`debug.nvrmfb_vram_mapped_bytes` 241.6 of 242.2 MB), imports
+were refused with `VK_ERROR_INVALID_EXTERNAL_HANDLE`, surfaces fell back to private
+images and passed unfixed. The surface rows therefore prove nothing on their own:
+read the path each row prints. Buffer rows always draw through the shadow.
+
+RTX 2060 / macOS 26.7.2 (25G332), 2.7.2 kexts, release-flag build merged with 2.7.2,
+three runs: every row on a shadow failed before (12 to 15 of 60) and none after, covering
+three barrier forms, BGRA8 and RGBA16F. Aligned pitches keep their timing. Each shadowed
+barrier cost 0.13-0.22 ms at 936x541 to 1292x892 before the merge. Screenshots taken on
+the unfixed driver agree: 363, 936 and 1292 wide have holes, 535 and 562 do not. No fixed
+WindowServer session or real capture has been tested, and blur loss is unproven.
+
+Fork integration of PR #7, 2026-11-06: the PR merges cleanly with `82cfa4f`.
+Keep its three barrier forms and narrow shadow predicate. Mark a draw after
+hazard checks and successful binding: a hazard restart clears the old pass's
+flag, so marking before it could miss the following write. Seed the new pass's
+flag for colour clears, even with no draw. Replayed indirect commands go through
+the same draw binding path; an empty replay is not itself a write. Repeated
+barriers on a loaded, untouched pass need no additional restart. Preserve pass
+loads, visibility-query handling, binding/resource caches and kernel publication.
+
+On RTX 2060 SUPER / 8 GiB BAR1 / Tahoe 26.7.1, the original 60-case GPU oracle
+fails 24 cases on the installed 2.7.2 plugin. Expanding it to cover clear-only
+passes finds 24 failures in the unmodified PR; the revised plugin passes all
+120 cases, with 48 shadow cases and all 60 surfaces using the family import.
+Use per-case autorelease pools and the one-plugin-image check to keep the
+negative controls meaningful. `test_render_feedback_barriers.py` exercises the
+production methods with ASan/UBSan, including the internal-restart case, clear-only
+passes, repeated barriers, texture views, unrelated resources and direct targets.
+Refresh the submission-copy fixture's `_surfaceLinear` field so the existing
+submission/publication checks compile against the retained production code.
+
+These are isolated userland tests. A real WindowServer/capture session remains
+untested for this revision; do not claim all blur loss is fixed. NVENC/NVDEC,
+Zink/CGL, Safari, Photo Booth, kexts and optional installers remain unchanged.
+The user requested source merge/push only: no driver installation, release
+package staging, draft or publication. Local records are under
+`out/records/pr7-20261106/`.
+
 ## Managed IOSurface icon rendering, 2026-11-05
 
 Retain the stable tiled GPU backing for shader-writable Managed IOSurfaces,

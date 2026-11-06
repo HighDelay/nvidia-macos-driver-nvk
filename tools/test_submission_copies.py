@@ -31,6 +31,7 @@ typedef struct { void *map; size_t size; } Buffer;
 @interface NVMTLTexture : NSObject { @public
     NVMTLBuffer *_backBuf; NVMTLTexture *_parent; MTLTextureUsage _usage;
     IOSurfaceRef _surf; NSUInteger _plane; BOOL _vramOn; int _tag;
+    struct { void *img; } _surfaceLinear;
 } @end
 @implementation NVMTLTexture @end
 // a used heap's pin (NVMTLObjects.m): its members with a host copy; none in these fixtures
