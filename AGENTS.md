@@ -1,5 +1,13 @@
 # Repository instructions
 
+## This checkout
+
+Vet-TV fork aimed at one laptop: MSI Pulse GL66 12UCK (MS-1584), i5-12450H, Intel UHD
+`8086:46A3` on the internal panel, RTX 3050 Laptop 4 GB `10de:25a2` subsystem `1462:1331`.
+Profile: [docs/machines/msi-pulse-gl66-12uck.md](docs/machines/msi-pulse-gl66-12uck.md).
+Upstream is HighDelay/nvidia-macos-driver-nvk. A documentation-only profile change does not
+get a driver release.
+
 ## Fork merge instructions
 
 Before merging upstream into this fork, read [docs/FORK-MERGE-NOTES.md](docs/FORK-MERGE-NOTES.md).

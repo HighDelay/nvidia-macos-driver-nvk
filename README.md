@@ -7,6 +7,14 @@ Quadro RTX). Based on [NullMoth's driver](https://github.com/nullmoth/nvidia-mac
 **[Driver downloads](https://github.com/HighDelay/nvidia-macos-driver-nvk/releases)** ·
 [Card support](docs/CARD-SUPPORT.md) · [Troubleshooting](docs/TROUBLESHOOTING.md)
 
+## This fork — MSI Pulse GL66 12UCK
+
+Target laptop: Intel Core i5-12450H, Intel UHD `8086:46A3` on the 1920×1080 panel,
+RTX 3050 Laptop 4 GB (`10de:25a2`, subsystem `1462:1331`). The NVIDIA card has no
+display attached. Do not apply the desktop OpenCore BAR and `IONDRVSupport` settings
+unchanged. [Machine profile](docs/machines/msi-pulse-gl66-12uck.md) ·
+[DXVK memory report](profiles/msi-pulse-gl66-12uck/dxvk.conf).
+
 ## Install — by hand
 
 1. Configure [OpenCore](docs/OPENCORE-SETUP.md): required boot arguments, SIP,
