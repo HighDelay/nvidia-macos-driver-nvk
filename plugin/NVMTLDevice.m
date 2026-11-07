@@ -1012,6 +1012,12 @@ static BOOL nvmtl_desc_fbo(MTLTextureDescriptor *d) {
 // BGR10A2Unorm (VkFormat 58) cannot be a storage image on NVIDIA; a writable private texture of it is created as
 // R10G10B10A2 (VkFormat 64): same bits per channel, storage-capable. YES when the format was swapped. Without this a
 // kernel's stores to such a texture went to the dummy storage image (Cyberpunk's tonemapped output is BGR10A2).
+// Unknown permits every valid texture use, including shader writes through
+// mip/slice views. Allocate writable backing before making those views: the
+// compute storage-twin fallback only covers a single-level root texture.
+static BOOL nvmtl_texture_usage_writable(NSUInteger usage) {
+    return usage == MTLTextureUsageUnknown || (usage & MTLTextureUsageShaderWrite) != 0;
+}
 static inline BOOL nvmtl_bgr10_storage_remap(MTLTextureDescriptor *d, uint32_t *vkf)
 {
     if (!d || !vkf || *vkf != 58u || d.pixelFormat != MTLPixelFormatBGR10A2Unorm) return NO;
@@ -1050,7 +1056,7 @@ static inline BOOL nvmtl_bgr10_storage_remap(MTLTextureDescriptor *d, uint32_t *
     uint32_t vkf = 0, bpp = 0; int a8 = 0;
     if (nvmtl_pixfmt(d.pixelFormat, &vkf, &bpp, &a8)) return nil;
     const BOOL rbSwap = nvmtl_bgr10_storage_remap(d, &vkf);
-    int wantStex = (d.usage & MTLTextureUsageShaderWrite) != 0;
+    int wantStex = nvmtl_texture_usage_writable(d.usage);
     if (d.textureType == MTLTextureType2DMultisample || d.textureType == MTLTextureType2DMultisampleArray) {
         if (d.mipmapLevelCount != 1 || d.depth != 1) { nvlog("newTextureWithDescriptor: invalid multisample color descriptor"); return nil; }
         if (wantStex) { static _Atomic unsigned long msw; const unsigned long k = atomic_fetch_add(&msw, 1) + 1;
@@ -1341,7 +1347,7 @@ static char nvmtl_surface_cache_key;
     t->_fbo = nvmtl_desc_fbo(d);
     uint32_t vkf = 0, bpp = 0; int a8 = 0;
     if (nvmtl_pixfmt(d.pixelFormat, &vkf, &bpp, &a8)) return nil;
-    int wantStex = (d.usage & MTLTextureUsageShaderWrite) != 0;
+    int wantStex = nvmtl_texture_usage_writable(d.usage);
     // Core Image can receive a ShaderRead-only descriptor for a non-FBO
     // drawable. Request the real storage view before importing family VRAM;
     // the private fallback already makes eligible formats writable.
@@ -1885,7 +1891,7 @@ static void nvmtl_pipeline_key_log(id f, const char *stage, const void *pipe)
         if (nvmtl_blend_from(ca, noFrag, sa8, &rt.blend[i]))
             return nvmtl_fail(err, [NSString stringWithFormat:@"pipeline: colour attachment %u has a blend factor or operation this driver cannot translate (the reason is the preceding \"blend:\" log line)", i]);
         if (sa8) {
-            a8mask |= 1u << i;
+            a8mask |= 1u << i; rt.a8_mask |= 1u << i;
             if (rt.blend[i].enabled) {   // the red lane is Metal's alpha: blend it with the alpha factors and operation
                 rt.blend[i].src_rgb = nvmtl_a8_factor(rt.blend[i].src_alpha); rt.blend[i].dst_rgb = nvmtl_a8_factor(rt.blend[i].dst_alpha);
                 rt.blend[i].op_rgb = rt.blend[i].op_alpha; }
@@ -2468,7 +2474,7 @@ static NSInteger nvmtl_apple_family_max(void)
     uint32_t mtl_type = (uint32_t)d.textureType;
     uint32_t layers = nvmtl_vk_layers_for_desc(mtl_type, (uint32_t)d.arrayLength, (uint32_t)d.depth);
     if (nvmtl_vk_image_size_align((uint32_t)d.width, (uint32_t)d.height, depth ? dvk : vkf, (uint32_t)d.mipmapLevelCount, mtl_type, layers, depth,
-                                  (d.usage & MTLTextureUsageShaderWrite) != 0 && !a8, &sz, &al)) { sz = d.width * d.height * (bpp ? bpp : 4); al = 256; }
+                                  nvmtl_texture_usage_writable(d.usage) && !a8, &sz, &al)) { sz = d.width * d.height * (bpp ? bpp : 4); al = 256; }
     MTLSizeAndAlign r = { sz, al }; return r;
 }
 - (id<MTLIndirectCommandBuffer>)newIndirectCommandBufferWithDescriptor:(MTLIndirectCommandBufferDescriptor *)d

@@ -960,7 +960,7 @@ static NVMTLTexture *nvmtl_texbuf_make(NVMTLBuffer *b, MTLTextureDescriptor *d, 
         nvlog("texture buffer: format %lu width %lu is not carried -> nil", (unsigned long)d.pixelFormat, (unsigned long)d.width); return nil; }
     const size_t range = (size_t)d.width * bpp;
     NVMTLTexture *t = [NVMTLTexture new]; int st = 0;
-    if (nvmtl_vk_texel_view_create(&b->_b, offset, range, vkf, (d.usage & MTLTextureUsageShaderWrite) != 0, &t->_tbAlias, &t->_tbView, &st)) {
+    if (nvmtl_vk_texel_view_create(&b->_b, offset, range, vkf, nvmtl_texture_usage_writable(d.usage), &t->_tbAlias, &t->_tbView, &st)) {
         nvlog("texture buffer: %lu x fmt %lu at offset %lu of a %zu-byte buffer -> nil (reason above)", (unsigned long)d.width,
               (unsigned long)d.pixelFormat, (unsigned long)offset, b->_b.size); return nil; }
     t->_tbStorage = st != 0;
@@ -1006,10 +1006,10 @@ static NVMTLTexture *nvmtl_texbuf_make(NVMTLBuffer *b, MTLTextureDescriptor *d, 
     NVMTLTexture *t = [NVMTLTexture new];
     static int noRecycle = -1; if (noRecycle < 0) { noRecycle = getenv("NVMTL_NO_BUFTEX_RECYCLE") != NULL;
         nvlog("buffer texture: dres R3 recycle %s", noRecycle ? "OFF (NVMTL_NO_BUFTEX_RECYCLE)" : "ON"); }
-    const uint32_t bkey[12] = { 2, (uint32_t)w, (uint32_t)h, vkf, bpp, (uint32_t)a8, (d.usage & MTLTextureUsageShaderWrite) != 0,
+    const uint32_t bkey[12] = { 2, (uint32_t)w, (uint32_t)h, vkf, bpp, (uint32_t)a8, nvmtl_texture_usage_writable(d.usage),
         (d.usage & MTLTextureUsageRenderTarget) != 0, (uint32_t)offset, (uint32_t)((uint64_t)offset >> 32), (uint32_t)bpr, (uint32_t)((uint64_t)bpr >> 32) };
     const BOOL brec = !noRecycle && _nbpk && nvmtl_bpark_take(self, bkey, &t->_i) == 0;
-    if (!brec && nvmtl_vk_image_create_buffer_alias((uint32_t)w, (uint32_t)h, vkf, bpp, a8, (d.usage & MTLTextureUsageShaderWrite) != 0,
+    if (!brec && nvmtl_vk_image_create_buffer_alias((uint32_t)w, (uint32_t)h, vkf, bpp, a8, nvmtl_texture_usage_writable(d.usage),
                                            (d.usage & MTLTextureUsageRenderTarget) != 0, &_b, offset, bpr, &t->_i)) {
         nvlog("buffer newTextureWithDescriptor:offset:%lu bytesPerRow:%lu (%zux%zu fmt %lu, buffer %lu B, storage %lu) -> nil (reason above)",
               (unsigned long)offset, (unsigned long)bpr, w, h, (unsigned long)d.pixelFormat, (unsigned long)_b.size, (unsigned long)_storage);
@@ -1744,7 +1744,7 @@ static BOOL nvmtl_region_fits(MTLRegion r, NSUInteger level, NSUInteger slice) {
                                                     (uint32_t)region.size.width, (uint32_t)region.size.height, (uint32_t)level + _baseLevel, (uint32_t)(vol ? region.origin.z + zi : slice + _baseSlice));
     if (rc) nvlog("texture getBytes:slice: readback FAILED");
 }
-// CoreAnimation uploads only level 0 of the mipmapped texture it draws a Dock badge digit into and samples it trilinear,
+// CoreAnimation uploads only level 0 of mipmapped client-storage images and samples them trilinear,
 // so the levels nobody wrote need filling; a write to a higher level or generateMipmaps sets _mipsWritten and ends that.
 static unsigned nvmtl_mip_autofill_bpp(NVMTLTexture *t, MTLRegion region, NSUInteger level, NSUInteger slice) {
     if (level || slice || t->_baseLevel || t->_baseSlice || t->_parent || t.mipmapLevelCount <= 1
@@ -1758,6 +1758,9 @@ static unsigned nvmtl_mip_autofill_bpp(NVMTLTexture *t, MTLRegion region, NSUInt
         case MTLPixelFormatA8Unorm: case MTLPixelFormatR8Unorm: case MTLPixelFormatR8Unorm_sRGB: bpp = 1; break;
         case MTLPixelFormatRG8Unorm: case MTLPixelFormatRG8Unorm_sRGB: bpp = 2; break;
         case MTLPixelFormatRGBA8Unorm: case MTLPixelFormatRGBA8Unorm_sRGB: case MTLPixelFormatBGRA8Unorm: case MTLPixelFormatBGRA8Unorm_sRGB: bpp = 4; break;
+        case MTLPixelFormatR16Float: bpp = 2; break;
+        case MTLPixelFormatRG16Float: bpp = 4; break;
+        case MTLPixelFormatRGBA16Float: bpp = 8; break;
         default: return 0; }
     return bpp == im->bpp ? bpp : 0;
 }
@@ -1768,6 +1771,14 @@ static void nvmtl_mip_autofill(NVMTLTexture *t, const void *bytes, size_t row, M
     nvk_image *im = [t nvi]; uint32_t w = im->w, h = im->h;
     size_t tight = (size_t)w * bpp;
     if (row < tight || (h > 1 && row > (SIZE_MAX - tight) / (h - 1))) return;
+    // Tahoe app icons arrive as extended-sRGB half floats. Averaging their
+    // bytes would corrupt both alpha and extended-range colors; use the GPU's
+    // float-aware mip blits, in one submission after the level-zero upload.
+    if (t.pixelFormat == MTLPixelFormatR16Float || t.pixelFormat == MTLPixelFormatRG16Float
+        || t.pixelFormat == MTLPixelFormatRGBA16Float) {
+        if (nvmtl_vk_image_gen_mipmaps(t->_q, im)) nvlog("mip autofill: half-float generation FAILED");
+        return;
+    }
     NSUInteger mips = t.mipmapLevelCount;
     size_t cap = (size_t)((w + 1) / 2) * ((h + 1) / 2) * bpp; uint8_t *cur = malloc(cap), *nxt = malloc(cap);
     if (!cur || !nxt) { free(cur); free(nxt); return; }
@@ -4687,7 +4698,7 @@ void nvmtl_heap_back(NVMTLHeap *h, NSUInteger size, int shared) {
     uint32_t vkf = 0, bpp = 0; int a8 = 0;
     if (nvmtl_pixfmt_public(d.pixelFormat, &vkf, &bpp, &a8)) return nil;
     const BOOL rbSwapPl = nvmtl_bgr10_storage_remap(d, &vkf);
-    int wantStex = (d.usage & MTLTextureUsageShaderWrite) != 0;
+    int wantStex = nvmtl_texture_usage_writable(d.usage);
     if (nvmtl_vk_image_create_typed_placed((uint32_t)d.width, (uint32_t)d.height, vkf, bpp, a8, (uint32_t)d.mipmapLevelCount, wantStex,
                                             (uint32_t)d.textureType, nvmtl_vk_layers_for_desc((uint32_t)d.textureType, (uint32_t)d.arrayLength, (uint32_t)d.depth), &_hm, off, &t->_i)) {
         nvlog("heap newTextureWithDescriptor: %lux%lu offset:%lu FAILED", (unsigned long)d.width, (unsigned long)d.height, (unsigned long)off); return nil; }
@@ -4778,7 +4789,7 @@ void nvmtl_heap_back(NVMTLHeap *h, NSUInteger size, int shared) {
     const BOOL rbSwapPl = nvmtl_bgr10_storage_remap(d, &vkf);
     const uint32_t w = (uint32_t)d.width, hh = (uint32_t)d.height, mips = (uint32_t)(d.mipmapLevelCount ? d.mipmapLevelCount : 1);
     const uint32_t type = (uint32_t)d.textureType, layers = nvmtl_vk_layers_for_desc(type, (uint32_t)d.arrayLength, (uint32_t)d.depth);
-    const int wantStex = (d.usage & MTLTextureUsageShaderWrite) != 0;
+    const int wantStex = nvmtl_texture_usage_writable(d.usage);
     const uint32_t key[12] = { 1, w, hh, vkf, bpp, (uint32_t)a8, mips, (uint32_t)wantStex, type, layers, 0, 0 };
     NVMTLTexture *t = [NVMTLTexture new];
     NSUInteger off = 0, len = charge; BOOL rec = NO;

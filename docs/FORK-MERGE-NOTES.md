@@ -1,5 +1,29 @@
 # Retained fork changes for upstream merges
 
+## Spotlight half-float icons and texture correctness, 2026-11-07
+
+Preserve automatic mip generation for eligible full level-zero uploads of
+`R16Float`, `RG16Float` and `RGBA16Float` client-storage images. CoreAnimation
+requests mipmapped half-float app icons but supplies only level zero; leaving
+the smaller levels undefined makes Spotlight icons disappear when minified.
+Use float-aware GPU blits to retain extended-range colors. Keep the existing
+size/region/view guards and stop automatic generation after an explicit higher
+mip write. Do not ship the diagnostic CGImage conversion or Spotlight hooks.
+
+Also retain the tested format/storage corrections: publish the format-query
+function with the instance dispatch's `pthread_once`, allocate writable backing
+for valid `MTLTextureUsageUnknown` textures before making mip/slice views, and
+use identity Vulkan attachment views for A8. Remap A8 framebuffer reads using
+the pipeline's attachment format; sampled-view swizzles remain separate.
+
+On RTX 2060 SUPER / 8 GiB BAR1 / Tahoe 26.7.1, the user confirmed Spotlight app
+icons after restarting the session. GPU probes cover half-float checker
+averaging, odd dimensions, extended-range values, explicit mip ownership,
+Unknown-usage writes and A8 framebuffer reads. The preceding binary fails the
+half-float mip probe; the repaired binary passes. Preserve PR #5 caches, PR #7
+surface publication, Photo Booth, Safari and codec behavior. Other GPUs and
+Sequoia have not been qualified by this icon test.
+
 ## Codec registration by process role, 2026-11-06
 
 Keep decoder/encoder service registration independent of Metal device creation.
