@@ -45,6 +45,7 @@ class PackageZinkTests(unittest.TestCase):
             self.put(self.zink / name, b'25G241\n' if name == 'cgl-os-build.txt' else b'zink ' + name.encode())
         native = {'renderer_original_sha256':pkg.base_tools.digest(self.base/pkg.BASE_RUNTIME/'libvulkan_nouveau.dylib'),
                   'frontend_source_sha256':pkg.base_tools.digest(ROOT/'nvk/native-macos/bridge.mm'),
+                  'frontend_headers':{name:pkg.base_tools.digest(ROOT/name) for name in ['plugin/nvmtl_fd_token.h','plugin/nvmtl_rebind_import.h']},
                   'files':{name:pkg.base_tools.digest(self.zink/name) for name in
                            ['libnvk_renderer.dylib','libnvk_zink_vulkan.dylib']}}
         (self.zink/'NATIVE-BUILD.json').write_text(json.dumps(native))
@@ -372,6 +373,14 @@ class PackageZinkTests(unittest.TestCase):
         data['renderer_original_sha256'] = '0'*64
         (self.zink/'NATIVE-BUILD.json').write_text(json.dumps(data))
         with self.assertRaisesRegex(ValueError,'does not match the verified driver'):
+            self.stage()
+        self.assertFalse(self.out.exists())
+
+    def test_frontend_shared_headers_are_part_of_build_provenance(self):
+        data = json.loads((self.zink/'NATIVE-BUILD.json').read_text())
+        data['frontend_headers']['plugin/nvmtl_rebind_import.h'] = '0'*64
+        (self.zink/'NATIVE-BUILD.json').write_text(json.dumps(data))
+        with self.assertRaisesRegex(ValueError,'frontend header changed'):
             self.stage()
         self.assertFalse(self.out.exists())
 

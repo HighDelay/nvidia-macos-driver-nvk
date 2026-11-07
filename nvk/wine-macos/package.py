@@ -92,7 +92,7 @@ manifest={'schema_version':1,'runtime_id':runtime_id,'platform':base['platform']
 manifest['wine']['prerequisites']=prerequisites
 (root/'nvk-wine-runtime.json').write_text(json.dumps(manifest,indent=2)+'\n')
 base['package_commands']=commands;base['package_signing']=signing;base['package_files']=files
-base['source_files']={str(path.relative_to(repo)):digest(path) for path in [repo/'nvk/native-macos/bridge.mm',repo/'nvk/wine-macos/setup.mm',Path(__file__).resolve(),repo/'nvk/wine-macos/build.py']}
+base['source_files']={str(path.relative_to(repo)):digest(path) for path in [repo/'nvk/native-macos/bridge.mm',repo/'plugin/nvmtl_fd_token.h',repo/'plugin/nvmtl_rebind_import.h',repo/'nvk/wine-macos/setup.mm',Path(__file__).resolve(),repo/'nvk/wine-macos/build.py']}
 (root/'BUILD.json').write_text(json.dumps(base,indent=2)+'\n')
 run([str(helper),'check',str(root)])
 # Full delivery checksums are separate from the fast critical-file launch check.

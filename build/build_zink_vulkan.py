@@ -45,6 +45,7 @@ def main():
         subprocess.run(['lipo',str(binary),'-verify_arch','x86_64'],check=True)
     record = {'frontend_source':'nvk/native-macos/bridge.mm',
               'frontend_source_sha256':digest(ROOT/'nvk/native-macos/bridge.mm'),
+              'frontend_headers':{name:digest(ROOT/name) for name in ['plugin/nvmtl_fd_token.h','plugin/nvmtl_rebind_import.h']},
               'renderer_original_sha256':digest(args.renderer),
               'renderer_source':str(args.renderer),
               'files':{p.name:digest(p) for p in (renderer,frontend)},

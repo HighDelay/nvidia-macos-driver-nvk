@@ -7,9 +7,31 @@ import unittest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]/'build'))
 from opengl_api import requirements, supported
+from generate_cgl_dispatch import collect_prototypes, SDK_HEADERS, signature
 
 
 class CGLAPITests(unittest.TestCase):
+    def test_gl3_extensions_are_callable_prototypes_not_macros_or_comments(self):
+        with tempfile.TemporaryDirectory() as directory:
+            headers = Path(directory)
+            for name in SDK_HEADERS:
+                (headers/name).write_text('')
+            (headers/'gl3.h').write_text('GLAPI void APIENTRY glExisting(GLint value);\n')
+            (headers/'gl3ext.h').write_text('''
+#define GLAPI extern
+#define HIDDEN \\
+extern void glNotAnAPI(void);
+/* extern void glCommentOnly(void); */
+// extern void glLineComment(void);
+GLAPI void APIENTRY glTexStorage2D(GLenum target, GLsizei levels, GLenum format, GLsizei width, GLsizei height);
+extern void glTexStorage3D(GLenum target, GLsizei levels, GLenum format, GLsizei width, GLsizei height, GLsizei depth);
+''')
+            prototypes = collect_prototypes(headers)
+            self.assertEqual(set(prototypes), {'glExisting','glTexStorage2D','glTexStorage3D'})
+            self.assertEqual(prototypes['glTexStorage2D'][0], 'void')
+            self.assertEqual(signature(prototypes['glTexStorage3D'][0],prototypes['glTexStorage3D'][2]),
+                             'void:GLenum,GLsizei,GLenum,GLsizei,GLsizei,GLsizei')
+
     def contract(self):
         xml = '''<registry>
           <feature api="gl" number="1.0"><require><command name="glBegin"/><command name="glDraw"/></require></feature>

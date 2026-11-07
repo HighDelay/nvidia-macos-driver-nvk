@@ -117,6 +117,9 @@ def stage(base, zink, output, components=None, native_gld=False, records=None):
         raise ValueError('Private Zink renderer does not match the verified driver renderer')
     if provenance.get('frontend_source_sha256') != base_tools.digest(ROOT/'nvk/native-macos/bridge.mm'):
         raise ValueError('Private Zink Vulkan frontend was not built from this source')
+    for name in ('plugin/nvmtl_fd_token.h','plugin/nvmtl_rebind_import.h'):
+        if provenance.get('frontend_headers',{}).get(name) != base_tools.digest(ROOT/name):
+            raise ValueError('Private Zink Vulkan frontend header changed since building: '+name)
     for name in ('libnvk_renderer.dylib','libnvk_zink_vulkan.dylib'):
         if provenance.get('files',{}).get(name) != base_tools.digest(zink/name):
             raise ValueError('Private Zink frontend/renderer hash mismatch: '+name)

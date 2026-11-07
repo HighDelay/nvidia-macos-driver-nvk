@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """Exercise decoder policy inside a real sandbox, with simulated accelerator access.
 
-Native sandboxed clients delegate. Chromium GPU helpers register locally only
-when both RM bridge clients are available, independent of bundle or helper name.
+Native sandboxed clients delegate. Chromium GPU helpers and Gecko RDD/GPU
+children register locally only when both RM bridge clients are available,
+independent of bundle or helper name.
 No GPU connections or decoder sessions are opened by this test.
 """
 import os
@@ -26,6 +27,9 @@ def check(name, ok, detail=''):
 
 def function(signature):
     i = src.index(signature)
+    line = src[i:src.index('\n', i) + 1]
+    if line.rstrip().endswith('}'):   # one-line definition
+        return line
     return src[i:src.index('\n}\n', i) + 3]
 
 
@@ -36,6 +40,8 @@ if platform.system() != 'Darwin' or not shutil.which('clang') or not pathlib.Pat
 body = ''.join(function(s) for s in ('static bool nvmtl_is_sandboxed(void)',
                                    'static bool nvmtl_is_decode_service(const char *me)',
                                    'static bool nvmtl_is_chromium_gpu_process(void)',
+                                   'static int nvmtl_gecko_decoder_process_type(void)',
+                                   'static bool nvmtl_is_gecko_decoder_process(void)',
                                    'static bool nvmtl_can_register_decoder(const char *me)'))
 bridge = r'''
 typedef uint32_t io_service_t, io_connect_t;
@@ -59,7 +65,8 @@ static void IOObjectRelease(io_service_t service) {}
 '''
 harness = ('#include <CoreFoundation/CoreFoundation.h>\n#include <dispatch/dispatch.h>\n#include <dlfcn.h>\n'
            '#include <stdbool.h>\n#include <stdio.h>\n#include <stdlib.h>\n#include <string.h>\n#include <unistd.h>\n'
-           '#include <stdint.h>\n#include <crt_externs.h>\n'
+           '#include <stdint.h>\n#include <crt_externs.h>\n#include <mach/mach.h>\n#include <mach/mach_vm.h>\n'
+           '#undef mach_task_self\n'
            + bridge + body + 'int main(void) { printf("%d\\n", !nvmtl_can_register_decoder(getprogname())); return 0; }\n')
 plist = ('<?xml version="1.0" encoding="UTF-8"?><plist version="1.0"><dict><key>CFBundleIdentifier</key>'
          '<string>{}</string></dict></plist>')
@@ -102,6 +109,12 @@ with tempfile.TemporaryDirectory() as d:
               run(progs['custom-helper'], True, ('--type=gpu-process',)) == '0')
         check('a process-type argument after -- does not qualify in a real sandbox',
               run(progs['discord'], True, ('--', '--type=gpu-process')) == '1')
+        check('a sandboxed Gecko RDD child with bridge access registers locally',
+              run(progs['custom-helper'], True, ('-parentPid', '1', 'rdd')) == '0')
+        check('a sandboxed Gecko RDD child denied bridge access delegates',
+              run(progs['custom-helper'], True, ('-parentPid', '1', 'rdd'), bridge_denied=True) == '1')
+        check('a sandboxed Gecko content child delegates',
+              run(progs['custom-helper'], True, ('-parentPid', '1', 'tab')) == '1')
         check('control: an unsandboxed Apple app registers in-process', run(progs['apple'], False) == '0')
         check('control: an unsandboxed Discord registers in-process', run(progs['discord'], False) == '0')
 sys.exit(1 if fails else 0)

@@ -61,7 +61,7 @@ icd = {
     'ICD': {'library_path': './lib/libnvk_minecraft.dylib', 'api_version': '1.4.363'},
 }
 (out / 'nvk_bridge_icd.json').write_text(json.dumps(icd, indent=2) + '\n')
-source_names = ['nvk/native-macos/bridge.mm', 'nvk/native-macos/present_hud.h', 'nvk/native-macos/build.py']
+source_names = ['nvk/native-macos/bridge.mm','plugin/nvmtl_fd_token.h','plugin/nvmtl_rebind_import.h', 'nvk/native-macos/present_hud.h', 'nvk/native-macos/build.py']
 record = {
     'source_commit': subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=repo, text=True).strip(),
     'source_uncommitted': bool(subprocess.check_output(

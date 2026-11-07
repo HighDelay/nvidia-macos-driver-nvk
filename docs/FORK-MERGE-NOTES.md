@@ -1,5 +1,45 @@
 # Retained fork changes for upstream merges
 
+## Gecko sandbox media and texture storage, PR #8, 2026-11-07
+
+Merge `bf38d7affa37810a3728f81e6aa7329453aa272a` onto `e126221`.
+Resolve the video-registration and test conflicts by retaining role-scoped
+addon registration, configuration-before-bootstrap ordering, disable settings,
+native sandbox delegation and generation selection. Recognize Gecko RDD/GPU
+children from bounded original argument strings despite pointer-array removal;
+reject invalid parent PIDs and argument counts. RDD registers synchronously
+after configuration; encoder services retain their separate asynchronous path.
+RDD receives only decoder factories, and denied bridge access grants no exception.
+
+Preserve the narrow `/dev/null` token fallback in codec libraries and the native
+Vulkan frontend. Rotate codec descriptors within a bounded window, advancing
+beyond the actual `F_DUPFD` result under a lock: the original PR could immediately
+reuse a result when lower slots were occupied. Keep errno, access modes, close-on-exec
+and low-limit/exhaustion behavior. This reduces immediate teardown reuse without
+changing the kernel connection ABI. Keep import rebinding local to pinned images,
+validate Mach-O tables, restore actual VM protection and release VM object ports.
+The renderer and already-loaded sibling Zink library share the same helper;
+their shared-header hashes are part of frontend build/package provenance.
+
+Include `gl3ext.h` in CGL generation, excluding comments and multiline macros.
+This exposes public texture-storage slots and `GL_ARB_texture_storage` without
+changing existing slot offsets. Rebuild CGL and the native/Zink/Wine frontends
+for packaging; Mesa, codecs, kexts and their source overlays are unchanged.
+
+On RTX 2060 SUPER / 8 GiB BAR1 / Tahoe 26.7.1, host/sanitizer checks cover 37
+registration scenarios, sandbox delegation, descriptor contention, 384 threaded
+token opens and 512 repeated import binds per C/C++ harness without port leaks.
+GPU checks pass 2D/3D/array immutable storage and mip readback with denied null
+opens/page-size queries; the old adapter fails this probe. VP8/VP9 each decode
+12 pixel-checked frames synchronously and asynchronously in both service and
+shuffled-argv RDD-style probes. H.264/HEVC encode eight packets each; H.264 hardware
+session creation and 16 concurrent HEVC-teardown/VP9-startup rounds also pass.
+Spotlight mip/A8/Unknown-usage, Photo Booth, Safari and surface regressions pass.
+Sandbox GPU probes isolate the relevant denied operations; they do not reproduce
+the complete Firefox/Zen profile. Browser-level playback, Sequoia and other GPUs
+remain untested. Firefox's first H.264 capability query can still precede plugin
+registration; do not report its startup status column as repaired by this merge.
+
 ## Spotlight half-float icons and texture correctness, 2026-11-07
 
 Preserve automatic mip generation for eligible full level-zero uploads of

@@ -6,7 +6,14 @@
 #import <Metal/Metal.h>
 #import <IOSurface/IOSurface.h>
 #include <IOKit/IOKitLib.h>
+#include <mach/mach.h>
+#include <mach/mach_vm.h>
+#include <sys/sysctl.h>
 #include <dlfcn.h>
+#include <cerrno>
+#include <climits>
+#include "../../plugin/nvmtl_fd_token.h"
+#include "../../plugin/nvmtl_rebind_import.h"
 #include <fcntl.h>
 #include <unistd.h>
 #include <algorithm>
@@ -115,6 +122,67 @@ template<class T> T dproc(VkDevice d, const char *name) { return reinterpret_cas
 #define DP(dev, name) dproc<PFN_vk##name>((dev)->raw, "vk" #name)
 #define IP(inst, name) iproc<PFN_vk##name>((inst)->raw, "vk" #name)
 
+// Browser GPU-process sandboxes (Firefox/Zen) deny reading /dev/null and the
+// hw.pagesize sysctl. The NVK RM bridge uses a read-only /dev/null descriptor
+// only as an owned handle number, and Mesa sizes system memory through
+// sysconf(_SC_PHYS_PAGES), which Darwin's libc derives from hw.pagesize.
+// Inside those sandboxes NVK enumerated no device, Zink could not choose a
+// physical device and CGL fell back, forcing Firefox to software WebRender.
+// A read-only pipe end at EOF stands in for the denied null descriptor, as in
+// the Metal plugin's ICD path; failed page queries fall back to vm_page_size
+// and hw.memsize. Other paths, modes, errors and sysconf names are unchanged.
+int sandbox_open(const char *path, int flags, ...) {
+   mode_t mode = 0;
+   if (flags & O_CREAT) { va_list args; va_start(args, flags); mode = (mode_t)va_arg(args, int); va_end(args); }
+   return nvmtl_icd_open(path, flags, mode);
+}
+
+long sandbox_sysconf(int name) {
+   const int saved = errno;
+   const long value = sysconf(name);
+   if (value != -1 || (name != _SC_PAGESIZE && name != _SC_PHYS_PAGES)) return value;
+   const int failure = errno;
+   if (!vm_page_size) { errno = failure; return value; }
+   if (name == _SC_PAGESIZE) { errno = saved; return static_cast<long>(vm_page_size); }
+   // Darwin's libc derives _SC_PHYS_PAGES from the hw.pagesize sysctl. Use the
+   // byte total from hw.memsize, which those sandboxes allow, or the host info.
+   uint64_t bytes = 0;
+   size_t length = sizeof(bytes);
+   if (sysctlbyname("hw.memsize", &bytes, &length, nullptr, 0) || length != sizeof(bytes) || !bytes) {
+      host_basic_info_data_t info{};
+      mach_msg_type_number_t count = HOST_BASIC_INFO_COUNT;
+      mach_port_t host = mach_host_self();
+      const kern_return_t result = host_info(host, HOST_BASIC_INFO, reinterpret_cast<host_info_t>(&info), &count);
+      mach_port_deallocate(mach_task_self(), host);
+      if (result != KERN_SUCCESS || !info.max_mem) { errno = failure; return value; }
+      bytes = info.max_mem;
+   }
+   const uint64_t pages = bytes / vm_page_size;
+   if (!pages || pages > static_cast<uint64_t>(LONG_MAX)) { errno = failure; return value; }
+   errno = saved;
+   return static_cast<long>(pages);
+}
+
+// Keep each target image loaded for the lifetime of the callbacks it imports.
+// Use exported anchors instead of walking dyld's process-wide image list.
+void redirect_renderer_sandbox_imports(void *renderer, const std::string &path) {
+   const void *anchor = dlsym(renderer, "vk_icdGetInstanceProcAddr");
+   if (anchor) {
+      nvmtl_rebind_import(anchor, "_open", reinterpret_cast<void *>(&sandbox_open));
+      nvmtl_rebind_import(anchor, "_sysconf", reinterpret_cast<void *>(&sandbox_sysconf));
+   }
+   const std::string sibling = path.substr(0, path.find_last_of('/') + 1) + "libnvk_zink.dylib";
+   static void *zink; // Intentional process-lifetime owner, like backend.
+   zink = dlopen(sibling.c_str(), RTLD_NOW | RTLD_LOCAL | RTLD_NOLOAD);
+   if (zink) {
+      anchor = dlsym(zink, "nvk_zink_get_proc_address");
+      if (anchor) {
+         nvmtl_rebind_import(anchor, "_open", reinterpret_cast<void *>(&sandbox_open));
+         nvmtl_rebind_import(anchor, "_sysconf", reinterpret_cast<void *>(&sandbox_sysconf));
+      }
+   }
+}
+
 bool initialize() {
    std::call_once(backend_once, [] {
 #ifdef NVKBRIDGE_WINE
@@ -129,6 +197,7 @@ bool initialize() {
       path += "libnvk_renderer.dylib";
       backend = dlopen(path.c_str(), RTLD_NOW | RTLD_LOCAL | RTLD_FIRST);
       if (!backend) { fprintf(stderr, "NVK Bridge: renderer load failed: %s\n", dlerror()); return; }
+      redirect_renderer_sandbox_imports(backend, path);
       backend_gipa = reinterpret_cast<PFN_vkGetInstanceProcAddr>(dlsym(backend, "vk_icdGetInstanceProcAddr"));
       stage_import = reinterpret_cast<StageImport>(dlsym(backend, "nvmtl_nvk_stage_import"));
       surface_dirty = reinterpret_cast<SurfaceDirty>(dlsym(backend, "nvmtl_nvk_surface_dirty"));
@@ -685,7 +754,7 @@ VkResult copy_frame(const std::shared_ptr<Chain> &c,uint32_t index,VkSemaphore h
    if (req.size>size) return VK_ERROR_OUT_OF_DEVICE_MEMORY;
    int mt=memory_type(*d,req.memoryTypeBits,VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);if (mt<0) return VK_ERROR_OUT_OF_DEVICE_MEMORY;
    VkImportMemoryFdInfoKHR imported{VK_STRUCTURE_TYPE_IMPORT_MEMORY_FD_INFO_KHR};
-   imported.handleType=VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_FD_BIT;imported.fd=open("/dev/null",O_RDONLY|O_CLOEXEC);
+   imported.handleType=VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_FD_BIT;imported.fd=sandbox_open("/dev/null",O_RDONLY|O_CLOEXEC);
    if (imported.fd<0) return VK_ERROR_OUT_OF_HOST_MEMORY;
    VkMemoryAllocateInfo allocation{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
    allocation.pNext=&imported;allocation.allocationSize=req.size;allocation.memoryTypeIndex=mt;

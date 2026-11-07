@@ -10,6 +10,24 @@ from opengl_api import supported
 
 PROTOTYPE = (r'(?:GLAPI|extern)\s+([^;{}]+?)\s+(?:APIENTRY\s+)?(gl\w+)\s*'
              r'\(([^();{}]*?)\)\s*(?:OPENGL_DEPRECATED(?:\([^)]*\))?\s*)?;')
+SDK_HEADERS = ('gl3.h', 'gl3ext.h', 'gl.h', 'glext.h')
+
+
+def collect_prototypes(headers):
+    prototypes = {}
+    for header in SDK_HEADERS:
+        text = re.sub(r'/\*.*?\*/|//[^\n]*', ' ', (headers / header).read_text(), flags=re.S)
+        # A macro such as '#define GLAPI extern' must not become a return type.
+        # Skip continued directives too, while retaining actual declarations.
+        lines, continued = [], False
+        for line in text.splitlines():
+            if continued or line.lstrip().startswith('#'):
+                continued = line.rstrip().endswith('\\')
+            else:
+                lines.append(line)
+        for ret, name, params in re.findall(PROTOTYPE, '\n'.join(lines)):
+            prototypes.setdefault(name, (ret.strip(), name, params.strip()))
+    return prototypes
 
 
 def parameters(params):
@@ -50,11 +68,7 @@ def main():
     args.output.mkdir(parents=True, exist_ok=True)
     sdk = subprocess.check_output(['xcrun', '--show-sdk-path'], text=True).strip()
     headers = Path(sdk) / 'System/Library/Frameworks/OpenGL.framework/Headers'
-    prototypes = {}
-    for header in ['gl3.h', 'gl.h', 'glext.h']:
-        for ret, name, params in re.findall(PROTOTYPE, (headers / header).read_text()):
-            # Prefer core declarations when Apple assigns aliases one slot.
-            prototypes.setdefault(name, (ret.strip(), name, params.strip()))
+    prototypes = collect_prototypes(headers)
     required = {'glMapBufferRange', 'glFlushMappedBufferRange', 'glVertexAttribDivisor',
                 'glBegin', 'glEnd', 'glNewList', 'glCallList', 'glMatrixMode',
                 'glActiveTextureARB', 'glClientActiveTextureARB', 'glBindBufferARB',
@@ -172,7 +186,7 @@ def main():
     (args.output / 'cgl-dispatch-map.json').write_text(json.dumps({
         'macos': subprocess.check_output(['sw_vers'], text=True),
         'source': 'local LLDB static disassembly of libGL public stubs',
-        'headers': ['gl3.h', 'gl.h', 'glext.h'],
+        'headers': list(SDK_HEADERS),
         'context_prefix_bytes': 0x1e80, 'slots': slots,
         'aliases': {hex(slot): names for slot, names in shared.items() if len(names) > 1},
         'capabilities': capabilities,

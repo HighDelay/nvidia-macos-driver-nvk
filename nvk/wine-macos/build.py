@@ -42,7 +42,7 @@ files = {str(f.relative_to(root)):hashlib.file_digest(f.open('rb'),'sha256').hex
 record = {'schema_version':1, 'source_commit':subprocess.check_output(['git','rev-parse','HEAD'],cwd=repo,text=True).strip(),
           'source_diff':subprocess.check_output(['git','diff','--','nvk/native-macos/bridge.mm'],cwd=repo,text=True),
           'source_files':{name:hashlib.sha256((repo/name).read_bytes()).hexdigest() for name in
-                          ['nvk/native-macos/bridge.mm','nvk/native-macos/present_hud.h','nvk/wine-macos/build.py']},
+                          ['nvk/native-macos/bridge.mm','plugin/nvmtl_fd_token.h','plugin/nvmtl_rebind_import.h','nvk/native-macos/present_hud.h','nvk/wine-macos/build.py']},
           'platform':{'os':'macos','arch':'x86_64','minimum_macos':'15.5'},
           'entry':{'path':str(entry.relative_to(root)),'sha256':files[str(entry.relative_to(root))]},
           'renderer':{'path':str(renderer.relative_to(root)),'sha256':files[str(renderer.relative_to(root))]},
