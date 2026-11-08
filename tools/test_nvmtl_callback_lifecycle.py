@@ -17,6 +17,9 @@ fixture = r'''
 #include <assert.h>
 #include <dispatch/dispatch.h>
 #include <stdatomic.h>
+static int nvmtl_cbt_on(void) { return 0; }
+static uint64_t nvmtl_cbt_now(void) { return 0; }
+#define nvmtl_cbt_line(...) ((void)0)
 
 typedef long MTLCommandBufferStatus;
 enum { MTLCommandBufferStatusNotEnqueued = 0, MTLCommandBufferStatusScheduled = 2,
@@ -29,6 +32,10 @@ typedef void (^MTLCommandBufferHandler)(id);
 @public NVMTLCommandQueue *_queue; NSCondition *_completionCondition; dispatch_group_t _callbackGroup, _scheduledGroup;
     NSMutableArray *_handlers, *_scheduledHandlers; BOOL _wasScheduled, _executionDone, _completionReady, _scheduleAfterPublish; MTLCommandBufferStatus _cbstatus;
     unsigned _nHandlers, _nWait;
+    uint64_t _cbtSeq, _cbtCreate, _cbtCommit;
+    double _legacyKernelStart, _gpuStart, _gpuEnd;
+    BOOL _gpuTimingSeen; struct { uint64_t host_after_ns; } _gpuTiming;
+    unsigned _cbtND; char _cbtK[16];
 }
 @end
 @implementation NVMTLCommandBuffer

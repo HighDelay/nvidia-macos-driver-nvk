@@ -15,11 +15,11 @@ esac
 
 SDK=$(xcrun --show-sdk-path)
 KHDR="$SDK/System/Library/Frameworks/Kernel.framework/Headers"
-OGKM=${OGKM:-$HOME/ogkm615}
+OGKM=${OGKM:-$HOME/ogkm620}
 # Use the same pinned NVKMS API as NVRM/NVAccel; never fetch a moving header.
-PIN=1a82fbfda8f321b056eb3568850f9316c5e465c5
+PIN=e6a2e01579fbbd1ca2ed43fef2ee2589e9bd8bd9
 if [ "$(git -C "$OGKM" rev-parse HEAD 2>/dev/null || true)" != "$PIN" ]; then
-    echo "Set OGKM to open-gpu-kernel-modules at 615.78.08 ($PIN)." >&2
+    echo "Set OGKM to open-gpu-kernel-modules at 620.70.06 ($PIN)." >&2
     exit 1
 fi
 NVINC="$OGKM/src"
@@ -82,6 +82,6 @@ for dependencies in output.glob('NMIntelFB*.d'):
 if not headers: raise SystemExit('No pinned NVKMS dependencies recorded')
 (output/'NVKMS-HEADERS.json').write_text(json.dumps({
     'repository': 'https://github.com/NVIDIA/open-gpu-kernel-modules',
-    'tag': '615.78.08', 'commit': pin, 'headers_sha256': headers,
+    'tag': '620.70.06', 'commit': pin, 'headers_sha256': headers,
 }, indent=2) + '\n')
 PY

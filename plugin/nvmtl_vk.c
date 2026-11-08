@@ -19,8 +19,10 @@
 #include <vulkan/vulkan.h>
 #include <mach-o/loader.h>
 #include "nvmtl_vk.h"
+#include "nvmtl_dlss.h"
 #include "nvmtl_tex_upload.h"
 #include "nvmtl_cmd_refusal.h"
+#include "nvmtl_copy_compat.h"
 #include "nvmtl_sampler_state.h"
 static int g_sampler_anisotropy, g_sampler_mirror_clamp;
 static int g_scalar_layout;
@@ -127,6 +129,7 @@ static inline const char *nvmtl_icd_lib_path(void) {
 static void *g_lib;
 static int g_sample_loader_unwrapped;
 static VkInstance g_inst; static VkPhysicalDevice g_pdev; static VkDevice g_dev; static VkQueue g_queue;
+static int g_dlss_exts;   // the device was created with the extensions DLSS needs (nvmtl_dlss_device_exts)
 static int g_hz_dynr;   // the device enabled dynamicRendering (hazard-model passes begin with vkCmdBeginRendering)
 static int g_host_query_reset, g_occlusion_precise;
 static uint64_t g_lead_skipped;   /* blit leading barriers skipped after an identical trailing one (diagnostics) */
@@ -324,6 +327,7 @@ typedef struct nvmtl_grace_img { nvk_image img; void *bufview, *alias; uint64_t 
 static pthread_mutex_t g_grace_lock = PTHREAD_MUTEX_INITIALIZER;
 static nvmtl_grace_img *g_grace_head, *g_grace_tail; static uint64_t g_grace_n, g_grace_reaped, g_cmd_finished_seq;
 static void nvmtl_vk_image_destroy_now(nvk_image *i);
+static void nvmtl_dlss_views_drop(VkImage img);   // DLSS Super Resolution section, near the end
 /* The lifetime horizon and all changes to its counts share g_grace_lock.
    Diagnostic readers may read the atomic counts without that lock. Queue sequence
    allocation additionally remains inside the queue submission critical section. */
@@ -922,6 +926,55 @@ static void nvmtl_vkmsg_arm(void)
     }
 }
 
+// DLSS needs two NVX extensions on the device. They are requested only when the user installed the DLSS files (and
+// NVMTL_DLSS is not 0), and only if the device offers both. Returns 1 when both were appended to exts.
+// VK_KHR_push_descriptor rides along when offered: the DLSS runtime's own compute passes bind their resources with
+// vkCmdPushDescriptorSetKHR, and without it they ran with nothing bound - Cyberpunk's first evaluation faulted the GPU
+// channel, while the standalone check (which enabled it) passed.
+static int nvmtl_dlss_device_exts(const char **exts, uint32_t *next)
+{
+    if (!nvmtl_dlss_wanted()) return 0;
+    static const char *const want[2] = { NVMTL_DLSS_EXT_BINARY_IMPORT, NVMTL_DLSS_EXT_IMAGE_HANDLE };
+    uint32_t na = 0; int got[2] = {0, 0};
+    if (!pvkEnumerateDeviceExtensionProperties || pvkEnumerateDeviceExtensionProperties(g_pdev, NULL, &na, NULL) != VK_SUCCESS || !na) return 0;
+    VkExtensionProperties *props = calloc(na, sizeof *props);
+    if (props && pvkEnumerateDeviceExtensionProperties(g_pdev, NULL, &na, props) == VK_SUCCESS)
+        for (uint32_t i = 0; i < na; i++) for (int w = 0; w < 2; w++) if (!strcmp(props[i].extensionName, want[w])) got[w] = 1;
+    free(props);
+    if (!got[0] || !got[1]) { nvlog("dlss: the device lacks %s%s%s - DLSS stays off", got[0] ? "" : want[0], (!got[0] && !got[1]) ? " and " : "", got[1] ? "" : want[1]); return 0; }
+    exts[(*next)++] = want[0]; exts[(*next)++] = want[1];
+    int have_push = 0;
+    for (uint32_t i = 0; i < *next; i++) if (!strcmp(exts[i], "VK_KHR_push_descriptor")) have_push = 1;
+    if (!have_push) {
+        props = calloc(na, sizeof *props);
+        if (props && pvkEnumerateDeviceExtensionProperties(g_pdev, NULL, &na, props) == VK_SUCCESS)
+            for (uint32_t i = 0; i < na && !have_push; i++) if (!strcmp(props[i].extensionName, "VK_KHR_push_descriptor")) have_push = 2;
+        free(props);
+        if (have_push == 2) exts[(*next)++] = "VK_KHR_push_descriptor";
+        else nvlog("dlss: the device lacks VK_KHR_push_descriptor - the runtime's own compute passes cannot bind");
+    }
+    return 1;
+}
+// The NGX core uses a range of core 1.1/1.2 features it does not name up front, so with DLSS on every feature the
+// device supports in those two groups is enabled (they are plain booleans after the header). Nothing else in the
+// plugin changes behaviour because a feature is on; NVMTL_DLSS=0 leaves the feature set exactly as before.
+static void nvmtl_dlss_or_features(void *dst, const void *supported, size_t size)
+{
+    VkBool32 *d = (VkBool32 *)((char *)dst + 16); const VkBool32 *s = (const VkBool32 *)((const char *)supported + 16);
+    for (size_t i = 0; i < (size - 16) / sizeof(VkBool32); i++) d[i] |= s[i];
+}
+static void nvmtl_dlss_device_features(VkPhysicalDeviceVulkan11Features *v11, VkPhysicalDeviceVulkan12Features *v12)
+{
+    PFN_vkGetPhysicalDeviceFeatures2 gpf = (PFN_vkGetPhysicalDeviceFeatures2)pvkGetInstanceProcAddr(g_inst, "vkGetPhysicalDeviceFeatures2");
+    if (!gpf) { nvlog("dlss: vkGetPhysicalDeviceFeatures2 missing - core features left as they are"); return; }
+    VkPhysicalDeviceVulkan12Features q12 = { VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES };
+    VkPhysicalDeviceVulkan11Features q11 = { VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_FEATURES, &q12 };
+    VkPhysicalDeviceFeatures2 q2 = { VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2, &q11 };
+    gpf(g_pdev, &q2);
+    nvmtl_dlss_or_features(v11, &q11, sizeof q11); nvmtl_dlss_or_features(v12, &q12, sizeof q12);
+    nvlog("dlss: core 1.1/1.2 device features widened to what the device supports");
+}
+
 static int nvmtl_vk_initialize(void)
 {
     if (g_state) return g_state == 1 ? 0 : -1;
@@ -1039,7 +1092,7 @@ static int nvmtl_vk_initialize(void)
                                     "VK_KHR_external_memory_fd",
                                     "VK_EXT_mutable_descriptor_type", "VK_KHR_cooperative_matrix", "VK_EXT_calibrated_timestamps", "VK_EXT_sample_locations", "VK_KHR_pipeline_executable_properties",
                                     "VK_EXT_provoking_vertex", "VK_KHR_vertex_attribute_divisor", "VK_EXT_pipeline_robustness" };
-    const char *exts[17]; uint32_t next = 0; int have[17] = {0};
+    const char *exts[20]; uint32_t next = 0; int have[17] = {0};   // 17 wanted + DLSS's three
     uint32_t na = 0;
     if (pvkEnumerateDeviceExtensionProperties &&
         pvkEnumerateDeviceExtensionProperties(g_pdev, NULL, &na, NULL) == VK_SUCCESS && na) {
@@ -1050,6 +1103,7 @@ static int nvmtl_vk_initialize(void)
                     if (!have[w] && !strcmp(props[i].extensionName, kWant[w])) { have[w] = 1; exts[next++] = kWant[w]; }
         free(props);
     }
+    g_dlss_exts = nvmtl_dlss_device_exts(exts, &next);   // DLSS only: the two NVX extensions, when the files are installed and the device has them
     /* Single-sample rendering uses its fixed center; only MSAA needs this extension. */
     if (have[12]) {
         PFN_vkGetPhysicalDeviceProperties2 props2 = (PFN_vkGetPhysicalDeviceProperties2)pvkGetInstanceProcAddr(g_inst, "vkGetPhysicalDeviceProperties2");
@@ -1108,6 +1162,7 @@ static int nvmtl_vk_initialize(void)
     VkPhysicalDeviceVulkan13Features v13 = { VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES };   // chained in only for the hazard model's passes
     v12.bufferDeviceAddress = VK_TRUE;
     VkPhysicalDeviceVulkan11Features v11 = { VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_FEATURES, &v12 };
+    if (g_dlss_exts) nvmtl_dlss_device_features(&v11, &v12);
     VkPhysicalDeviceCooperativeMatrixFeaturesKHR cmf = { VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_COOPERATIVE_MATRIX_FEATURES_KHR };
     static VkPhysicalDeviceMutableDescriptorTypeFeaturesEXT mdf;
     if (g_mutable) { mdf = (VkPhysicalDeviceMutableDescriptorTypeFeaturesEXT){ VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MUTABLE_DESCRIPTOR_TYPE_FEATURES_EXT, v12.pNext, VK_TRUE }; v12.pNext = &mdf; }
@@ -2758,6 +2813,14 @@ static uint32_t g_heap_fifo[NVMTL_BINDLESS_SLOTS]; static uint32_t g_heap_fifo_h
 static nvk_image             g_dummyStex;
 static nvk_image             g_dummyStexArray;   /* the heap's storage dummy: a 2D ARRAY, the type the game's handle writes declare */
 static inline void *nvmtl_heap_storage_dummy(void) { return g_dummyStexArray.view ? g_dummyStexArray.view : g_dummyStex.view; }
+/* Typed dummies for the heap's reserved slots 1..5 (the translator's BINDLESS_DUMMY_SLOT_*): 3D, cube and cube array.
+   Slot 1 holds the 2D dummies, slot 2 the 2D array one. A null resource id is redirected by the translated shader to the
+   slot whose dummy has the dimensionality it declares, so its reads are zeros and its writes are discarded for every
+   type, as on Apple. NVMTL_TYPED_DUMMIES=0 keeps slot 0 alone and tells the translator nothing. */
+static nvk_image g_dummyStex3D, g_dummyStexCube, g_dummyStexCubeArray;
+static int g_heap_typed_dummies;
+int nvmtl_typed_dummies_wanted(void) { static int on = -1; if (on < 0) { const char *e = getenv("NVMTL_TYPED_DUMMIES"); on = !(e && e[0] == '0'); } return on; }
+int nvmtl_vk_heap_typed_dummies(void) { return g_heap_typed_dummies; }
 static VkSampler             g_dummySampler;
 
 #define NVMTL_SAMPLER_INTERN_CAP 4096u
@@ -3069,6 +3132,17 @@ static int ensure_descriptors_locked(void)
         if (g_dummyStexArray.img) nvmtl_vk_image_destroy(&g_dummyStexArray);
         memset(&g_dummyStexArray, 0, sizeof g_dummyStexArray);
     }
+    if (nvmtl_typed_dummies_wanted()) {
+        struct { nvk_image *img; uint32_t mtl_type, layers; const char *what; } typed[3] = {
+            { &g_dummyStex3D, 7, 1, "3D" }, { &g_dummyStexCube, 5, 6, "cube" }, { &g_dummyStexCubeArray, 6, 6, "cube array" } };
+        for (int k = 0; k < 3; k++) {
+            if (nvmtl_vk_image_create_typed(1, 1, VK_FORMAT_R8G8B8A8_UNORM, 4, 0, 1, 1, typed[k].mtl_type, typed[k].layers, typed[k].img) || !typed[k].img->storage) {
+                nvlog("vk: NO %s storage dummy (RGBA8 storage refused) - its reserved heap slot keeps the 2D-array dummy", typed[k].what);
+                if (typed[k].img->img) nvmtl_vk_image_destroy(typed[k].img);
+                memset(typed[k].img, 0, sizeof *typed[k].img);
+            }
+        }
+    }
     if (g_mutable && nvmtl_vk_texel_view_create(&g_dummyBuf, 0, 256, VK_FORMAT_R8G8B8A8_UNORM, 1, &g_dummyTexAlias, &g_dummyTexView, NULL)) {
         nvlog("vk: par3 NO texel dummy — texture buffers are turned OFF for this process (the layout stays mutable)"); g_mutable = 0; }
     /* The sampler a shader gets at a slot nothing was bound to. A Metal constexpr sampler defaults to mip_filter::none,
@@ -3164,6 +3238,26 @@ static int ensure_descriptors_locked(void)
                       for (uint32_t k = 0; k < NVMTL_BINDLESS_SLOTS; k++) { nvmtl_sl_write(&g_sl, k, 2, nvmtl_heap_storage_dummy(), 0); if (tf) { nvmtl_sl_write(&g_sl, k, 3, g_dummyTexView, 0); nvmtl_sl_write(&g_sl, k, 4, g_dummyTexView, 0); } }
                   pthread_mutex_unlock(&g_sl_lock);
               } else if (hnb == 5) nvlog("vk: BINDLESS heap bindings 2-4 left unwritten for unfilled slots (%s)", prefill ? "no storage dummy" : "NVMTL_HEAP_PREFILL=0"); }
+            if (nvmtl_typed_dummies_wanted() && hnb == 5) {
+                // slots 1..5 = the typed dummies (translator's BINDLESS_DUMMY_SLOT_2D .. _CUBE_ARRAY); a type whose dummy
+                // failed to create keeps the array dummy, and the slot stays reserved so no texture can land there
+                void *sampled[5] = { g_dummyImg.view, g_dummyStexArray.view, g_dummyStex3D.view, g_dummyStexCube.view, g_dummyStexCubeArray.view };
+                void *storage[5] = { g_dummyStex.view, g_dummyStexArray.view, g_dummyStex3D.view, g_dummyStexCube.view, g_dummyStexCubeArray.view };
+                for (uint32_t k = 0; k < 5; k++) {
+                    const uint32_t slot = 1 + k;
+                    void *sv = sampled[k] ? sampled[k] : g_dummyImg.view, *tv = storage[k] ? storage[k] : nvmtl_heap_storage_dummy();
+                    VkDescriptorImageInfo si = { VK_NULL_HANDLE, (VkImageView)sv, k ? VK_IMAGE_LAYOUT_GENERAL : VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
+                    VkDescriptorImageInfo ti = { VK_NULL_HANDLE, (VkImageView)tv, VK_IMAGE_LAYOUT_GENERAL };
+                    VkWriteDescriptorSet w[2] = { { VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, NULL, hset, 0, slot, 1, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, &si, NULL, NULL },
+                                                  { VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, NULL, hset, 2, slot, 1, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, &ti, NULL, NULL } };
+                    pvkUpdateDescriptorSets(g_dev, tv ? 2 : 1, w, 0, NULL);
+                    pthread_mutex_lock(&g_sl_lock); nvmtl_sl_write(&g_sl, slot, 0, sv, 0); if (tv) nvmtl_sl_write(&g_sl, slot, 2, tv, 0); pthread_mutex_unlock(&g_sl_lock);
+                }
+                pthread_mutex_lock(&g_heap_lock); if (g_heap_next < 6) g_heap_next = 6; pthread_mutex_unlock(&g_heap_lock);
+                g_heap_typed_dummies = 1;
+                nvlog("vk: BINDLESS heap slots 1-5 reserved for typed dummies (2D, 2D array%s, 3D%s, cube%s, cube array%s) - a null resource id reads/writes the dummy of its declared type",
+                      g_dummyStexArray.view ? "" : " MISSING", g_dummyStex3D.view ? "" : " MISSING", g_dummyStexCube.view ? "" : " MISSING", g_dummyStexCubeArray.view ? "" : " MISSING");
+            }
             g_heapLayout = hl; g_heapPool = hp; g_heapSet = hset;
             {   static const char *const tn[] = { "SAMPLER", "COMBINED", "SAMPLED_IMAGE", "STORAGE_IMAGE", "UNIFORM_TEXEL", "STORAGE_TEXEL" };
                 for (uint32_t i = 0; i < hnb; i++)
@@ -3487,7 +3581,23 @@ static unsigned nvmtl_keep_cap(void)
 static pthread_mutex_t g_keep_lock = PTHREAD_MUTEX_INITIALIZER;
 static VkCommandPool g_keep_pool[NVMTL_KEEP]; static unsigned g_keep_npool;
 static unsigned g_keep_pool_cost[NVMTL_KEEP], g_keep_pool_maps;
-static unsigned long long g_keep_pool_hit, g_keep_pool_miss, g_keep_pool_drop;
+static unsigned long long g_keep_pool_hit, g_keep_pool_miss, g_keep_pool_drop, g_keep_pool_unproven;
+// Every miss here is a fresh NVK pool whose 64 KB chunks are each an RM allocation, a VA bind, and a user-client open + map
+// on the recording thread, and every drop or unproven pool is the matching close + unmap + free on the completion thread.
+// In a 20 s Cyberpunk sample that was ~3,000 recording-thread and ~1,800 completion-thread samples, so the cache's hit
+// rate is logged (every 4096 command buffers) to tell which of the three is costing it: misses (cache too small for
+// the burst), drops (cache full at retire), or unproven (no witness, so the pool cannot be reused at all).
+static void nvmtl_keep_pool_census(void)
+{
+    static _Atomic unsigned long long n;
+    if ((atomic_fetch_add_explicit(&n, 1, memory_order_relaxed) & 4095) != 4095) return;
+    pthread_mutex_lock(&g_keep_lock);
+    const unsigned long long h = g_keep_pool_hit, m = g_keep_pool_miss, d = g_keep_pool_drop, u = g_keep_pool_unproven;
+    const unsigned np = g_keep_npool;
+    pthread_mutex_unlock(&g_keep_lock);
+    nvlog("vk: command-pool cache: hits=%llu misses=%llu (%.1f%%) drops=%llu unproven=%llu cached=%u/%u (NVMTL_KEEP_POOLS)",
+          h, m, (h + m) ? 100.0 * (double)m / (double)(h + m) : 0.0, d, u, np, nvmtl_keep_cap());
+}
 static nvmtl_address_page *g_keep_page[NVMTL_KEEP]; static unsigned g_keep_npage;
 // Set once a process has lost NVMTL_WIT_LOST_MAX witnesses: reuse stops and every pool is destroyed after its fence
 // signals, so a witness that keeps going missing costs speed, never memory. Each lost witness has already cost its
@@ -3517,6 +3627,7 @@ static VkCommandPool nvmtl_keep_pool_pop(void)
         g_keep_pool_maps -= g_keep_pool_cost[i]; g_keep_pool_hit++;
     } else g_keep_pool_miss++;
     pthread_mutex_unlock(&g_keep_lock);
+    nvmtl_keep_pool_census();
     return p;
 }
 static int nvmtl_keep_pool_push(VkCommandPool p)
@@ -4096,9 +4207,20 @@ static VkDescriptorSet nvmtl_snapshot_set_c(nvk_cmdbuf *c, uint32_t which, const
         uniformInfo = (VkDescriptorBufferInfo){ (VkBuffer)g_dummyBuf.buf, 0, 16 };
         c->gl_uniform_dyn[which] = 0;
         if (p->gl_uniform_slot[which] && t) {
-            const nvmtl_slot *sl = &t->s[which][p->gl_uniform_slot[which] - 1];
-            uniformInfo.buffer = (VkBuffer)sl->h; uniformInfo.range = p->gl_uniform_range[which];
-            c->gl_uniform_dyn[which] = (uint32_t)sl->off;
+            // The one buffer descriptor that read its slot raw: no kind check, no handle check, no dummy. A slot that
+            // holds a texture, a sampler or a handle that cannot be a live object reached NVK here, and
+            // nvk_UpdateDescriptorSets+1836 read through it - WindowServer died seconds after each login (field
+            // crashes on macOS 15 and 26 from 10-23, the same 0x0100... handle the bound-slot guard already refuses).
+            const uint32_t b = p->gl_uniform_slot[which] - 1;
+            const nvmtl_slot *sl = nvmtl_slot_checked(&t->s[which][b], which, b);
+            if (sl && sl->kind == NVMTL_SLOT_BUF && sl->h) {
+                uniformInfo.buffer = (VkBuffer)sl->h; uniformInfo.range = p->gl_uniform_range[which];
+                c->gl_uniform_dyn[which] = (uint32_t)sl->off;
+            } else {
+                static int said;
+                if (said < 8) { said++; nvlog("vk: the GL uniform buffer (binding %u of set %u) holds no live buffer (kind %u) - "
+                                              "the dummy is bound instead (said up to 8 times)", b, which, sl ? sl->kind : 0); }
+            }
         }
         uniform = &uniformInfo;
     }
@@ -7642,7 +7764,8 @@ static void nvmtl_vk_zero_dummies(void)
     static int done;
     if (done) return;
     done = 1;
-    nvk_image *imgs[3] = { &g_dummyImg, g_dummyStex.view ? &g_dummyStex : NULL, g_dummyStexArray.view ? &g_dummyStexArray : NULL };
+    nvk_image *imgs[6] = { &g_dummyImg, g_dummyStex.view ? &g_dummyStex : NULL, g_dummyStexArray.view ? &g_dummyStexArray : NULL,
+                           g_dummyStex3D.view ? &g_dummyStex3D : NULL, g_dummyStexCube.view ? &g_dummyStexCube : NULL, g_dummyStexCubeArray.view ? &g_dummyStexCubeArray : NULL };
     VkCommandPool pool = VK_NULL_HANDLE; VkCommandBuffer cb = VK_NULL_HANDLE; VkFence fence = VK_NULL_HANDLE;
     VkCommandPoolCreateInfo cpci = { VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO, NULL, 0, g_qfam };
     if (pvkCreateCommandPool(g_dev, &cpci, NULL, &pool) != VK_SUCCESS) { nvlog("vk: dummy zero-fill SKIPPED — vkCreateCommandPool failed; an unbound texture still samples uninitialised memory"); return; }
@@ -7652,9 +7775,10 @@ static void nvmtl_vk_zero_dummies(void)
     if (pvkBeginCommandBuffer(cb, &bi) != VK_SUCCESS) { nvlog("vk: dummy zero-fill SKIPPED — vkBeginCommandBuffer failed; an unbound texture still samples uninitialised memory"); return; }
     VkImageSubresourceRange range = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
     VkClearColorValue zero; memset(&zero, 0, sizeof zero);
-    for (int k = 0; k < 3; k++) {
+    for (int k = 0; k < 6; k++) {
         if (!imgs[k] || !imgs[k]->img) continue;
-        VkImageLayout fin = (imgs[k] == &g_dummyStex || imgs[k] == &g_dummyStexArray) ? VK_IMAGE_LAYOUT_GENERAL : VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+        VkImageLayout fin = (imgs[k] == &g_dummyImg) ? VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL : VK_IMAGE_LAYOUT_GENERAL;
+        VkImageSubresourceRange range = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, imgs[k]->layers > 1 ? imgs[k]->layers : 1 };
         VkImageMemoryBarrier toDst = { VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER, NULL,
             0, VK_ACCESS_TRANSFER_WRITE_BIT, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
             VK_QUEUE_FAMILY_IGNORED, VK_QUEUE_FAMILY_IGNORED, (VkImage)imgs[k]->img, range };
@@ -8013,6 +8137,7 @@ static void nvmtl_cmd_retire(nvk_cmdbuf *c)
     if (c->cb && c->pool) {
         VkCommandBuffer cb = (VkCommandBuffer)c->cb;
         pvkFreeCommandBuffers(g_dev, (VkCommandPool)c->pool, 1, &cb);
+        if (keep == 0 && nvmtl_keep_on()) { pthread_mutex_lock(&g_keep_lock); g_keep_pool_unproven++; pthread_mutex_unlock(&g_keep_lock); }
         if (keep >= 0 && !(keep > 0 && nvmtl_keep_pool_push((VkCommandPool)c->pool))) pvkDestroyCommandPool(g_dev, (VkCommandPool)c->pool, NULL);
         c->cb = NULL; c->pool = NULL;
     }
@@ -8450,6 +8575,7 @@ static void nvmtl_vk_image_destroy_now(nvk_image *i)
     if (!i->img) { if (i->view) { nvmtl_vw_note_died(i->view); pvkDestroyImageView(g_dev, (VkImageView)i->view, NULL); i->view = NULL; } return; }   // a view held by the grace (texel entries: nvmtl_image_grace_reap)
     nvmtl_vk_image_upload_barrier(i);   // an async upload must finish before we free this image's memory (#96)
     if (i->view) { nvmtl_vw_note_died(i->view); pvkDestroyImageView(g_dev, (VkImageView)i->view, NULL); }
+    nvmtl_dlss_views_drop((VkImage)i->img);   // DLSS's own views of this image go with it
     pvkDestroyImage(g_dev, (VkImage)i->img, NULL);
     if (i->pool) { if (i->sysmem) g_sys_bytes -= i->alloc; else g_vram_bytes -= i->alloc; image_pool_release(i); }
     if (!i->placed && i->mem) { pvkFreeMemory(g_dev, (VkDeviceMemory)i->mem, NULL); g_alloc_bytes -= i->alloc; if (i->sysmem) { g_sys_bytes -= i->alloc; g_sys_align -= (i->alloc + 65535ull) & ~65535ull; } else { g_vram_bytes -= i->alloc; g_img_align -= (i->alloc + 65535ull) & ~65535ull; nvmtl_vk_budget_discharge(i->alloc); }    }
@@ -11095,12 +11221,31 @@ int nvmtl_vk_cmd_copy_image_sub3(nvk_cmdbuf *c, nvk_image *src, uint32_t sl, uin
 {
     if (!depth) depth = 1;
     const int s3 = src && src->mtl_type == 7, d3 = dst && dst->mtl_type == 7;
-    if (!c || !src || !dst || !w || !h || src->fmt != dst->fmt
+    /* Two formats join when vkCmdCopyImage accepts them (nvmtl_copy_compat.h): the same texel size, or the same BC class.
+     * WAS: an identical VkFormat only, so a Metal copy between an sRGB texture and its linear twin, a channel-order twin, or
+     * a view in another format of the same size was dropped and its destination kept the bytes it held before.
+     * NVMTL_COPY_EXACT_FORMAT=1 restores the exact-match refusal. */
+    static int exact = -1;
+    if (exact < 0) { const char *e = getenv("NVMTL_COPY_EXACT_FORMAT"); exact = e && e[0] == '1';
+                     nvlog("copy_image_sub: formats join when %s (NVMTL_COPY_EXACT_FORMAT=%s)", exact ? "identical" : "size-compatible, as vkCmdCopyImage allows", e ? e : "unset"); }
+    const int fmt_ok = src && dst && (exact ? src->fmt == dst->fmt : nvmtl_copy_formats_ok(src->fmt, dst->fmt));
+    if (!c || !src || !dst || !w || !h || !fmt_ok
         || (src->samples ? src->samples : 1) != (dst->samples ? dst->samples : 1)
         || ss >= (src->layers ? src->layers : 1) || ds >= (dst->layers ? dst->layers : 1)
         || sl >= (src->mips ? src->mips : 1) || dl >= (dst->mips ? dst->mips : 1)) {
-        nvlog("copy_image_sub: incompatible format/sample count or invalid subresource");
+        static _Atomic unsigned long long refused;
+        const unsigned long long k = atomic_fetch_add(&refused, 1) + 1;
+        if (!src || !dst) nvlog("copy_image_sub: REFUSED - %s image is missing (%llu refused so far)", src ? "destination" : "source", k);
+        else nvlog("copy_image_sub: REFUSED (%llu so far) - format %u -> %u%s, samples %u -> %u, layer %u of %u -> %u of %u, level %u of %u -> %u of %u, "
+                   "%ux%u (src %ux%u type %u, dst %ux%u type %u)", k, src->fmt, dst->fmt, fmt_ok ? "" : " (not size-compatible)",
+                   src->samples, dst->samples, ss, src->layers, ds, dst->layers, sl, src->mips, dl, dst->mips, w, h,
+                   src->w, src->h, src->mtl_type, dst->w, dst->h, dst->mtl_type);
         return -1;
+    }
+    if (src->fmt != dst->fmt) {
+        static _Atomic unsigned long long joined;
+        const unsigned long long k = atomic_fetch_add(&joined, 1) + 1;
+        if (!(k & (k - 1))) nvlog("copy_image_sub: %llu copy(ies) between size-compatible formats so far (latest %u -> %u, %ux%u)", k, src->fmt, dst->fmt, w, h);
     }
     const uint32_t sw = nvmtl_lvl(src->w, sl), sh = nvmtl_lvl(src->h, sl);
     const uint32_t dw = nvmtl_lvl(dst->w, dl), dh = nvmtl_lvl(dst->h, dl);
@@ -11166,6 +11311,248 @@ int nvmtl_vk_srgb_format(uint32_t fmt)
     case VK_FORMAT_A8B8G8R8_SRGB_PACK32: return 1;
     default: return 0;
     }
+}
+// ---- DLSS Super Resolution (nvmtl_dlss.h), recorded on the command buffer the MetalFX temporal scaler encodes into ----
+int nvmtl_vk_dlss_available(void)
+{
+    if (!nvmtl_dlss_wanted()) return 0;
+    if (nvmtl_vk_init() || !g_dlss_exts) return 0;   // g_dlss_exts is settled while the device is created
+    VkPhysicalDeviceProperties pp; pvkGetPhysicalDeviceProperties(g_pdev, &pp);
+    return nvmtl_dlss_init(g_inst, g_pdev, g_dev, pvkGetInstanceProcAddr, pvkGetDeviceProcAddr, pp.vendorID, pp.deviceID) == 0;
+}
+/* The views DLSS reads and writes are its own: a plain 2D view of level 0 / layer 0 with ONE aspect and the image's own
+ * format. The Metal texture's view can carry depth AND stencil (a combined depth-stencil texture), several levels or
+ * layers, or a swizzle; the core turns each view into a descriptor handle (VK_NVX_image_view_handle).
+ * The view is made ONCE per image and kept until the image itself is destroyed (nvmtl_dlss_views_drop, called from
+ * nvmtl_vk_image_destroy_now after the GPU is done with it). The core keeps the handle it took for a view across
+ * frames; a view destroyed and re-created every frame can come back with the same handle value naming another
+ * image's descriptor. */
+#define DLSS_VIEW_CACHE 48
+#define DLSS_VIEW_CACHE_MAX 4096
+typedef struct { VkImage img; uint32_t fmt; VkImageAspectFlags aspect; int rw; VkImageView v; } dlss_view_ent;
+static dlss_view_ent *g_dlss_vc;
+static int g_dlss_vc_cap;
+static pthread_mutex_t g_dlss_vc_mu = PTHREAD_MUTEX_INITIALIZER;
+static void nvmtl_dlss_views_drop(VkImage img)
+{
+    if (!img) return;
+    pthread_mutex_lock(&g_dlss_vc_mu);
+    for (int k = 0; k < g_dlss_vc_cap; k++)
+        if (g_dlss_vc[k].img == img) { pvkDestroyImageView(g_dev, g_dlss_vc[k].v, NULL); memset(&g_dlss_vc[k], 0, sizeof g_dlss_vc[k]); }
+    pthread_mutex_unlock(&g_dlss_vc_mu);
+}
+static VkImageView dlss_view(nvk_image *i, VkImageAspectFlags aspect, int rw)
+{
+    pthread_mutex_lock(&g_dlss_vc_mu);
+    int freek = -1;
+    for (int k = 0; k < g_dlss_vc_cap; k++) {
+        const dlss_view_ent *e = &g_dlss_vc[k];
+        if (e->img == (VkImage)i->img && e->fmt == i->fmt && e->aspect == aspect && e->rw == rw) { VkImageView v = e->v; pthread_mutex_unlock(&g_dlss_vc_mu); return v; }
+        if (!e->img && freek < 0) freek = k;
+    }
+    if (freek < 0 && g_dlss_vc_cap < DLSS_VIEW_CACHE_MAX) {
+        int cap = g_dlss_vc_cap ? g_dlss_vc_cap * 2 : DLSS_VIEW_CACHE;
+        if (cap > DLSS_VIEW_CACHE_MAX) cap = DLSS_VIEW_CACHE_MAX;
+        dlss_view_ent *entries = realloc(g_dlss_vc, (size_t)cap * sizeof *entries);
+        if (entries) {
+            memset(entries + g_dlss_vc_cap, 0, (size_t)(cap - g_dlss_vc_cap) * sizeof *entries);
+            freek = g_dlss_vc_cap; g_dlss_vc = entries; g_dlss_vc_cap = cap;
+        }
+    }
+    if (freek < 0) {
+        static unsigned said;
+        if (said < 8) { said++; nvlog("dlss: cannot retain another image view; evaluation refused"); }
+        pthread_mutex_unlock(&g_dlss_vc_mu);
+        return VK_NULL_HANDLE;
+    }
+    // The view keeps every usage of its image (no VkImageViewUsageCreateInfo): the core asks for a sampled handle of
+    // the output as well as a storage one, and NVK makes a view's sampled or storage descriptor only for a usage the
+    // view has - a storage-only output view returned sampled handle 0, a null descriptor the GPU faulted on (VA 0x0).
+    VkImageViewCreateInfo vci = { VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO, NULL, 0, (VkImage)i->img, VK_IMAGE_VIEW_TYPE_2D,
+                                  (VkFormat)i->fmt, { 0 }, { aspect, 0, 1, 0, 1 } };
+    VkImageView v = VK_NULL_HANDLE;
+    const VkResult r = pvkCreateImageView(g_dev, &vci, NULL, &v);
+    if (r != VK_SUCCESS) { pthread_mutex_unlock(&g_dlss_vc_mu); nvlog("dlss: own %s view of VkFormat %u -> %d", rw ? "storage" : "sampled", i->fmt, r); return VK_NULL_HANDLE; }
+    g_dlss_vc[freek] = (dlss_view_ent){ (VkImage)i->img, i->fmt, aspect, rw, v };
+    nvlog("dlss: own view %p of image %p (VkFormat %u %ux%u usage 0x%x, %s)", (void *)v, i->img, i->fmt, i->w, i->h, i->usage, rw ? "output" : "input");
+    pthread_mutex_unlock(&g_dlss_vc_mu);
+    return v;
+}
+static int dlss_image(nvmtl_dlss_image *o, nvk_image *i, void *view, int rw)
+{
+    if (!i || !i->img || !view || (i->samples ? i->samples : 1) > 1) return -1;
+    const VkImageAspectFlags a = nvmtl_barrier_aspect(i);
+    const VkImageAspectFlags one = (a & VK_IMAGE_ASPECT_DEPTH_BIT) ? VK_IMAGE_ASPECT_DEPTH_BIT : VK_IMAGE_ASPECT_COLOR_BIT;
+    const VkImageView own = dlss_view(i, one, rw);
+    if (!own) return -1;
+    *o = (nvmtl_dlss_image){ own, (VkImage)i->img, one, (VkFormat)i->fmt, i->w, i->h };
+    return 0;
+}
+static void dlss_describe(const char *what, const nvk_image *i)
+{
+    if (i) nvlog("dlss: %-8s VkFormat %u %ux%u mips %u layers %u type %u samples %u usage 0x%x storage %u aspect 0x%x",
+                 what, i->fmt, i->w, i->h, i->mips, i->layers, i->mtl_type, i->samples, i->usage, i->storage, nvmtl_barrier_aspect(i));
+}
+int nvmtl_vk_cmd_dlss(nvk_cmdbuf *c, void **feature, const nvmtl_vk_dlss_args *a)
+{
+    if (!c || !feature || !a || !nvmtl_dlss_ready()) return -1;
+    nvmtl_dlss_eval e = {0}; nvmtl_dlss_image ex, re;
+    if (!*feature) {   // once per feature: what the game hands the scaler
+        dlss_describe("color", a->color); dlss_describe("depth", a->depth); dlss_describe("motion", a->motion);
+        dlss_describe("output", a->output); dlss_describe("exposure", a->exposure); dlss_describe("reactive", a->reactive);
+    }
+    if (a->output && !(a->output->usage & VK_IMAGE_USAGE_STORAGE_BIT)) {   // a storage view needs storage usage on the image itself
+        nvlog("dlss: the output texture was created without shader-write usage - not recorded"); return -1;
+    }
+    if (dlss_image(&e.color, a->color, a->color_view, 0) || dlss_image(&e.depth, a->depth, a->depth_view, 0)
+        || dlss_image(&e.motion, a->motion, a->motion_view, 0) || dlss_image(&e.output, a->output, a->output_view, 1)) {
+        nvlog("dlss: a scaler texture has no usable Vulkan image/view (or is multisampled) - not recorded"); return -1;
+    }
+    if (a->exposure) { if (dlss_image(&ex, a->exposure, a->exposure_view, 0)) { nvlog("dlss: the exposure texture is unusable - not recorded"); return -1; } e.exposure = &ex; }
+    if (a->reactive) { if (dlss_image(&re, a->reactive, a->reactive_view, 0)) { nvlog("dlss: the reactive mask is unusable - not recorded"); return -1; } e.reactive = &re; }
+    e.jitter_x = a->jitter_x; e.jitter_y = a->jitter_y; e.mv_scale_x = a->mv_scale_x; e.mv_scale_y = a->mv_scale_y;
+    e.pre_exposure = a->pre_exposure; e.reset = a->reset; e.render_w = a->cfg_in_w_used; e.render_h = a->cfg_in_h_used;
+    e.color_x = a->color_x; e.color_y = a->color_y; e.depth_x = a->depth_x; e.depth_y = a->depth_y; e.motion_x = a->motion_x; e.motion_y = a->motion_y;
+    // The game's render size and input offsets go to the core as they are; a region outside a texture is a read past
+    // its end on the GPU. Refuse the frame (the scaler falls back) rather than hand the core an out-of-range region.
+    if (!e.render_w || !e.render_h || e.render_w > a->in_w || e.render_h > a->in_h
+        || (uint64_t)e.color_x + e.render_w > a->color->w || (uint64_t)e.color_y + e.render_h > a->color->h
+        || (uint64_t)e.depth_x + e.render_w > a->depth->w || (uint64_t)e.depth_y + e.render_h > a->depth->h
+        || (uint64_t)e.motion_x + (a->mv_lowres ? e.render_w : a->out_w) > a->motion->w
+        || (uint64_t)e.motion_y + (a->mv_lowres ? e.render_h : a->out_h) > a->motion->h) {
+        nvlog("dlss: render region %ux%u (color +%u,%u depth +%u,%u motion +%u,%u) is outside the textures (feature %ux%u) - not recorded",
+              e.render_w, e.render_h, e.color_x, e.color_y, e.depth_x, e.depth_y, e.motion_x, e.motion_y, a->in_w, a->in_h);
+        return -1;
+    }
+    const nvmtl_dlss_cfg want = { a->in_w, a->in_h, a->out_w, a->out_h, a->hdr, a->mv_lowres, a->mv_jittered, a->depth_inverted, a->auto_exposure };
+    if (c->in_rp) nvmtl_vk_cmd_end_render(c);
+    nvmtl_vk_cmd_barrier(c);
+    nvk_image *all[6] = { a->color, a->depth, a->motion, a->output, a->exposure, a->reactive };
+    for (int k = 0; k < 6; k++) if (all[k])
+        img_to(c, all[k], VK_IMAGE_LAYOUT_GENERAL, VK_ACCESS_MEMORY_WRITE_BIT | VK_ACCESS_MEMORY_READ_BIT, VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT,
+               VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT);
+    nvmtl_dlss_feature *f = (nvmtl_dlss_feature *)*feature;
+    if (f && memcmp(nvmtl_dlss_feature_cfg(f), &want, sizeof want)) {
+        nvlog("dlss: scaler settings changed - making a new feature (the old one is kept until the process ends)");
+        f = NULL;
+    }
+    if (!f) {
+        f = nvmtl_dlss_feature_create(c->cb, &want); if (!f) return -1; *feature = f;
+        // The feature's setup (weights and tables the core uploads) is recorded into this same command buffer: its
+        // writes must land before the first evaluation reads them. The standalone check submitted and waited between.
+        nvmtl_vk_cmd_barrier(c);
+    }
+    c->direct_sass = 1;   // the core launches compiled machine code from this buffer: never reuse its pool
+    const int rc = nvmtl_dlss_evaluate(c->cb, f, &e);
+    nvmtl_vk_cmd_barrier(c);
+    return rc;
+}
+int nvmtl_vk_dlss_rr_available(void) { return nvmtl_vk_dlss_available() && nvmtl_dlss_rr_ready(); }
+int nvmtl_vk_cmd_dlss_rr(nvk_cmdbuf *c, void **feature, const nvmtl_vk_dlss_rr_args *a)
+{
+    if (!c || !feature || !a || !nvmtl_dlss_rr_ready()) return -1;
+    if (!a->color || !a->depth || !a->motion || !a->output || !a->diffuse_albedo || !a->specular_albedo || !a->normals || !a->roughness) return -1;
+    nvmtl_dlss_rr_eval e = {0}; nvmtl_dlss_image hit, ex, re;
+    if (!*feature) {
+        dlss_describe("color", a->color); dlss_describe("depth", a->depth); dlss_describe("motion", a->motion);
+        dlss_describe("output", a->output); dlss_describe("diffuse", a->diffuse_albedo); dlss_describe("specular", a->specular_albedo);
+        dlss_describe("normals", a->normals); dlss_describe("rough", a->roughness); dlss_describe("hitdist", a->hit_distance);
+    }
+    if (!(a->output->usage & VK_IMAGE_USAGE_STORAGE_BIT)) { nvlog("dlss: RR output texture was created without shader-write usage - not recorded"); return -1; }
+    if (dlss_image(&e.color, a->color, a->color_view, 0) || dlss_image(&e.depth, a->depth, a->depth_view, 0)
+        || dlss_image(&e.motion, a->motion, a->motion_view, 0) || dlss_image(&e.output, a->output, a->output_view, 1)
+        || dlss_image(&e.diffuse_albedo, a->diffuse_albedo, a->diffuse_albedo_view, 0)
+        || dlss_image(&e.specular_albedo, a->specular_albedo, a->specular_albedo_view, 0)
+        || dlss_image(&e.normals, a->normals, a->normals_view, 0) || dlss_image(&e.roughness, a->roughness, a->roughness_view, 0)) {
+        nvlog("dlss: an RR texture has no usable Vulkan image/view (or is multisampled) - not recorded"); return -1;
+    }
+    if (a->hit_distance) { if (dlss_image(&hit, a->hit_distance, a->hit_distance_view, 0)) { nvlog("dlss: the RR hit distance texture is unusable - not recorded"); return -1; } e.hit_distance = &hit; }
+    if (a->exposure) { if (dlss_image(&ex, a->exposure, a->exposure_view, 0)) { nvlog("dlss: the RR exposure texture is unusable - not recorded"); return -1; } e.exposure = &ex; }
+    if (a->reactive) { if (dlss_image(&re, a->reactive, a->reactive_view, 0)) { nvlog("dlss: the RR reactive mask is unusable - not recorded"); return -1; } e.reactive = &re; }
+    memcpy(e.world_to_view, a->world_to_view, sizeof e.world_to_view); memcpy(e.view_to_clip, a->view_to_clip, sizeof e.view_to_clip);
+    e.jitter_x = a->jitter_x; e.jitter_y = a->jitter_y; e.mv_scale_x = a->mv_scale_x; e.mv_scale_y = a->mv_scale_y;
+    e.pre_exposure = a->pre_exposure; e.reset = a->reset; e.render_w = a->in_w; e.render_h = a->in_h;
+    // Every input is read over the full render size from its origin: refuse a texture that is smaller (a GPU read past its end).
+    if (a->color->w < a->in_w || a->color->h < a->in_h || a->depth->w < a->in_w || a->depth->h < a->in_h
+        || a->diffuse_albedo->w < a->in_w || a->diffuse_albedo->h < a->in_h || a->specular_albedo->w < a->in_w || a->specular_albedo->h < a->in_h
+        || a->normals->w < a->in_w || a->normals->h < a->in_h || a->roughness->w < a->in_w || a->roughness->h < a->in_h
+        || a->motion->w < (a->mv_lowres ? a->in_w : a->out_w) || a->motion->h < (a->mv_lowres ? a->in_h : a->out_h)
+        || (a->hit_distance && (a->hit_distance->w < a->in_w || a->hit_distance->h < a->in_h))) {
+        nvlog("dlss: an RR input texture is smaller than the %ux%u render size - not recorded", a->in_w, a->in_h);
+        return -1;
+    }
+    const nvmtl_dlss_rr_cfg want = { a->in_w, a->in_h, a->out_w, a->out_h, a->hdr, a->mv_lowres, a->mv_jittered, a->depth_inverted, a->auto_exposure };
+    if (c->in_rp) nvmtl_vk_cmd_end_render(c);
+    nvmtl_vk_cmd_barrier(c);
+    nvk_image *all[11] = { a->color, a->depth, a->motion, a->output, a->diffuse_albedo, a->specular_albedo, a->normals, a->roughness,
+                           a->hit_distance, a->exposure, a->reactive };
+    for (int k = 0; k < 11; k++) if (all[k])
+        img_to(c, all[k], VK_IMAGE_LAYOUT_GENERAL, VK_ACCESS_MEMORY_WRITE_BIT | VK_ACCESS_MEMORY_READ_BIT, VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT,
+               VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT);
+    nvmtl_dlss_rr_feature *f = (nvmtl_dlss_rr_feature *)*feature;
+    if (f && memcmp(nvmtl_dlss_rr_feature_cfg(f), &want, sizeof want)) {
+        nvlog("dlss: denoised scaler settings changed - making a new RR feature (the old one is kept until the process ends)");
+        f = NULL;
+    }
+    if (!f) {
+        f = nvmtl_dlss_rr_feature_create(c->cb, &want); if (!f) return -1; *feature = f;
+        nvmtl_vk_cmd_barrier(c);   // the feature's setup is recorded into this buffer: it must land before the first evaluation
+    }
+    c->direct_sass = 1;
+    const int rc = nvmtl_dlss_rr_evaluate(c->cb, f, &e);
+    nvmtl_vk_cmd_barrier(c);
+    return rc;
+}
+int nvmtl_vk_dlss_fg_available(void) { return nvmtl_vk_dlss_available() && nvmtl_dlss_fg_ready(); }
+int nvmtl_vk_cmd_dlss_fg(nvk_cmdbuf *c, void **feature, const nvmtl_vk_dlss_fg_args *a)
+{
+    if (!c || !feature || !a || !nvmtl_dlss_fg_ready() || !a->color || !a->depth || !a->motion || !a->output) return -1;
+    nvmtl_dlss_fg_eval e = {0}; nvmtl_dlss_image ui;
+    if (!*feature) {
+        dlss_describe("color", a->color); dlss_describe("depth", a->depth); dlss_describe("motion", a->motion);
+        dlss_describe("output", a->output); dlss_describe("ui", a->ui);
+    }
+    if (!(a->output->usage & VK_IMAGE_USAGE_STORAGE_BIT)) { nvlog("dlss: FG output texture was created without shader-write usage - not recorded"); return -1; }
+    if (dlss_image(&e.color, a->color, a->color_view, 0) || dlss_image(&e.depth, a->depth, a->depth_view, 0)
+        || dlss_image(&e.motion, a->motion, a->motion_view, 0) || dlss_image(&e.output, a->output, a->output_view, 1)) {
+        nvlog("dlss: an FG texture has no usable Vulkan image/view (or is multisampled) - not recorded"); return -1;
+    }
+    if (a->ui) { if (dlss_image(&ui, a->ui, a->ui_view, 0)) { nvlog("dlss: the FG UI texture is unusable - not recorded"); return -1; } e.ui = &ui; }
+    // The core reads the colour and writes the output over the feature's output size, depth and motion over its input size.
+    if (a->color->w < a->out_w || a->color->h < a->out_h || a->output->w < a->out_w || a->output->h < a->out_h
+        || a->depth->w < a->in_w || a->depth->h < a->in_h || a->motion->w < a->in_w || a->motion->h < a->in_h
+        || (a->ui && (a->ui->w < a->out_w || a->ui->h < a->out_h))) {
+        nvlog("dlss: an FG texture is smaller than the interpolator's size (%ux%u, depth/motion %ux%u) - not recorded", a->out_w, a->out_h, a->in_w, a->in_h);
+        return -1;
+    }
+    e.near_z = a->near_z; e.far_z = a->far_z; e.fov_y = a->fov_y; e.aspect = a->aspect;
+    memcpy(e.cam_pos, a->cam_pos, sizeof e.cam_pos); memcpy(e.cam_right, a->cam_right, sizeof e.cam_right);
+    memcpy(e.cam_up, a->cam_up, sizeof e.cam_up); memcpy(e.cam_fwd, a->cam_fwd, sizeof e.cam_fwd);
+    memcpy(e.clip_to_prev, a->clip_to_prev, sizeof e.clip_to_prev); memcpy(e.prev_to_clip, a->prev_to_clip, sizeof e.prev_to_clip);
+    memcpy(e.view_to_clip, a->view_to_clip, sizeof e.view_to_clip);
+    e.mv_scale_x = a->mv_scale_x; e.mv_scale_y = a->mv_scale_y; e.jitter_x = a->jitter_x; e.jitter_y = a->jitter_y;
+    e.reset = a->reset; e.camera_motion_included = a->camera_motion_included;
+    e.frame_id = a->frame_id; e.multi_index = a->multi_index; e.multi_count = a->multi_count;
+    const nvmtl_dlss_fg_cfg want = { a->out_w, a->out_h, a->in_w, a->in_h, (uint32_t)a->color->fmt, a->hdr, a->depth_inverted };
+    if (c->in_rp) nvmtl_vk_cmd_end_render(c);
+    nvmtl_vk_cmd_barrier(c);
+    nvk_image *all[5] = { a->color, a->depth, a->motion, a->output, a->ui };
+    for (int k = 0; k < 5; k++) if (all[k])
+        img_to(c, all[k], VK_IMAGE_LAYOUT_GENERAL, VK_ACCESS_MEMORY_WRITE_BIT | VK_ACCESS_MEMORY_READ_BIT, VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT,
+               VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT);
+    nvmtl_dlss_fg_feature *f = (nvmtl_dlss_fg_feature *)*feature;
+    if (f && memcmp(nvmtl_dlss_fg_feature_cfg(f), &want, sizeof want)) {
+        nvlog("dlss: frame interpolator settings changed - making a new FG feature (the old one is kept until the process ends)");
+        f = NULL;
+    }
+    if (!f) {
+        f = nvmtl_dlss_fg_feature_create(c->cb, &want); if (!f) return -1; *feature = f;
+        nvmtl_vk_cmd_barrier(c);   // the feature's setup is recorded into this buffer: it must land before the first evaluation
+    }
+    c->direct_sass = 1;
+    const int rc = nvmtl_dlss_fg_evaluate(c->cb, f, &e);
+    nvmtl_vk_cmd_barrier(c);
+    return rc;
 }
 int nvmtl_vk_cmd_blit_image_2d(nvk_cmdbuf *c, nvk_image *src, nvk_image *dst, uint32_t w, uint32_t h)
 {

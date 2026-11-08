@@ -274,12 +274,12 @@ Expect an **x86_64 Mach-O dynamic library**. WindowServer requires an ad-hoc sig
 
 ## 6. Build NVAccel.kext for Tahoe
 
-NVAccel requires NVIDIA's **open-gpu-kernel-modules 615.78.08** source headers. The default location is `~/ogkm615`. If that checkout is not already present:
+NVAccel requires NVIDIA's **open-gpu-kernel-modules 620.70.06** source headers. The default location is `~/ogkm620`. If that checkout is not already present:
 
 ```bash
-git clone --depth 1 --branch 615.78.08 \
+git clone --depth 1 --branch 620.70.06 \
   https://github.com/NVIDIA/open-gpu-kernel-modules.git \
-  "$HOME/ogkm615"
+  "$HOME/ogkm620"
 ```
 
 Build from the driver repository root:

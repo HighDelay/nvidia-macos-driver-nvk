@@ -269,6 +269,20 @@ def stage(base, zink, output, components=None, native_gld=False, records=None):
         for name in ('install.sh', 'uninstall.sh'):
             shutil.copy2(ROOT / 'package' / name, payload / name)
             (payload / name).chmod(0o755)
+        native_dlss = None
+        if (payload / 'dlss_fetch.sh').is_file():
+            run('/bin/bash', ROOT / 'build/build_dlss_cache.sh', payload)
+            shutil.copy2(ROOT / 'docs/METALFX-DLSS.md', payload / 'METALFX-DLSS.md')
+            tool_files = ['dlss_fetch.sh', 'dlss/dlss_cache', 'dlss/nm_unzstd', 'dlss/assertfail_trap.ptx',
+                          'dlss/nm_unzstd.LICENSE', 'dlss/BLAKE3-NOTICE.txt', 'dlss/BLAKE3-LICENSE-CC0.txt']
+            for tool in ('dlss_cache', 'nm_unzstd'):
+                run('lipo', payload / 'dlss' / tool, '-verify_arch', 'x86_64')
+                run('codesign', '--verify', '--strict', payload / 'dlss' / tool)
+            native_dlss = {'installation': 'optional, NULLMOTH_DLSS=1; pinned NVIDIA downloads on the target Mac',
+                           'files': {name: base_tools.digest(payload / name) for name in tool_files},
+                           'source_sha256': {p.relative_to(ROOT).as_posix(): base_tools.digest(p)
+                               for p in [ROOT / 'build/build_dlss_cache.sh', ROOT / 'package/dlss_fetch.sh',
+                                         *sorted((ROOT / 'dlss').rglob('*'))] if p.is_file()}}
         licenses = payload / 'licenses'
         licenses.mkdir(exist_ok=True)
         for source, name in ((ROOT / 'LICENSE', 'NullMoth-LICENSE-PolyForm-Noncommercial-1.0.0.txt'),
@@ -299,6 +313,7 @@ def stage(base, zink, output, components=None, native_gld=False, records=None):
                     'component_replacements': replacements, 'firmware': sorted(firmware_paths),
                     'optional_intel_panel': panel_identity,
                     'optional_audio': audio_identity,
+                    'native_dlss_support': native_dlss,
                     'zink_sha256': base_tools.digest(runtime / 'libnvk_zink.dylib'),
                     'cgl_sha256': base_tools.digest(runtime / 'libnvk_cgl.dylib'),
                     'gld_sha256': (base_tools.digest(payload / 'Library/GPUBundles/NVKZinkGLDriver.bundle/Contents/MacOS/NVKZinkGLDriver')

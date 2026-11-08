@@ -21,7 +21,7 @@
 #include "panel_scanout.h"
 #include "panel_bridge_abi.h"
 // Core panel bridge adapted from kitsuneislife/nmx-intel, b4bb3a0 (series 1-16, 21).
-// Keep the driver's current NVKMS and RM-handle ABI, pinned to NVIDIA 615.78.08.
+// Keep the driver's current NVKMS and RM-handle ABI, pinned to NVIDIA 620.70.06.
 extern "C" {
 #include "nvkms-kapi.h"
 }

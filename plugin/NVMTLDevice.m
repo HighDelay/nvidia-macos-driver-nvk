@@ -28,6 +28,7 @@
 #include "nvmtl_log_failure.h"
 #include "nvmtl_env_knobs.h"
 #include "nvmtl_app_profile.h"
+#import "nvmtl_osver_install.h"
 #include "nvmtl_claims.h"
 // The application profile matched for this process (nvmtl_app_profile.h), or NULL. Set once by nvmtl_conf_settle
 // (NVMTLObjects.m), which reads nvrm610.conf and applies the profile before any knob is read.
@@ -821,8 +822,38 @@ static bool nvmtl_process_is_allowed(void)
     return ok;
 }
 
+#include "nvmtl_dlss.h"
+static BOOL nvmtl_m4_enabled(void);   // NVMTLMetal4.m, later in this translation unit
+static id<MTLCommandBuffer> nvmtl_m4_underlying(id cb);
+void nvmtl_m4_note_buffer(id buf, uint64_t addr, uint64_t length);
+int nvmtl_m4_note_current(_Atomic uint64_t note[3], uint64_t addr, uint64_t length);
+void nvmtl_m4_note_buffer_cached(id buf, uint64_t addr, uint64_t length, _Atomic uint64_t note[3]);
 #include "nvmtl_mfx_native_profile.inc"
 
+// NVMTL_WS_RT_GATE_MB=<n>: while ray tracing is available, the working-set answer is raised to at least n MB. Measured in the
+// disassembly of Cyberpunk 2077's device set-up (0x104978280..0x104978540 in the arm64 slice): it asks
+// recommendedMaxWorkingSetSize FIRST and keeps the value, then asks supportsRaytracing and the device name, and enables
+// ray tracing only if the saved figure is above 0x1800FFFFF bytes (6145 MB). The same figure also sets a low-memory flag
+// (figure below 0x180100000) that the game stores for its own sizing, so this is one number for both decisions.
+// Default 0: off.
+static uint64_t nvmtl_rt_gate_working_set(uint64_t ws)
+{
+    static long long floor_mb = -1;
+    if (floor_mb < 0) { const char *e = getenv("NVMTL_WS_RT_GATE_MB"); floor_mb = (e && *e) ? atoll(e) : 0; }
+    if (floor_mb <= 0 || ws >= ((uint64_t)floor_mb << 20) || !nvmtl_vk_rt_available()) return ws;
+    // The floor is a figure for 8 GB and larger cards. A card with less than 1 GB of memory above it (a 6 GB card) keeps
+    // its own answer: telling the game it may use more than the card holds would let it place ray tracing it cannot fit.
+    uint64_t card = nvmtl_vk_vram_bytes();
+    if (card < ((uint64_t)floor_mb << 20) + (1024ull << 20)) {
+        static int refused;
+        if (!refused++) nvlog("working set: the %lld MB ray tracing floor is not applied on this %llu MB card (it needs %lld MB)",
+                              floor_mb, (unsigned long long)(card >> 20), floor_mb + 1024);
+        return ws;
+    }
+    static int said;
+    if (!said++) nvlog("working set: answered %lld MB instead of %llu MB while ray tracing is available (NVMTL_WS_RT_GATE_MB)", floor_mb, (unsigned long long)(ws >> 20));
+    return (uint64_t)floor_mb << 20;
+}
 @implementation NVMTLDevice
 + (void)load {
     char me[1200], ts[40] = "?"; time_t now = time(NULL); struct tm tm;
@@ -951,13 +982,32 @@ static void nvmtl_install_hw_resource_pools(id dev)
 
 static void nvmtl_zero_new_buffer(NVMTLBuffer *b, NSUInteger len);
 static __thread int gZeroSkip;
+// NVMTL_MANAGED_SYSMEM=1: a Managed buffer lives in mapped system memory (no VRAM copy + shadow pair). This was a bare
+// getenv() on every call, so any value - "0" included - switched it on, nothing said whether it had, and a release
+// plugin forgets the variable unless the process also sets NVMTL_PROCESS_ENV=1 (or the conf file sets it), which made a
+// run with it look identical to a run without it. Now read once, only "1" enables it, and it says so: once when read,
+// and once when the first Managed buffer is actually placed by it (an app that makes no Managed buffers is unaffected).
+static int nvmtl_managed_sysmem(void)
+{
+    static int on = -1;
+    if (on < 0) {
+        const char *e = getenv("NVMTL_MANAGED_SYSMEM");
+        on = e && e[0] == '1';
+        if (e || on) nvlog("buffers: Managed buffers %s (NVMTL_MANAGED_SYSMEM=%s)", on ? "go to mapped system memory" : "keep VRAM + shadow", e ? e : "unset");
+    }
+    return on;
+}
 - (id<MTLBuffer>)newBufferWithLength:(NSUInteger)len options:(MTLResourceOptions)opt {
     if (nvmtl_vk_init()) return nil;
     if (nvmtl_alloc_blocked()) return nil;
     NVMTLBuffer *b = [NVMTLBuffer new];
     b->_storage = (MTLStorageMode)((opt >> MTLResourceStorageModeShift) & 0xF);
     b->_ropt = opt & ((MTLResourceOptions)0xF | ((MTLResourceOptions)0x3 << MTLResourceHazardTrackingModeShift));
-    int hv = (b->_storage == MTLStorageModeShared) || (b->_storage == MTLStorageModeManaged && getenv("NVMTL_MANAGED_SYSMEM"));
+    int hv = (b->_storage == MTLStorageModeShared) || (b->_storage == MTLStorageModeManaged && nvmtl_managed_sysmem());
+    if (b->_storage == MTLStorageModeManaged && hv) {
+        static _Atomic int said;
+        if (!atomic_exchange(&said, 1)) nvlog("buffers: first Managed buffer (%lu bytes) placed in system memory by NVMTL_MANAGED_SYSMEM=1", (unsigned long)len);
+    }
     if (nvmtl_vk_buffer_create(len, (hv && b->_storage == MTLStorageModeShared) ? 2 : hv, &b->_b)) {
         if (hv) { nvmtl_alloc_failed("newBufferWithLength"); nvlog("newBufferWithLength: FAILED"); return nil; }
         nvlog("newBufferWithLength:%lu private: VRAM refused - placing it in system memory", (unsigned long)len);
@@ -2455,8 +2505,8 @@ static void nvmtl_log_compute_descriptor(MTLComputePipelineDescriptor *d) {
     { id apple = nvmtl_vendor_apple_pipeline(self, f); if (apple) return apple; }
     return ps; }
 
-- (BOOL)supportsRaytracing { return nvmtl_vk_rt_available() != 0; }
-- (BOOL)supportsRaytracingFromRender { return nvmtl_vk_rt_available() != 0; }
+- (BOOL)supportsRaytracing { const BOOL y = nvmtl_vk_rt_available() != 0; static int said; if (!said++) nvlog("QUERY supportsRaytracing -> %s", y ? "YES" : "NO"); return y; }
+- (BOOL)supportsRaytracingFromRender { const BOOL y = nvmtl_vk_rt_available() != 0; static int said; if (!said++) nvlog("QUERY supportsRaytracingFromRender -> %s", y ? "YES" : "NO"); return y; }
 - (MTLAccelerationStructureSizes)accelerationStructureSizesWithDescriptor:(MTLAccelerationStructureDescriptor *)desc {
     MTLAccelerationStructureSizes s = { 0, 0, 0 };
     // One per thread: these are filled from the descriptor and read by the build, and the game
@@ -2569,14 +2619,25 @@ static NSInteger nvmtl_apple_family_max(void)
     if (n < 0) { const char *e = getenv("NVMTL_APPLE_FAMILY"); n = (e && *e) ? atoi(e) : 0; if (n < 0) n = 0; if (n > 9) n = 9; }
     return n;
 }
+// The answer to each family query, logged once per family: whether an application's ray-tracing option is offered is decided
+// by these answers, and the only way to tell a refused family from a refused ray-tracing capability is to see both.
+static BOOL nvmtl_family_answer(NSInteger f, BOOL yes, const char *why)
+{
+    static _Atomic uint32_t seen; const uint32_t bit = 1u << ((f % 1000) & 15);
+    if (!(atomic_fetch_or(&seen, bit) & bit))
+        nvlog("QUERY supportsFamily %ld -> %s (%s; claim up to Apple%ld)", (long)f, yes ? "YES" : "NO", why, (long)nvmtl_apple_family_max());
+    return yes;
+}
 - (BOOL)supportsFamily:(MTLGPUFamily)f {
     if (nvmtl_mfx_profile_depth && (NSInteger)f >= 1001 && (NSInteger)f <= 1009) return NO;
     switch ((NSInteger)f) {
         case MTLGPUFamilyMac2: case MTLGPUFamilyCommon1: case MTLGPUFamilyCommon2: case MTLGPUFamilyCommon3: return YES;
         case 2001 : return YES;
         case 5001 : { struct nvmtl_caps c = { 0, 0 }; return nvmtl_claim_metal3(&c) ? YES : NO; }   // MTLGPUFamilyMetal3
+        case 5002 : { struct nvmtl_caps c = { 0, 0 }; return nvmtl_claim_metal3(&c) && nvmtl_m4_enabled() ? YES : NO; }   // MTLGPUFamilyMetal4: the Metal 4 command model in NVMTLMetal4.m, on top of Metal 3
         default: break;
     }
+    if ((NSInteger)f >= 1001 && (NSInteger)f <= 1009) return nvmtl_family_answer(f, (NSInteger)f <= 1000 + nvmtl_apple_family_max(), "Apple family");
     if ((NSInteger)f >= 1001 && (NSInteger)f <= 1000 + nvmtl_apple_family_max()) return YES;
     return NO;
 }
@@ -2652,6 +2713,7 @@ static NSInteger nvmtl_apple_family_max(void)
 - (NSUInteger)currentAllocatedSize { return (NSUInteger)nvmtl_vk_allocated_bytes(); }
 - (uint64_t)recommendedMaxWorkingSetSize {
     uint64_t ws = nvmtl_vk_recommended_working_set();
+    ws = nvmtl_rt_gate_working_set(ws);
     // The same hole as maxBufferLength, and it matters more here: a streaming engine sizes its pools
     // from this number, and the working set reads 0 when the budget is unknown. The old code could
     // never answer under 1 GB. An unknown budget falls back to the card rather than telling the app
@@ -2765,11 +2827,13 @@ static NSInteger nvmtl_apple_family_max(void)
 #import "NVMTLWebKit.m"
 
 #import "NVMTLObjects.m"
+#import "NVMTLMetalFXDLSS.m"
 #import "NVMTLForward.m"
 #import "NVMTLLibraryLoad.m"
 #import "NVMTLGL.m"
 #import "NVMTLGLVBlank.m"
 #import "NVMTLEmbedded.m"
+#import "NVMTLMetal4.m"
 #import "NVMTLVendorCompiler.m"
 #include "nvmtl_vk.c"
 #import "NVMTLSass.m"

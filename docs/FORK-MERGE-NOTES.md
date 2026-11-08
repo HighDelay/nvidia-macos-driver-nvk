@@ -1,5 +1,66 @@
 # Retained fork changes for upstream merges
 
+## Upstream 2.8 integration, 2026-11-08
+
+Merge `60fb7255e18c31fe0747091fd9a961f30c1cd82a` onto fork `02027c1`,
+using `18ba05f` as the common ancestor. Resolve four textual conflicts in the
+plugin builder, installer, uninstaller and GL descriptor-cache fixture. Keep
+release `-O2`, both required frameworks, optional audio ownership, native GLD
+removal and the extended high-binding/fetch-mask tests. Use the production
+slot guard in that fixture and give its fake buffers plausible aligned handles.
+
+Take NVIDIA 620.70.06, its mapping-node/escape hardening, colour-format selection,
+firmware identities/fallback and updated card list. Use the signed official
+**2.8 RM, firmware and renderer** together. Rebuild the fork framebuffer and both
+accelerators against NVIDIA commit `e6a2e01579fbbd1ca2ed43fef2ee2589e9bd8bd9`;
+older NVKMS layouts are incompatible. Pin the Intel-panel builder and record
+actual included headers too. The public source still lacks Darwin RM/KMS link
+archives; the official RM sources match except for the fork's build-path default.
+
+Take the bounded per-translation parser cache, typed null-resource slots,
+Metal 4 wrappers, compatible texture copies, channel-order pipeline variants,
+lazy heap backing, heap-pin reuse and native MetalFX DLSS integration. Preserve
+the fork's bounded address cache, recording/binding/resource caches, surface
+publication/capture, Photo Booth storage/orientation, Spotlight half-float mips,
+Safari renderer repair, all-app ANGLE and exact completion-witness policy.
+Native Zink/CGL/IOSurface/AnyDesk/resize/small-BAR, Wine/DXVK/vkd3d/NGX/NVAPI and
+role-scoped codec/sandbox repairs remain; their frontends use the matched 620
+renderer. The staged IOSurface record remains ABI 3 and the public bridge exports
+are unchanged. Do not apply the separate NVRM mapping proposal as an actual patch.
+
+Correct two upstream defects. A lazy backing object must keep its address after
+its metadata lock is released: store separately allocated backings behind the
+growable pointer index, and release them with the heap. The original array's
+`realloc` could invalidate a concurrent binder's pointer. Bound slot arithmetic
+and preserve allocation-failure fallback. DLSS views must remain tracked until
+their image dies: grow the initial cache to a bounded 4,096 entries, reuse holes,
+and refuse an evaluation on allocation/capacity failure instead of leaking an
+untracked Vulkan view. Both production-snippet sanitizer tests pass and reproduce
+the respective defects on unmodified upstream as negative controls.
+
+Native MetalFX DLSS has a separate installer prompt, default **No**. Keep
+`--dlss=yes|no`, the upstream `NULLMOTH_DLSS=1` alias, noninteractive default No,
+checked root-owned tools and pinned NVIDIA downloads. Explicit arguments win over
+the environment. Explain that Wine/CrossOver uses its independent provider setup
+and the game's `nvngx_dlss.dll`; declining the native download keeps existing
+files and does not modify Wine. Include signed local helper builds, their
+licenses and the [native DLSS guide](METALFX-DLSS.md) in the installable package.
+Keep audio and Intel-panel choices independent and default No.
+
+Validation on RTX 2060 SUPER / 8 GiB BAR1 / Tahoe 26.7.1 includes 2,247 translator
+library tests and 44 wrapper tests (two existing ignores and two unavailable
+private fixtures excluded), the retained driver host suite, eight installer-choice
+tests, DLSS worker/download/OS-version fixtures, sanitizer checks and offscreen
+GPU readbacks. Update the callback fixture for existing timing diagnostics and
+the OS-version fixture for a real host older than its application's profile floor.
+Keep original assertions and never weaken missing-validator failures into passes.
+Package signatures, manifests, OS minima, core/optional kernel-collection links
+and asset digests are recorded beside the local packages. These are isolated
+tests against the current kernel, not a new 620 boot, laptop/audio qualification,
+or native DLSS SR/RR/FG gameplay test. Other GPUs and Sequoia remain unqualified
+for this combined build. The installed driver is unchanged; preserve the exact
+local archives for user testing and later release approval.
+
 ## Gecko sandbox media and texture storage, PR #8, 2026-11-07
 
 Merge `bf38d7affa37810a3728f81e6aa7329453aa272a` onto `e126221`.
@@ -194,11 +255,11 @@ Before each merge:
 4. Build the affected components and check their behavior, resource lifetime and synchronization.
    Record which fork changes upstream now covers, what remains local and the validation limits.
 
-The current upstream base is **2.7.2 at `18ba05f38b5eadea8b5ae05834bb51c61fb4c5c3`**,
-integrated on 2026-11-06 from the release tag. This update uses an ordinary
-three-way merge with `6b4752c51b0719862fb46471d383317ef7ecc6f0` (2.7.1) as
-the common ancestor. The preceding 2.7.1 integration used `470e391` (2.6.6)
-as its common ancestor. Earlier upstream history was rewritten: old 2.6.5
+The current upstream base is **2.8 at `60fb7255e18c31fe0747091fd9a961f30c1cd82a`**,
+integrated on 2026-11-08 with `18ba05f38b5eadea8b5ae05834bb51c61fb4c5c3`
+(2.7.2) as the common ancestor. The preceding 2.7.2 integration used
+`6b4752c51b0719862fb46471d383317ef7ecc6f0` (2.7.1); the 2.7.1 integration
+used `470e391` (2.6.6). Earlier upstream history was rewritten: old 2.6.5
 `ceba63c` maps to `c6f5aa0`; do not replay already integrated history. The
 preceding 2.6.4 base was `f95f4d2`.
 

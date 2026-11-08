@@ -18,7 +18,7 @@ def section(text, start, end):
 
 cache = section(vk, 'static VkDescriptorSet nvmtl_snapshot_set_c(', '\nint nvmtl_vk_bind_buffer(')
 macros = section(vk, '#define NVMTL_NBUF ', '#define NVMTL_DISPATCH_PC_BYTES')
-slot_type = re.search(r'typedef struct \{ uint8_t kind;.*?\} nvmtl_slot;', vk, re.S).group(0)
+slots = section(vk, 'enum { NVMTL_SLOT_NONE', '#define NVMTL_EMB_KEYMAX')
 table_type = re.search(r'typedef struct \{ nvmtl_slot s\[.*?\} nvmtl_bindtable;', vk, re.S).group(0)
 table_limit = re.search(r'#define NVMTL_EMB_KEYMAX \d+', vk).group(0)
 fixture = r'''
@@ -33,14 +33,13 @@ fixture = r'''
 ''' + macros + r'''
 #define NVMTL_E78_HAS(m,i) (!(m) || (((m)[(i)>>6] >> ((i)&63)) & 1))
 #define NVMTL_TABLES_PER_PAGE 256
+#define nvlog(...) ((void)0)
 enum { NVMTL_E78_H3, E78C_SETREUSE, E78C_SETNEW };
-enum { NVMTL_SLOT_BUF=1 };
-''' + re.search(r'typedef struct \{ void \*mem;.*?\} hz_ent;', vk).group(0) + '\n' + slot_type + '\n' + table_limit + '\n' + table_type + r'''
+''' + re.search(r'typedef struct \{ void \*mem;.*?\} hz_ent;', vk).group(0) + '\n' + slots + '\n' + table_limit + '\n' + table_type + r'''
 typedef struct { nvk_buffer buffer; } nvmtl_address_page;
 static nvk_buffer g_dummyBuf;
 static int enabled=1, dynamic=1, snapshots, allocations, copies;
 static uint64_t copied_bindings[NVMTL_BINDING_WORDS];
-static void nvlog(const char *fmt, ...) { (void)fmt; }
 static int nvmtl_enc78_on(int flag) { return enabled; }
 static int nvmtl_table_ubo(void) { return dynamic; }
 static int nvmtl_dirty_only_on(void) { return 1; }
@@ -136,7 +135,7 @@ int main(void) {
     enabled=0; nvmtl_snapshot_set_c(&c,0,&p); assert(allocations==10);
     enabled=1; p.bmask[0]&=~1ull; p.gl_uniform_layout=1;
     p.gl_uniform_slot[0]=8; p.gl_uniform_range[0]=80;
-    table.s[0][7]=(nvmtl_slot){.kind=NVMTL_SLOT_BUF,.h=(void *)77,.size=65536};
+    table.s[0][7]=(nvmtl_slot){.kind=NVMTL_SLOT_BUF,.h=(void *)0x10000,.size=65536};
     c.address_count=1;
     VkDescriptorSet uniform=nvmtl_snapshot_set_c(&c,0,&p); assert(allocations==11);
     for(unsigned i=1;i<16;i++) {
@@ -146,7 +145,7 @@ int main(void) {
     }
     p.gl_uniform_range[0]=96;
     assert(nvmtl_snapshot_set_c(&c,0,&p)!=uniform && allocations==12);
-    table.s[0][7].h=(void *)78;
+    table.s[0][7].h=(void *)0x10008;
     nvmtl_snapshot_set_c(&c,0,&p); assert(allocations==13);
     p.gl_uniform_layout=0;
     nvmtl_snapshot_set_c(&c,0,&p); assert(allocations==14);
@@ -190,6 +189,10 @@ int main(void) {
         assert((copied_bindings[binding>>6]>>(binding&63))&1);
     puts("PASS: high storage changes forbid stale-set reuse and all 128 storage copy bits remain in bounds");
     puts("PASS: fetch/heap exclusion, malformed/unknown binding refusal, selective graphics/compute masks, old-mask fallback and opt-out");
+    nvmtl_slot bad={.kind=NVMTL_SLOT_BUF,.h=(void *)0xa3,.size=65536};
+    assert(nvmtl_slot_checked(&bad,0,7)==NULL);
+    nvmtl_slot good={.kind=NVMTL_SLOT_BUF,.h=(void *)0x10000,.size=65536};
+    assert(nvmtl_slot_checked(&good,0,7)==&good);
     puts("PASS: unchanged/offset-only reuse, table-page rollover, texel/image masks, direct buffers, recycled sets, growing masks, opt-out");
 }
 '''

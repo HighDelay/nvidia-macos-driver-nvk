@@ -94,8 +94,8 @@ and kernel linking do not establish those results.
 ## Build
 
 The package builder compiles the real kext and excludes the virtual test variant.
-Use NVIDIA's `open-gpu-kernel-modules` at **615.78.08**, commit
-`1a82fbfda8f321b056eb3568850f9316c5e465c5`. Actual included headers are checked
+Use NVIDIA's `open-gpu-kernel-modules` at **620.70.06**, commit
+`e6a2e01579fbbd1ca2ed43fef2ee2589e9bd8bd9`. Actual included headers are checked
 against that commit and recorded outside the installable payload.
 
 ```sh

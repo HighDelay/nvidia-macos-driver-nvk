@@ -5,16 +5,20 @@ PATH=/usr/bin:/bin:/usr/sbin:/sbin; export PATH
 HERE=$(cd "$(dirname "$0")" && pwd)
 INTEL_PANEL_CHOICE=ask
 AUDIO_CHOICE=ask
+DLSS_CHOICE=ask
+[ "${NULLMOTH_DLSS:-0}" != 1 ] || DLSS_CHOICE=yes
 while [ "$#" != 0 ]; do
   case "$1" in
     --payload)
       [ "$#" -ge 2 ] && [ -d "$2" ] || { echo "STOP: --payload requires an existing package directory" >&2; exit 2; }
       HERE=$(cd "$2" && pwd) || exit 2; shift 2;;
+    --dlss=yes) DLSS_CHOICE=yes; shift;;
+    --dlss=no) DLSS_CHOICE=no; shift;;
     --audio=yes) AUDIO_CHOICE=yes; shift;;
     --audio=no) AUDIO_CHOICE=no; shift;;
     --intel-panel=yes) INTEL_PANEL_CHOICE=yes; shift;;
     --intel-panel=no) INTEL_PANEL_CHOICE=no; shift;;
-    *) echo "STOP: expected --payload directory, --intel-panel=yes|no or --audio=yes|no" >&2; exit 2;;
+    *) echo "STOP: expected --payload directory, --intel-panel=yes|no, --audio=yes|no or --dlss=yes|no" >&2; exit 2;;
   esac
 done
 KEXTS="NVRM NVAccel NVRMFB NVRMAGDC"
@@ -190,7 +194,8 @@ kpath() {
 }
 ioreg -r -c IOPCIDevice -d 1 | grep -q '"vendor-id" = <de100000>' || die "no NVIDIA GPU found on PCI"
 # The driver runs the cards NVIDIA's GSP firmware supports (Turing and later). The same list the Windows builder uses
-# (open-gpu-kernel-modules 615.78.08, p1401/nvidia_gsp_ids.json). Installing it for an older card (GTX 10 and before)
+# (open-gpu-kernel-modules 620.70.06: 615's list + 2BBD RTX PRO 5500 Blackwell, 2E13 RTX Spark N1X; the datacenter
+# VR NVL72 3041 left out like the other datacenter parts). Installing it for an older card (GTX 10 and before)
 # would switch the firmware screen off and leave nothing to draw: those PCs run macOS in basic display instead.
 SUPPORTED_IDS="
 1E02 1E04 1E07 1E30 1E36 1E78 1E81 1E82 1E84 1E87 1E89 1E90 1E91 1E93 1EB0 1EB1 1EB5 1EB6 1EC2 1EC7 1ED0 1ED1 1ED3
@@ -202,8 +207,8 @@ SUPPORTED_IDS="
 25AD 25B0 25B2 25B8 25B9 25BA 25BB 25BC 25BD 25E0 25E2 25E5 25EC 25ED 25F9 25FA 25FB 2684 2685 2689 26B1 26B2 26B3
 2702 2704 2705 2709 2717 2730 2757 2770 2782 2783 2786 2788 27A0 27B0 27B1 27B2 27BA 27BB 27E0 27FB 2803 2805 2808
 2820 2822 2838 2860 2882 28A0 28A1 28A3 28B0 28B8 28B9 28BA 28BB 28E0 28E1 28E3 28F8 2B85 2B87 2B8C 2BB1 2BB3 2BB4
-2BB5 2BB9 2C02 2C05 2C09 2C18 2C19 2C31 2C33 2C34 2C38 2C39 2C3A 2C58 2C59 2C77 2C79 2D04 2D05 2D18 2D19 2D30 2D39
-2D58 2D59 2D79 2D83 2D98 2DB8 2DB9 2DD8 2DF9 2E03 2E06 2E12 2F04 2F06 2F18 2F38 2F58
+2BB5 2BB9 2BBD 2C02 2C05 2C09 2C18 2C19 2C31 2C33 2C34 2C38 2C39 2C3A 2C58 2C59 2C77 2C79 2D04 2D05 2D18 2D19 2D30
+2D39 2D58 2D59 2D79 2D83 2D98 2DB8 2DB9 2DD8 2DF9 2E03 2E06 2E12 2E13 2F04 2F06 2F18 2F38 2F58
 "
 NV_IDS=$(ioreg -r -c IOPCIDevice -d 1 | awk '/"vendor-id" = <de100000>/{nv=1} /"device-id" = </{ if (match($0, /<[0-9a-f]+>/)) d=substr($0, RSTART+1, 4) }
   /^\+-o|^ *\}/{ if (nv && d != "") print toupper(substr(d,3,2) substr(d,1,2)); nv=0; d="" }' | sort -u)
@@ -805,6 +810,40 @@ if [ "$AUDIO_TOUCHED" = 1 ]; then
       || die "record audio opt-in"
   else rm -f "$AUDIO_MARKER" || die "remove audio opt-in"; fi
 fi
+
+# Native MetalFX DLSS is independent of the Wine/NVK provider.
+choose_native_dlss() {
+  echo "   Optional native MetalFX DLSS (RTX 20 series or newer)."
+  echo "   For native Mac games using MetalFX upscaling, denoising or frame interpolation."
+  echo "   Downloads about 750 MB of NVIDIA files and compiles GPU kernels; allow a few minutes and 2.5 GB free."
+  echo "   Wine/CrossOver DLSS uses the separate Wine/NVK setup and the game's original nvngx_dlss.dll."
+  if [ "$DLSS_CHOICE" = ask ]; then
+    if [ -t 0 ]; then
+      printf '   Install/update native MetalFX DLSS? [y/N] '
+      answer=''; IFS= read -r answer || answer=''
+      case "$answer" in y|Y|yes|YES) DLSS_CHOICE=yes;; *) DLSS_CHOICE=no;; esac
+    else
+      DLSS_CHOICE=no
+    fi
+  fi
+  [ "$DLSS_CHOICE" = yes ]
+}
+
+# Optional DLSS 4 / 4.5 files: downloaded from NVIDIA on this Mac and checked against pinned hashes. A failure here
+# never undoes the driver install.
+# dlss_fetch.sh runs as root from the private copy; it is only trusted when SHA256SUMS covered it and its tools.
+if [ -f "$HERE/dlss_fetch.sh" ] && ! { grep -qE '[ *]dlss_fetch\.sh$' "$HERE/SHA256SUMS" && grep -qE '[ *]dlss/dlss_cache$' "$HERE/SHA256SUMS" \
+      && grep -qE '[ *]dlss/nm_unzstd$' "$HERE/SHA256SUMS" && grep -qE '[ *]dlss/assertfail_trap\.ptx$' "$HERE/SHA256SUMS"; }; then
+  echo "   NOTE: this package's SHA256SUMS does not cover the DLSS step; skipping it."
+elif [ -f "$HERE/dlss_fetch.sh" ]; then
+  if choose_native_dlss; then
+    step "Native MetalFX DLSS 4 / 4.5 files"
+    /bin/bash "$HERE/dlss_fetch.sh" --yes || echo "   NOTE: the DLSS files were not installed; the driver itself is. Run again later: sudo ./install.sh --dlss=yes"
+  else
+    echo "   Native MetalFX DLSS download/update skipped; existing DLSS files are kept. Wine/CrossOver setup is unchanged."
+  fi
+fi
+
 echo; echo "Done. Reboot now: sudo shutdown -r now"
 if [ "$ALLOWED" = "$(echo $KEXTS | wc -w | tr -d ' ')" ]; then
   echo "This is an update of extensions you already allowed: one restart is enough. macOS may show a notice that they were"

@@ -20,6 +20,10 @@ Follow the approval and reboot instructions. Optional Intel laptop panel
 support defaults to **No**; an existing opt-in is retained. See
 [the Intel panel guide](https://github.com/HighDelay/nvidia-macos-driver-nvk/blob/main/docs/INTEL-PANEL.md) before enabling it.
 
+Native MetalFX DLSS has its own installer prompt, default **No**. It downloads
+NVIDIA files and compiles kernels on the target Mac. Wine/CrossOver DLSS uses
+the separate Wine/NVK setup and the game's `nvngx_dlss.dll`.
+
 With a compatible NVIDIA driver already running, `Verify.command` checks
 the package and runs GPU/OpenGL probes. Diagnostic windows briefly appear.
 These checks do not establish that a new package boots successfully.
@@ -29,6 +33,7 @@ These checks do not establish that a new package boots successfully.
 - [Minecraft native Vulkan](https://github.com/HighDelay/nvidia-macos-driver-nvk/blob/main/nvk/native-macos/INSTALL.md)
 - [MPV and other Vulkan applications](https://github.com/HighDelay/nvidia-macos-driver-nvk/blob/main/nvk/native-macos/APPLICATIONS.md)
 - [Wine / CrossOver, DXVK, D3D12 and DLSS](https://github.com/HighDelay/nvidia-macos-driver-nvk/blob/main/nvk/wine-macos/INSTALL.md)
+- [Optional MetalFX DLSS](https://github.com/HighDelay/nvidia-macos-driver-nvk/blob/main/docs/METALFX-DLSS.md)
 - [Video codecs](https://github.com/HighDelay/nvidia-macos-driver-nvk/blob/main/video/INSTALL.md)
 - [Zink OpenGL and OBS compatibility](https://github.com/HighDelay/nvidia-macos-driver-nvk/blob/main/docs/ZINK-OPENGL.md)
 

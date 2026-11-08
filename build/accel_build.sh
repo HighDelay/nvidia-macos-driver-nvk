@@ -1,7 +1,11 @@
 #!/bin/bash
 set -o pipefail
 SRC=$1; OUT=$2; mkdir -p "$OUT/NVAccel.kext/Contents/MacOS"
-OGKM=${OGKM:-$HOME/ogkm615}; RE=${RE:-$SRC/accel/re}   # NVIDIA 615.78.08; reconstructed accelerator headers ship in the repo
+OGKM=${OGKM:-$HOME/ogkm620}; RE=${RE:-$SRC/accel/re}   # NVIDIA 620.70.06; reconstructed accelerator headers ship in the repo
+PIN=e6a2e01579fbbd1ca2ed43fef2ee2589e9bd8bd9
+if [ "$(git -C "$OGKM" rev-parse HEAD 2>/dev/null || true)" != "$PIN" ]; then
+  echo "Set OGKM to open-gpu-kernel-modules 620.70.06 ($PIN)." >&2; exit 1
+fi
 SDK=$(xcrun --show-sdk-path); KHDR="$SDK/System/Library/Frameworks/Kernel.framework/Headers"; NV="$OGKM/src/nvidia"; KMS="$OGKM/src/nvidia-modeset"
 RMINC=( -I"$NV/arch/nvalloc/unix/include" -I"$NV/arch/nvalloc/common/inc" -I"$NV/arch/nvalloc/common/inc/gsp"
   -I"$OGKM/src/common/sdk/nvidia/inc" -I"$OGKM/src/common/sdk/nvidia/inc/hw" -I"$OGKM/src/common/inc"

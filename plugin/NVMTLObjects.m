@@ -5,6 +5,7 @@
  */
 
 #import <QuartzCore/QuartzCore.h>
+#include "nvmtl_format_twin.h"
 #import <Foundation/Foundation.h>
 #import <Metal/Metal.h>
 
@@ -191,6 +192,28 @@ static int nvmtl_profile_user_set(const char *key, void *vctx)
     for (unsigned i = 0; i < g_conf_nmine; i++) if (!strcmp(g_conf_mine[i], key)) return 1;
     return 0;
 }
+// NVMTL_OS_VERSION=<major>[.<minor>[.<patch>]]: this process is told the operating system is at least that version
+// ("0" = never, even for a profile). The application profile can carry a version too (nvmtl_app_profile.h): Cyberpunk
+// 2077 reads -[NSProcessInfo operatingSystemVersion] once in device set-up and offers MetalFX frame generation only above
+// macOS 26. That read happens before Metal loads this plugin, so the answer that counts is installed earlier, by
+// libnvmtl_osver.dylib (nvmtl_osver.m), which the game's own build loads. This is the same answer installed again when
+// the plugin loads, for a build without that library and for a process that sets the knob; it does nothing when the
+// library already answered. The previous version replaced the method on NSProcessInfo only, which the real instance's
+// class (a private subclass with its own implementation) never reached.
+static void nvmtl_os_version_override(const char *me, const char *bid)
+{
+    int *done = dlsym(RTLD_DEFAULT, "nvmtl_osver_installed");
+    if (done && *done) { nvlog("os version: already answered by libnvmtl_osver.dylib"); return; }
+    const NSOperatingSystemVersion r = [[NSProcessInfo processInfo] operatingSystemVersion];
+    const long real[3] = { (long)r.majorVersion, (long)r.minorVersion, (long)r.patchVersion };
+    const char *env = getenv("NVMTL_OS_VERSION");
+    long v[3];
+    if (!nvmtl_os_version_answer(me, bid, getenv("NVMTL_APP_PROFILE"), env, real, v)) return;
+    const int n = nvmtl_osver_install((NSOperatingSystemVersion){ v[0], v[1], v[2] });
+    if (!n) { nvlog("os version: FAILED - NSProcessInfo has no operatingSystemVersion to replace"); return; }
+    nvlog("os version: this process is told %ld.%ld.%ld instead of %ld.%ld.%ld (%s, installed late: reads made before the "
+          "plugin loaded saw the real version)", v[0], v[1], v[2], real[0], real[1], real[2], env ? "NVMTL_OS_VERSION" : "application profile");
+}
 // Settles this process's driver knobs once, before any of them is read: forget what was inherited, read nvrm610.conf,
 // then apply the application profile for this executable, if there is one (nvmtl_app_profile.h has the order of
 // precedence). Every constructor that reads a knob calls this first; the first call does the work.
@@ -209,6 +232,7 @@ static void nvmtl_conf_settle(void)
     nvmtl_profile_ctx ctx = { p, 0 };
     for (unsigned i = 0; p && i < p->nknobs && i < 64; i++) if (getenv(p->knobs[i].key)) ctx.envBits |= 1ull << i;
     nvmtl_conf_read_file(forgot);
+    nvmtl_os_version_override(me, bid);
     if (p && !nvmtl_app_profile_for(me, bid, getenv("NVMTL_APP_PROFILE"))) {
         nvlog("profile: %s: off (NVMTL_APP_PROFILE=0)", me);
         p = NULL;
@@ -1054,7 +1078,11 @@ static NVMTLTexture *nvmtl_texbuf_make(NVMTLBuffer *b, MTLTextureDescriptor *d, 
 - (id<MTLBuffer>)remoteStorageBuffer { return nil; }
 - (id<MTLBuffer>)newRemoteBufferViewForDevice:(id<MTLDevice>)d { return nil; }
 - (kern_return_t)setOwnerWithIdentity:(task_id_token_t)t { return nvmtl_owner_check(t); }
-- (uint64_t)gpuAddress { return nvmtl_vk_buffer_address(&_b); }
+- (uint64_t)gpuAddress {   // a Metal 4 argument table resolves addresses back to buffers
+    uint64_t a = nvmtl_vk_buffer_address(&_b); const uint64_t len = [self length];
+    if (!nvmtl_m4_note_current(_m4note, a, len)) nvmtl_m4_note_buffer_cached(self, a, len, _m4note);
+    return a;
+}
 - (MTLPurgeableState)setPurgeableState:(MTLPurgeableState)s {
     if (_heap || _subHeap || _hostPtr) return MTLPurgeableStateNonVolatile;
     MTLPurgeableState prev = nvmtl_purge(&_purge, s);
@@ -3099,13 +3127,53 @@ static void nvmtl_retain_heaps(NVMTLCommandBuffer *cb, const id<MTLHeap> __unsaf
 // pin: it keeps that pin alive through _base and takes residency only on the new members (_own), so the members are not
 // walked again on every use. The chain is collapsed by a full pin every 16 links so members the app frees are let go.
 // _members and _copyCandidates are this link's only; -allMembers / -allCopyCandidates join the chain once and keep it.
+//
+// Two costs used to dominate a game's driver CPU time here (Cyberpunk 2077, a 3 GiB heap with thousands of members:
+// 2249 full pins walking 11.9 million members in 32768 uses). First, every full pin took a residency reference
+// (nvmtl_resref) on every member. Second, a pin died as soon as the last submission holding it finished, so a heap used
+// once per frame was walked again from its weak membership table (one weak load under the runtime's weak lock per
+// member) on nearly every frame even when nothing in it had changed.
+//
+// The residency reference is dead weight on a heap member: nvmtl_res2_movable / nvmtl_res3_movable and
+// nvmtl_purge_eligible refuse anything with _heap, _subHeap or (textures) _backBuf, so the residency mover and the
+// purger never page such a resource and never read its _resRefs, _useEp or _lastUse, and its _rstate never becomes 2,
+// so the move wait is a no-op too. Members that are not heap-backed (or NVMTL_HEAP_PIN_LEGACY=1) still take it. _own is
+// exactly the members that took one, so the release in -dealloc always matches the take.
+// The one visible difference: the private isComplete / waitUntilComplete selectors on a heap member now report only
+// the submissions that named it directly, not those that reached it only through useHeap:.
+//
+// The second cost is cut by keeping the newest pin of a heap alive for a short window after its full walk (see
+// NVMTLHeapMembers), so the next frames reuse it or extend it with a delta instead of walking the heap again.
 @interface NVMTLHeapPin : NSObject { @public NSArray *_members; NSArray *_copyCandidates; NSArray *_own; NVMTLHeapPin *_base; unsigned _depth;
                                      NSArray *_allMembers; NSArray *_allCopyCandidates; }
 - (NSArray *)allMembers;
 - (NSArray *)allCopyCandidates;
 - (instancetype)initWithMembers:(NSArray *)members;
 - (instancetype)initWithBase:(NVMTLHeapPin *)base added:(NSArray *)added;
+- (instancetype)initFlatFromBase:(NVMTLHeapPin *)base added:(NSArray *)added;
 @end
+// NVMTL_HEAP_PIN_LEGACY=1 restores the pinning as it was before the kept pin, for A/B: every member takes a residency
+// reference and no pin outlives its last submission.
+static int nvmtl_heap_pin_legacy(void) {
+    static int on = -1;
+    if (on < 0) { const char *e = getenv("NVMTL_HEAP_PIN_LEGACY"); on = e && e[0] == '1';
+                  nvlog("heap pin: %s (NVMTL_HEAP_PIN_LEGACY=%s)", on ? "LEGACY - full residency refs, no kept pin" : "heap members skip residency refs, newest pin kept", e ? e : "unset"); }
+    return on;
+}
+static _Atomic uint64_t gHeapPinRefsTaken, gHeapPinRefsSkipped;
+// Does nvmtl_resref on this member do anything anyone reads? See the comment above NVMTLHeapPin for each reader.
+static BOOL nvmtl_heap_pin_needs_ref(id o) {
+    if (nvmtl_heap_pin_legacy()) return YES;
+    if (!gNVMTLTexClass) gNVMTLTexClass = [NVMTLTexture class];
+    if ([o isKindOfClass:gNVMTLTexClass]) {
+        NVMTLTexture *t = o; if (t->_parent) t = t->_parent;   // nvmtl_resref counts on the owner
+        return !(t->_heap || t->_subHeap || t->_backBuf);
+    }
+    static Class BC; if (!BC) BC = [NVMTLBuffer class];
+    if (object_getClass(o) != BC) return NO;   // nvmtl_resref ignores every other class already
+    NVMTLBuffer *b = o;
+    return !(b->_heap || b->_subHeap);
+}
 @implementation NVMTLHeapPin
 - (instancetype)initWithBase:(NVMTLHeapPin *)base added:(NSArray *)added {
     if ((self = [self initWithMembers:added])) { _base = base; _depth = base->_depth + 1; }
@@ -3122,32 +3190,81 @@ static void nvmtl_retain_heaps(NVMTLCommandBuffer *cb, const id<MTLHeap> __unsaf
         return _allCopyCandidates;
     }
 }
+// Residency reference and host-copy classification for members this link adds; refs taken land in *own.
+static void nvmtl_heap_pin_take(NSArray *members, NSMutableArray **own, NSMutableArray *copies) {
+    uint64_t skipped = 0;
+    for (id resource in members) {
+        if (nvmtl_heap_pin_needs_ref(resource)) { nvmtl_resref(resource, 1); if (!*own) *own = [NSMutableArray new]; [*own addObject:resource]; }
+        else skipped++;
+        if (!copies) continue;
+        NVMTLBuffer *buffer = nil;
+        if ([resource isKindOfClass:[NVMTLBuffer class]]) buffer = resource;
+        else if ([resource isKindOfClass:[NVMTLTexture class]]) {
+            NVMTLTexture *texture = resource;
+            buffer = texture->_backBuf ?: (texture->_parent ? texture->_parent->_backBuf : nil);
+        }
+        if (buffer && (buffer->_hostPtr || buffer->_shadow.map)) [copies addObject:resource];
+    }
+    atomic_fetch_add(&gHeapPinRefsTaken, members.count - skipped); atomic_fetch_add(&gHeapPinRefsSkipped, skipped);
+}
 - (instancetype)initWithMembers:(NSArray *)members {
     if ((self = [super init])) {
-        _members = members; _own = members;
-        NSMutableArray *copies = [NSMutableArray new];
-        for (id resource in members) {
-            nvmtl_resref(resource, 1);
-            NVMTLBuffer *buffer = nil;
-            if ([resource isKindOfClass:[NVMTLBuffer class]]) buffer = resource;
-            else if ([resource isKindOfClass:[NVMTLTexture class]]) {
-                NVMTLTexture *texture = resource;
-                buffer = texture->_backBuf ?: (texture->_parent ? texture->_parent->_backBuf : nil);
-            }
-            if (buffer && (buffer->_hostPtr || buffer->_shadow.map)) [copies addObject:resource];
-        }
+        _members = members;
+        NSMutableArray *copies = [NSMutableArray new], *own = nil;
+        nvmtl_heap_pin_take(members, &own, copies);
         _copyCandidates = [copies copy];
+        _own = [own copy];
+    }
+    return self;
+}
+// A chain that reached 16 links collapses into one flat pin built from the chain's own strong arrays: the same members
+// a walk of the weak table would find right now (every member alive is either in the chain or listed as added since),
+// without one weak load per member. The flat pin takes its own references; the chain releases its own when it dies.
+- (instancetype)initFlatFromBase:(NVMTLHeapPin *)base added:(NSArray *)added {
+    if ((self = [super init])) {
+        NSMutableArray *own = nil, *copies = [NSMutableArray new], *chainOwn = [NSMutableArray new];
+        for (NVMTLHeapPin *p = base; p; p = p->_base) if (p->_own.count) [chainOwn addObjectsFromArray:p->_own];
+        if (chainOwn.count) nvmtl_heap_pin_take(chainOwn, &own, nil);   // members that need a reference, again for this pin
+        nvmtl_heap_pin_take(added, &own, copies);
+        _members = [[base allMembers] arrayByAddingObjectsFromArray:added];
+        _copyCandidates = [[base allCopyCandidates] arrayByAddingObjectsFromArray:copies];
+        _own = [own copy];
     }
     return self;
 }
 - (void)dealloc { for (id resource in _own) nvmtl_resref(resource, -1); }   // only what this link took; _base releases the rest
 @end
-// The heap's membership: weak, so the heap never owns its members through this; _added lists the members since the
-// cached pin for the next delta.
-@interface NVMTLHeapMembers : NSObject { @public NSHashTable *_members; uint64_t _version; __weak NVMTLHeapPin *_pin; uint64_t _pinVersion; NSPointerArray *_added; }
+// The heap's membership: weak, so the heap never owns its members through this; _added lists the members registered
+// since the last pin decision, for the next delta.
+//
+// What a use costs. Same version as the cached pin: nothing (reuse). Members added since: a delta link with just them.
+// A chain of 16 links: one flat pin from the chain's strong arrays (no weak loads). Only when no pin of the heap is
+// alive at all is the weak table walked, one weak load per member. Measured in Cyberpunk 2077 before these rules
+// (3 GiB heap, ~12k members): 1329 full walks in 32768 uses even with a kept pin, because
+//   - a pin was cached only if the heap's version had not moved while it was being built; the game registers members
+//     all the time, a walk of 12k members takes long enough to see one, and the uncached pin left the next use with
+//     no pin to extend, so it walked again (and again) - each walk invalidated by the next registration; and
+//   - command buffers encoded on several threads that missed together each walked the same heap at once.
+// Now _added is taken over at the decision (the new list collects what registers during the build), every built pin
+// is installed with the version it covers, and one build runs per heap at a time: a second user waits for it
+// (bounded, see kHeapPinWaitS) and then reuses or extends it.
+//
+// _keep holds the newest pin strongly for NVMTL_HEAP_PIN_KEEP_MS (default 200 ms, 0 = off) after a WALK, so a heap
+// whose submissions drain between frames is not walked again every frame. The window is anchored to the walk: deltas
+// and flat collapses move the keep to the new chain head but never extend the deadline, so once it passes the chain
+// lives only as long as submissions hold it, as before, and the first drain after that lets every member the app
+// released go. A walk can only happen when no pin is alive, so it never re-captures a member held only by an old pin.
+// The keep is dropped by a timer at the deadline (this also breaks the heap -> membership -> kept pin -> member ->
+// heap cycle when the app releases the heap) and when an automatic heap is out of room.
+// Every access to the membership is under _cv's lock (a condition, so a waiting user can sleep on the build).
+@interface NVMTLHeapMembers : NSObject { @public NSHashTable *_members; uint64_t _version; __weak NVMTLHeapPin *_pin; uint64_t _pinVersion; NSPointerArray *_added;
+                                        NVMTLHeapPin *_keep; uint64_t _keepUntil, _keepGen; NSCondition *_cv; BOOL _building, _expired, _everPinned;
+                                        // per-heap census
+                                        uint64_t _uses, _reuses, _deltas, _flats, _waits, _walks, _walked, _why[4]; }
 @end
 @implementation NVMTLHeapMembers
-- (instancetype)init { if ((self = [super init])) { _members = [NSHashTable weakObjectsHashTable]; _added = [NSPointerArray weakObjectsPointerArray]; } return self; }
+- (instancetype)init { if ((self = [super init])) { _members = [NSHashTable weakObjectsHashTable]; _added = [NSPointerArray weakObjectsPointerArray];
+                                                     _cv = [NSCondition new]; } return self; }
 @end
 // Per command buffer: the version of each heap it already holds a pin for, so a heap used by every encoder of a frame
 // is pinned once per command buffer.
@@ -3165,29 +3282,57 @@ static NVMTLHeapMembers *nvmtl_heap_members(NVMTLHeap *heap) {
         return m;
     }
 }
+static uint64_t nvmtl_heap_pin_keep_ns(void) {
+    static int64_t ns = -1;
+    if (ns < 0) { const char *e = getenv("NVMTL_HEAP_PIN_KEEP_MS"); long long ms = e && *e ? strtoll(e, NULL, 10) : 200;
+                  if (ms < 0 || ms > 10000) { nvlog("heap pin: NVMTL_HEAP_PIN_KEEP_MS=%s out of range 0..10000 - using 200", e); ms = 200; }
+                  ns = nvmtl_heap_pin_legacy() ? 0 : (int64_t)ms * 1000000;
+                  nvlog("heap pin: newest pin kept %lld ms after a walk (NVMTL_HEAP_PIN_KEEP_MS=%s)", (long long)(ns / 1000000), e ? e : "unset"); }
+    return (uint64_t)ns;
+}
+// A use that finds another thread building the heap's pin waits at most this long, then walks for itself without
+// installing (correct, just the old cost) and says so: a build that never finishes must not hang the encoder.
+static const double kHeapPinWaitS = 2.0;
+static _Atomic uint64_t gHeapPinKeepDrops[2];   // [0] expired (timer or use), [1] heap out of room
+// Takes the kept pin out under the lock; the caller lets it go OUTSIDE it: the last release of a pin can free members,
+// whose dealloc returns heap ranges and destroys Vulkan objects.
+// Returned retained, never autoreleased: an autoreleased pin would live until the app's pool drains, and the
+// out-of-room retry would see no space come back.
+static NVMTLHeapPin *nvmtl_heap_unkeep_locked(NVMTLHeapMembers *m, int why) NS_RETURNS_RETAINED;
+static NVMTLHeapPin *nvmtl_heap_unkeep_locked(NVMTLHeapMembers *m, int why) {
+    NVMTLHeapPin *k = m->_keep; m->_keep = nil; m->_keepUntil = 0;
+    if (k) { atomic_fetch_add(&gHeapPinKeepDrops[why], 1); if (why == 0) m->_expired = YES; }
+    return k;
+}
+// An automatic heap that cannot fit an allocation: let the kept pin go first, so members the app already released
+// (and no submission holds) are freed and their space returns. YES when a pin was let go, so the caller retries once.
+static BOOL nvmtl_heap_unkeep(NVMTLHeap *heap) {
+    NVMTLHeapMembers *m = objc_getAssociatedObject(heap, &kHeapMembers);
+    if (!m) return NO;
+    BOOL had;
+    @autoreleasepool {   // anything the last release of the pin autoreleases goes now, not at the app's next drain
+        NVMTLHeapPin *k;
+        [m->_cv lock]; k = nvmtl_heap_unkeep_locked(m, 1); [m->_cv unlock];
+        had = k != nil;
+        k = nil; (void)k;
+    }
+    return had;
+}
 static void nvmtl_heap_register(NVMTLHeap *heap, id resource) {
     if (!heap || !resource) return;
     NVMTLHeapMembers *m = nvmtl_heap_members(heap);
-    @synchronized (m) {
-        if (![m->_members containsObject:resource]) { [m->_members addObject:resource]; [m->_added addPointer:(__bridge void *)resource]; m->_version++; }
-    }
+    [m->_cv lock];
+    if (![m->_members containsObject:resource]) { [m->_members addObject:resource]; [m->_added addPointer:(__bridge void *)resource]; m->_version++; }
+    [m->_cv unlock];
 }
 @interface NVMTLHeap () { @public BOOL _hzLegacy; } @end   // NVMTL_HAZARD: a member lives outside the heap's memory
-static void nvmtl_use_heap(NVMTLCommandBuffer *cb, id<MTLHeap> value) {
-    NVMTLHeap *heap = (NVMTLHeap *)value;
-    if (!cb || !heap || ![heap isKindOfClass:[NVMTLHeap class]]) return;
-    if (nvmtl_hz_mode()) nvmtl_hz_use_heap(&cb->_c, heap->_hazard == MTLHazardTrackingModeTracked, heap->_hm.mem, heap->_hm.size, heap->_hzLegacy);
-    NVMTLHeapUseCache *cache;
-    // A lock object of its own: the command buffer's monitor may be held by the application.
-    @synchronized ([NVMTLHeapUseCache class]) {
-        cache = objc_getAssociatedObject(cb, &kHeapUseCache);
-        if (!cache) { cache = [NVMTLHeapUseCache new]; objc_setAssociatedObject(cb, &kHeapUseCache, cache, OBJC_ASSOCIATION_RETAIN_NONATOMIC); }
-    }
+// NVMTL_HEAP_PIN_LEGACY=1: the use path exactly as it was before the kept pin and the single build, for A/B.
+static void nvmtl_use_heap_legacy(NVMTLCommandBuffer *cb, NVMTLHeap *heap, NVMTLHeapUseCache *cache) {
     NVMTLHeapMembers *members = nvmtl_heap_members(heap);
     [cache->_lock lock];
     NSArray *resources = nil, *added = nil; NVMTLHeapPin *pin = nil, *base = nil; uint64_t version;
     NSValue *key = [NSValue valueWithNonretainedObject:heap];
-    @synchronized (members) {
+    [members->_cv lock]; {
         version = members->_version;
         NSNumber *prior = cache->_versions[key];
         if (!prior || prior.unsignedLongLongValue != version) {
@@ -3201,19 +3346,148 @@ static void nvmtl_use_heap(NVMTLCommandBuffer *cb, id<MTLHeap> value) {
         { static _Atomic uint64_t calls, rebuilds, walked, deltas; const uint64_t c = atomic_fetch_add(&calls, 1) + 1;
           if (resources) { atomic_fetch_add(&rebuilds, 1); atomic_fetch_add(&walked, resources.count); }
           if (added) atomic_fetch_add(&deltas, 1);
-          if ((c & 4095) == 0) nvlog("heap pin: %llu uses, %llu full pins walking %llu members, %llu delta pins", (unsigned long long)c,
+          if ((c & 4095) == 0) nvlog("heap pin (legacy): %llu uses, %llu full pins walking %llu members, %llu delta pins", (unsigned long long)c,
                                      (unsigned long long)atomic_load(&rebuilds), (unsigned long long)atomic_load(&walked), (unsigned long long)atomic_load(&deltas)); }
-    }
+    } [members->_cv unlock];
     // Residency can wait inside allocator locks: build the pin outside the membership monitor.
     if (resources || added) {
         pin = added ? [[NVMTLHeapPin alloc] initWithBase:base added:added] : [[NVMTLHeapPin alloc] initWithMembers:resources];
-        @synchronized (members) {
+        [members->_cv lock]; {
             // The added list is cleared only when this pin is the one cached: if the heap gained members meanwhile, the
             // members just consumed stay listed, or the next delta would miss them (an unpinned member is a GPU fault).
             if (members->_version == version) { members->_pin = pin; members->_pinVersion = version;
                                                  members->_added = [NSPointerArray weakObjectsPointerArray]; }
+        } [members->_cv unlock];
+    }
+    if (pin) {
+        nvmtl_retain_resource(cb, heap);
+        nvmtl_retain_resource(cb, pin);
+        cache->_versions[key] = @(version);
+    }
+    [cache->_lock unlock];
+}
+
+enum { kHeapWalkFirst, kHeapWalkExpired, kHeapWalkDied, kHeapWalkTimeout };   // why a use had to walk the weak table
+static void nvmtl_use_heap(NVMTLCommandBuffer *cb, id<MTLHeap> value) {
+    NVMTLHeap *heap = (NVMTLHeap *)value;
+    if (!cb || !heap || ![heap isKindOfClass:[NVMTLHeap class]]) return;
+    if (nvmtl_hz_mode()) {
+        if (!heap->_lzc) nvmtl_hz_use_heap(&cb->_c, heap->_hazard == MTLHazardTrackingModeTracked, heap->_hm.mem, heap->_hm.size, heap->_hzLegacy);
+        else {   // a lazily backed heap: every memory it has so far
+            os_unfair_lock_lock(&heap->_lzl);
+            for (uint32_t k = 0; k < heap->_lzn; k++)
+                nvmtl_hz_use_heap(&cb->_c, heap->_hazard == MTLHazardTrackingModeTracked, heap->_lzm[k]->mem, heap->_lzm[k]->size, heap->_hzLegacy);
+            os_unfair_lock_unlock(&heap->_lzl);
         }
     }
+    NVMTLHeapUseCache *cache;
+    // A lock object of its own: the command buffer's monitor may be held by the application.
+    @synchronized ([NVMTLHeapUseCache class]) {
+        cache = objc_getAssociatedObject(cb, &kHeapUseCache);
+        if (!cache) { cache = [NVMTLHeapUseCache new]; objc_setAssociatedObject(cb, &kHeapUseCache, cache, OBJC_ASSOCIATION_RETAIN_NONATOMIC); }
+    }
+    if (nvmtl_heap_pin_legacy()) { nvmtl_use_heap_legacy(cb, heap, cache); return; }
+    NVMTLHeapMembers *members = nvmtl_heap_members(heap);
+    [cache->_lock lock];
+    NSValue *key = [NSValue valueWithNonretainedObject:heap];
+    NSNumber *prior = cache->_versions[key];
+    const uint64_t keepNs = nvmtl_heap_pin_keep_ns();
+    enum { kNone, kReuse, kDelta, kFlat, kWalk } kind = kNone;
+    NSArray *resources = nil, *added = nil; NVMTLHeapPin *pin = nil, *base = nil; uint64_t version = 0;
+    NSMutableArray *dropped = nil;   // kept pins that expired while this use looked; released after the lock
+    BOOL install = NO, waited = NO; int why = -1;
+    NSDate *waitUntil = nil;
+    [members->_cv lock];
+    members->_uses++;
+    for (;;) {
+        if (members->_keep && clock_gettime_nsec_np(CLOCK_UPTIME_RAW) >= members->_keepUntil) {
+            NVMTLHeapPin *d = nvmtl_heap_unkeep_locked(members, 0);
+            if (!dropped) dropped = [NSMutableArray new];
+            [dropped addObject:d];
+        }
+        version = members->_version;
+        if (prior && prior.unsignedLongLongValue == version) break;   // this command buffer already holds a pin at this version
+        NVMTLHeapPin *cur = members->_pin;
+        if (cur && members->_pinVersion == version) { pin = cur; kind = kReuse; members->_reuses++; break; }
+        if (members->_building) {
+            if (!waitUntil) { waitUntil = [NSDate dateWithTimeIntervalSinceNow:kHeapPinWaitS]; members->_waits++; waited = YES; }
+            if ([members->_cv waitUntilDate:waitUntil]) continue;
+            // the build did not finish in time: walk privately, install nothing, leave the builder alone
+            nvlog("heap pin: waited %.0f s for another thread's pin build of heap %p - walking %lu members privately (not installed)",
+                  kHeapPinWaitS, (__bridge void *)heap, (unsigned long)members->_members.count);
+            resources = members->_members.allObjects; kind = kWalk; why = kHeapWalkTimeout; break;
+        }
+        // This thread builds. _added is taken over now: members that register during the build land in the new list and
+        // move the version, so the next use extends this pin with exactly them.
+        [members->_added compact];
+        if (cur && cur->_depth < 16) { base = cur; added = members->_added.allObjects; kind = kDelta; }
+        else if (cur) { base = cur; added = members->_added.allObjects; kind = kFlat; }
+        else { resources = members->_members.allObjects; kind = kWalk;
+               why = !members->_everPinned ? kHeapWalkFirst : members->_expired ? kHeapWalkExpired : kHeapWalkDied; }
+        members->_added = [NSPointerArray weakObjectsPointerArray];
+        members->_building = YES; install = YES;
+        break;
+    }
+    if (kind == kDelta) members->_deltas++;
+    if (kind == kFlat) members->_flats++;
+    if (kind == kWalk) { members->_walks++; members->_walked += resources.count; members->_why[why]++; }
+    const BOOL sayHeap = kind == kWalk && (members->_walks <= 4 || (members->_walks & 63) == 0);
+    uint64_t hc[11] = { members->_uses, members->_reuses, members->_deltas, members->_flats, members->_waits, members->_walks, members->_walked,
+                        members->_why[0], members->_why[1], members->_why[2], members->_why[3] };
+    const NSUInteger hcount = sayHeap ? members->_members.count : 0;
+    [members->_cv unlock];
+    dropped = nil; (void)dropped;   // outside the lock
+    if (sayHeap)
+        nvlog("heap pin: heap %p (%llu MB, ~%lu members): %llu uses, %llu reuses, %llu deltas, %llu flat collapses, %llu waits; "
+              "%llu walks over %llu members (first %llu, after keep expiry %llu, pin died unkept %llu, wait timeout %llu)",
+              (__bridge void *)heap, (unsigned long long)(heap->_size >> 20), (unsigned long)hcount,
+              (unsigned long long)hc[0], (unsigned long long)hc[1], (unsigned long long)hc[2], (unsigned long long)hc[3], (unsigned long long)hc[4],
+              (unsigned long long)hc[5], (unsigned long long)hc[6], (unsigned long long)hc[7], (unsigned long long)hc[8], (unsigned long long)hc[9],
+              (unsigned long long)hc[10]);
+    { static _Atomic uint64_t calls, walks, walked, deltas, flats, reuses, waits;
+      const uint64_t c = atomic_fetch_add(&calls, 1) + 1;
+      if (kind == kWalk) { atomic_fetch_add(&walks, 1); atomic_fetch_add(&walked, resources.count); }
+      if (kind == kDelta) atomic_fetch_add(&deltas, 1);
+      if (kind == kFlat) atomic_fetch_add(&flats, 1);
+      if (kind == kReuse) atomic_fetch_add(&reuses, 1);
+      if (waited) atomic_fetch_add(&waits, 1);
+      if ((c & 4095) == 0) nvlog("heap pin: %llu uses (all heaps), %llu full pins walking %llu members, %llu delta pins, %llu flat collapses, "
+                                 "%llu pin reuses, %llu waits on another build; member refs %llu taken / %llu skipped (heap-backed); "
+                                 "keep dropped %llu expired, %llu for room",
+                                 (unsigned long long)c, (unsigned long long)atomic_load(&walks), (unsigned long long)atomic_load(&walked),
+                                 (unsigned long long)atomic_load(&deltas), (unsigned long long)atomic_load(&flats), (unsigned long long)atomic_load(&reuses),
+                                 (unsigned long long)atomic_load(&waits),
+                                 (unsigned long long)atomic_load(&gHeapPinRefsTaken), (unsigned long long)atomic_load(&gHeapPinRefsSkipped),
+                                 (unsigned long long)atomic_load(&gHeapPinKeepDrops[0]), (unsigned long long)atomic_load(&gHeapPinKeepDrops[1])); }
+    // Residency can wait inside allocator locks: build the pin outside the membership lock.
+    if (kind == kDelta || kind == kFlat || kind == kWalk) {
+        pin = kind == kDelta ? [[NVMTLHeapPin alloc] initWithBase:base added:added]
+            : kind == kFlat  ? [[NVMTLHeapPin alloc] initFlatFromBase:base added:added]
+            :                  [[NVMTLHeapPin alloc] initWithMembers:resources];
+        if (install) {
+            NVMTLHeapPin *replaced = nil; uint64_t keepGen = 0;
+            [members->_cv lock];
+            members->_pin = pin; members->_pinVersion = version; members->_everPinned = YES; members->_building = NO;
+            // A walk opens a keep window; a delta or collapse inside an open window moves the keep to the new chain head
+            // without extending the deadline; one after it closed is not kept.
+            if (keepNs && kind == kWalk) { replaced = members->_keep; members->_keep = pin; members->_expired = NO;
+                                           members->_keepUntil = clock_gettime_nsec_np(CLOCK_UPTIME_RAW) + keepNs; keepGen = ++members->_keepGen; }
+            else if (members->_keep) { replaced = members->_keep; members->_keep = pin; }
+            [members->_cv broadcast];
+            [members->_cv unlock];
+            replaced = nil; (void)replaced;   // outside the lock
+            if (keepGen) {
+                __weak NVMTLHeapMembers *wm = members;
+                dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)keepNs), dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
+                    NVMTLHeapMembers *m = wm; if (!m) return;
+                    NVMTLHeapPin *k = nil;
+                    [m->_cv lock]; if (m->_keepGen == keepGen) k = nvmtl_heap_unkeep_locked(m, 0); [m->_cv unlock];
+                    k = nil; (void)k;
+                });
+            }
+        }
+    }
+    base = nil; (void)base;
     if (pin) {
         nvmtl_retain_resource(cb, heap);
         nvmtl_retain_resource(cb, pin);
@@ -3735,7 +4009,53 @@ static BOOL nvmtl_pixel_sampler_update(NSMutableDictionary *states, NSString *in
     nvmtl_vk_cmd_set_stencil(&_cb->_c, _ds && _ds->_stencil, _ds ? _ds->_sf : off, _ds ? _ds->_sb : off);
     if (!_hasRef) { nvmtl_vk_cmd_set_stencil_ref(&_cb->_c, 0, 0); _hasRef = YES; }
 }
+// Metal draws through the ATTACHMENT's format, not the pipeline's: a pipeline declared BGRA8 that renders into an RGBA8
+// texture (or the reverse) writes the colour the shader returned into the texture's own channel order and reports no error
+// (measured on Apple M1 Pro: a BGRA8 pipeline into an RGBA8 texture stores 255,128,64,255 for float4(1,.5,.25,1), exactly as
+// an RGBA8 pipeline does). Vulkan builds a pass in the pipeline's format, so the pass was refused and the draws dropped.
+// Cyberpunk with frame generation on asks for an RGBA8 back buffer while its pipelines are BGRA8. The pipeline is rebuilt
+// from its own descriptor with the channel-swapped format the attachment really has, once per pipeline.
+static uint32_t nvmtl_swizzle_twin_vk(uint32_t f) { return nvmtl_format_twin_vk(f); }
+static MTLPixelFormat nvmtl_swizzle_twin_mtl(MTLPixelFormat f) { return (MTLPixelFormat)nvmtl_format_twin_mtl((uint32_t)f); }
+- (NVMTLRenderPipelineState *)nvmtlColourTwinPipeline:(NVMTLRenderPipelineState *)p {
+    // NVMTL_FORMAT_TWIN=0 restores the old refusal of a pass whose attachment format is not the pipeline's (an A/B switch).
+    static int on = -1; if (on < 0) { const char *e = getenv("NVMTL_FORMAT_TWIN"); on = !(e && e[0] == '0'); if (!on) nvlog("pipelines are NOT rebuilt for an attachment's channel order (NVMTL_FORMAT_TWIN=0)"); }
+    if (!on || !p || !p->_descriptor) return p;
+    const uint32_t n = p->_p.ncol ? p->_p.ncol : (p->_p.cfmt ? 1u : 0u);
+    uint32_t swap = 0;
+    for (uint32_t i = 0; i < n && i < NVMTL_NCOL; i++) {
+        const uint32_t pf = p->_p.ncol ? p->_p.cfmts[i] : p->_p.cfmt;
+        if (!pf || !_pass.col[i]) continue;
+        const uint32_t af = _pass.colfmt[i] ? _pass.colfmt[i] : _pass.col[i]->fmt;
+        if (af != pf && nvmtl_swizzle_twin_vk(pf) == af) swap |= 1u << i;
+    }
+    if (!swap) return p;
+    NSString *key = [NSString stringWithFormat:@"colour-twin:%x", swap];
+    @synchronized (p) {
+        if (!p->_samplerVariants) p->_samplerVariants = [NSMutableDictionary new];
+        id got = p->_samplerVariants[key];
+        if (got == [NSNull null]) return p;
+        if (got) return got;
+        MTLRenderPipelineDescriptor *desc = [p->_descriptor copy];
+        NVMTLFunction *vf = p->_linkedVert ?: (id)p->_descriptor.vertexFunction, *ff = p->_linkedFrag ?: (id)p->_descriptor.fragmentFunction;
+        desc.vertexFunction = vf; desc.fragmentFunction = ff;
+        for (uint32_t i = 0; i < n && i < NVMTL_NCOL; i++) if (swap & (1u << i)) {
+            const MTLPixelFormat t = nvmtl_swizzle_twin_mtl(desc.colorAttachments[i].pixelFormat);
+            if (t == MTLPixelFormatInvalid) { p->_samplerVariants[key] = [NSNull null]; return p; }
+            desc.colorAttachments[i].pixelFormat = t;
+        }
+        NSError *error = nil;
+        NVMTLRenderPipelineState *v = (NVMTLRenderPipelineState *)[(id<MTLDevice>)gNVMTLMainDevice newRenderPipelineStateWithDescriptor:desc error:&error];
+        if (!v) { nvlog("pipeline %s / %s: no variant for the attachment's channel order (%s)", p->_vname.UTF8String ?: "?", p->_fname.UTF8String ?: "?", error.description.UTF8String ?: "?");
+                  p->_samplerVariants[key] = [NSNull null]; return p; }
+        p->_samplerVariants[key] = v;
+        static _Atomic unsigned long made; const unsigned long k = atomic_fetch_add(&made, 1) + 1;
+        if (!(k & (k - 1))) nvlog("pipeline %s / %s rebuilt for the attachment's channel order (colour mask 0x%x) [%lu made]", p->_vname.UTF8String ?: "?", p->_fname.UTF8String ?: "?", swap, k);
+        return v;
+    }
+}
 - (void)setRenderPipelineState:(id<MTLRenderPipelineState>)ps {
+    ps = (id<MTLRenderPipelineState>)[self nvmtlColourTwinPipeline:(NVMTLRenderPipelineState *)ps];
     // The same pipeline again inside a begun pass changes nothing: Apple's OpenGL renderer sets it before every draw, so
     // GL games paid a full bind per draw (the GL-on-Metal per-draw overhead). Not inside an open pass-time pool.
     if (ps && (NVMTLRenderPipelineState *)ps == _ps && _begun && !(_cb->_c.pt_open && _cb->_c.pt_pool)) return;
@@ -4485,6 +4805,16 @@ static NSUInteger nvmtl_heap_take(NVMTLHeap *h, NSUInteger size, NSUInteger al) 
     for (uint32_t i = 0; i < h->_nfr; i++) {
         NSUInteger ro = h->_fr[2 * i], rl = h->_fr[2 * i + 1], o = (ro + al - 1) / al * al;
         if (o < ro || o + size < o || o + size > ro + rl) continue;
+        if (h->_lzc && size) {
+            // a lazily backed heap: a resource that fits a slot must not straddle two (each slot may get its own memory);
+            // a larger one starts on a slot boundary so it owns whole slots
+            const NSUInteger c = h->_lzc;
+            if (size > c ? o % c != 0 : o / c != (o + size - 1) / c) {
+                NSUInteger o2 = (o / c + 1) * c; o2 = (o2 + al - 1) / al * al;
+                if (o2 < o || o2 + size < o2 || o2 + size > ro + rl) continue;
+                o = o2;
+            }
+        }
         NSUInteger lo = o - ro, hi = ro + rl - (o + size);
         if (lo && hi) {
             if (nvmtl_heap_grow(h)) break;
@@ -4595,8 +4925,10 @@ void nvmtl_heaps_dump(FILE *f, void (*emit)(void *, const char *)) {
     else { emit(f, "fault context: the heap registry is locked by another thread - heaps not listed"); return; }
     char line[600]; unsigned n = 0;
     for (NVMTLHeap *h in all) {
-        int o = snprintf(line, sizeof line, "fault context: heap %p \"%s\": VkDeviceMemory %p, size %lu, used %lu, %s, park %u, free ranges (%u):",
-                         (__bridge void *)h, h.label.UTF8String ?: "", h->_hm.mem, (unsigned long)h->_hm.size, (unsigned long)h->_used, h->_backed ? "backed" : "legacy (not backed)", h->_npk, h->_nfr);
+        size_t lzb = 0; for (uint32_t k = 0; k < h->_lzn; k++) lzb += h->_lzm[k]->size;
+        int o = snprintf(line, sizeof line, "fault context: heap %p \"%s\": VkDeviceMemory %p, size %lu, used %lu, %s, lazy %u memories %zu bytes, park %u, free ranges (%u):",
+                         (__bridge void *)h, h.label.UTF8String ?: "", h->_hm.mem, (unsigned long)(h->_lzc ? h->_size : h->_hm.size), (unsigned long)h->_used, h->_backed ? "backed" : "legacy (not backed)",
+                         h->_lzn, lzb, h->_npk, h->_nfr);
         if (os_unfair_lock_trylock(&h->_fl)) {
             for (uint32_t i = 0; i < h->_nfr && o < (int)sizeof line - 40; i++) o += snprintf(line + o, sizeof line - (size_t)o, " %lu+%lu", (unsigned long)h->_fr[2 * i], (unsigned long)h->_fr[2 * i + 1]);
             os_unfair_lock_unlock(&h->_fl);
@@ -4605,7 +4937,74 @@ void nvmtl_heaps_dump(FILE *f, void (*emit)(void *, const char *)) {
     }
     snprintf(line, sizeof line, "fault context: %u live app heaps listed", n); emit(f, line);
 }
+static const size_t kLazySlot = 64u << 20, kLazyMin = 256u << 20;
+static _Atomic uint64_t gHLazyHeaps, gHLazyReserved, gHLazyBacked, gHLazyMixed;
+static int nvmtl_heap_lazy_on(void) {
+    static int on = -1;
+    if (on < 0) { const char *e = getenv("NVMTL_HEAP_LAZY"); on = !(e && e[0] == '0');
+                  nvlog("heap lazy backing: %s (automatic heaps of %zu MB and up take memory in %zu MB slots as resources land)",
+                        on ? "ON" : "OFF (NVMTL_HEAP_LAZY=0)", kLazyMin >> 20, kLazySlot >> 20); }
+    return on;
+}
+/* The memory and the offset inside it for a resource at heap offset off, length len. A non-lazy heap answers its one
+ * _hm. A lazy heap answers the backing that owns every slot the range touches, creating one when none of them has memory
+ * yet; NULL when the slots belong to different backings (the caller gives the range back and takes the legacy path). */
+static nvk_heap *nvmtl_heap_mem_for(NVMTLHeap *h, NSUInteger off, NSUInteger len, NSUInteger *rel) {
+    if (!h->_lzc) { *rel = off; return &h->_hm; }
+    if (!len || off + len < off || off + len > h->_size) return NULL;
+    const uint32_t s0 = (uint32_t)(off / h->_lzc), s1 = (uint32_t)((off + len - 1) / h->_lzc);
+    if (s1 >= h->_lzslots) return NULL;
+    nvk_heap *got = NULL;
+    os_unfair_lock_lock(&h->_lzl);
+    uint16_t own = h->_lzo[s0]; int same = 1;
+    for (uint32_t s = s0 + 1; s <= s1; s++) if (h->_lzo[s] != own) { same = 0; break; }
+    if (same && own) { got = h->_lzm[own - 1]; *rel = off - h->_lzb[own - 1]; }
+    else if (same && !own && h->_lzn < 65535) {
+        if (h->_lzn == h->_lzcap) {
+            const uint32_t nc = h->_lzcap ? h->_lzcap * 2 : 8;
+            nvk_heap **nm = realloc(h->_lzm, nc * sizeof *nm); if (nm) h->_lzm = nm;
+            size_t *nb = realloc(h->_lzb, nc * sizeof *nb); if (nb) h->_lzb = nb;
+            if (nm && nb) h->_lzcap = nc;
+        }
+        if (h->_lzn < h->_lzcap) {
+            const size_t base = (size_t)s0 * h->_lzc, end = (size_t)(s1 + 1) * h->_lzc, top = end < h->_size ? end : h->_size;
+            // The caller uses this after unlocking; growing the index must not move it.
+            nvk_heap *m = calloc(1, sizeof *m);
+            if (m && !nvmtl_vk_heap_create(top - base, h->_storage == MTLStorageModeShared, m)) {
+                nvmtl_vk_heap_zero(m, h->_storage == MTLStorageModeShared ? "shared slot" : "private slot");
+                h->_lzm[h->_lzn] = m; h->_lzb[h->_lzn] = base; h->_lzn++;
+                for (uint32_t s = s0; s <= s1; s++) h->_lzo[s] = (uint16_t)h->_lzn;
+                atomic_fetch_add(&gHLazyBacked, top - base);
+                got = m; *rel = off - base;
+            } else { free(m); nvlog("heap lazy backing: %zu bytes for slots %u-%u of a %lu-byte heap REFUSED - legacy path", top - base, s0, s1, (unsigned long)h->_size); }
+        }
+    } else if (!same) {
+        const uint64_t n = atomic_fetch_add(&gHLazyMixed, 1);
+        if (n < 4) nvlog("heap lazy backing: %lu+%lu spans slots %u-%u with different memories - legacy path", (unsigned long)off, (unsigned long)len, s0, s1);
+    }
+    os_unfair_lock_unlock(&h->_lzl);
+    return got;
+}
+void nvmtl_heap_lazy_census(const char *why) {
+    nvlog_every("heap lazy backing (%s): %llu heaps, %llu MB reserved by the app, %llu MB given memory, %llu mixed-slot fallbacks", why,
+                (unsigned long long)gHLazyHeaps, (unsigned long long)(gHLazyReserved >> 20), (unsigned long long)(gHLazyBacked >> 20),
+                (unsigned long long)gHLazyMixed);
+}
 void nvmtl_heap_back(NVMTLHeap *h, NSUInteger size, int shared) {
+    if (size >= kLazyMin && size <= (NSUInteger)UINT32_MAX * kLazySlot && nvmtl_heap_lazy_on()) {
+        h->_lzslots = (uint32_t)((size + kLazySlot - 1) / kLazySlot);
+        h->_lzo = calloc(h->_lzslots, sizeof *h->_lzo);
+        if (h->_lzo) {
+            h->_lzc = kLazySlot; h->_lzl = OS_UNFAIR_LOCK_INIT; memset(&h->_hm, 0, sizeof h->_hm);
+            nvmtl_heap_list_for_loss(h);
+            h->_fl = OS_UNFAIR_LOCK_INIT; h->_nfr = 0; h->_cfr = 0; h->_fr = NULL;
+            if (nvmtl_heap_grow(h)) { free(h->_lzo); h->_lzo = NULL; h->_lzc = 0; nvlog("heap alias: no free list for a %lu-byte heap - legacy path", (unsigned long)size); return; }
+            h->_fr[0] = 0; h->_fr[1] = size; h->_nfr = 1; h->_backed = YES;
+            atomic_fetch_add(&gHABacked, 1); atomic_fetch_add(&gHLazyHeaps, 1); atomic_fetch_add(&gHLazyReserved, size);
+            nvlog_every("heap lazy backing: %s heap of %lu bytes = %u slots, memory on first use", shared ? "shared" : "private", (unsigned long)size, h->_lzslots);
+            return;
+        }
+    }
     if (nvmtl_vk_heap_create(size, shared, &h->_hm)) {
         nvlog("heap alias: an automatic %s heap of %lu bytes got no memory of its own - its resources take the legacy fresh path",
               shared ? "shared" : "private", (unsigned long)size);
@@ -4640,7 +5039,8 @@ void nvmtl_heap_back(NVMTLHeap *h, NSUInteger size, int shared) {
     NVMTLBuffer *b = [NVMTLBuffer new];
     b->_storage = sm;
     b->_ropt = opt & ((MTLResourceOptions)0xF | ((MTLResourceOptions)0x3 << MTLResourceHazardTrackingModeShift));
-    if (nvmtl_vk_buffer_create_placed(len, &_hm, off, &b->_b)) {
+    NSUInteger rel = off; nvk_heap *mem = nvmtl_heap_mem_for(self, off, charge, &rel);
+    if (!mem || nvmtl_vk_buffer_create_placed(len, mem, rel, &b->_b)) {
         const char *why = nvmtl_heap_give(self, off, charge);
         nvlog("heap alias: bind of %lu at %lu FAILED - legacy path%s%s", (unsigned long)len, (unsigned long)off, why ? "; range kept out: " : "", why ? why : "");
         return nil;
@@ -4667,7 +5067,9 @@ void nvmtl_heap_back(NVMTLHeap *h, NSUInteger size, int shared) {
 - (NSUInteger)allocatedSize { return _size; }
 - (void)dealloc { for (uint32_t k = 0; k < _npk; k++) nvmtl_vk_image_destroy(&_pk[k].img);
                   free(_pk); _pk = NULL; _npk = 0;
-                  nvmtl_vk_heap_destroy(&_hm); free(_fr); _fr = NULL; }
+                  nvmtl_vk_heap_destroy(&_hm); free(_fr); _fr = NULL;
+                  for (uint32_t k = 0; k < _lzn; k++) { nvmtl_vk_heap_destroy(_lzm[k]); free(_lzm[k]); }
+                  free(_lzm); free(_lzb); free(_lzo); _lzm = NULL; _lzb = NULL; _lzo = NULL; _lzn = 0; }
 - (id<MTLBuffer>)newBufferWithLength:(NSUInteger)len options:(MTLResourceOptions)opt offset:(NSUInteger)off {
     if (_type != MTLHeapTypePlacement) { nvlog("heap newBufferWithLength:offset: on a non-placement heap"); return nil; }
     NVMTLBuffer *b = [NVMTLBuffer new];
@@ -4723,8 +5125,10 @@ void nvmtl_heap_back(NVMTLHeap *h, NSUInteger size, int shared) {
 - (id<MTLBuffer>)newBufferWithLength:(NSUInteger)len options:(MTLResourceOptions)opt {
     NSUInteger charge = [_dev heapBufferSizeAndAlignWithLength:len options:opt].size;
     if (charge < len) charge = len;
+    if (charge > [self maxAvailableSizeWithAlignment:0] && nvmtl_heap_unkeep(self)) nvlog("heap newBufferWithLength:%lu: out of room - let the kept heap pin go (%lu left now)", (unsigned long)len, (unsigned long)[self maxAvailableSizeWithAlignment:0]);
     if (charge > [self maxAvailableSizeWithAlignment:0]) { nvlog("heap newBufferWithLength:%lu (charge %lu) — only %lu left of %lu", (unsigned long)len, (unsigned long)charge, (unsigned long)(_size > _used ? _size - _used : 0), (unsigned long)_size); return nil; }
     if (_backed) { id<MTLBuffer> pb = [self nvmtlPlacedBuffer:len options:opt charge:charge]; if (pb) return pb;
+                   if (nvmtl_heap_unkeep(self) && (pb = [self nvmtlPlacedBuffer:len options:opt charge:charge])) return pb;
                    atomic_fetch_add(&gHAFallback, 1); nvmtl_heap_census("fallback"); }
     gZeroSkip = 1; id<MTLBuffer> b = [_dev newBufferWithLength:len options:opt]; gZeroSkip = 0;
     if (!b) return nil;
@@ -4739,6 +5143,7 @@ void nvmtl_heap_back(NVMTLHeap *h, NSUInteger size, int shared) {
 - (id<MTLAccelerationStructure>)newAccelerationStructureWithSize:(NSUInteger)size {
     NSUInteger charge = [_dev heapAccelerationStructureSizeAndAlignWithSize:size].size;
     if (charge < size) charge = size;
+    if (charge > [self maxAvailableSizeWithAlignment:0]) nvmtl_heap_unkeep(self);
     if (charge > [self maxAvailableSizeWithAlignment:0]) { nvlog("heap newAccelerationStructureWithSize:%lu (charge %lu) - only %lu left of %lu", (unsigned long)size, (unsigned long)charge, (unsigned long)(_size > _used ? _size - _used : 0), (unsigned long)_size); return nil; }
     id<MTLAccelerationStructure> as = [_dev newAccelerationStructureWithSize:size];
     if (!as) return nil;
@@ -4801,7 +5206,8 @@ void nvmtl_heap_back(NVMTLHeap *h, NSUInteger size, int shared) {
             static int said; if (said++ < 4) nvlog("heap texture: no free range of %lu (align %lu) in a %lu-byte heap with %lu charged - legacy path",
                                                    (unsigned long)charge, (unsigned long)al, (unsigned long)_size, (unsigned long)_used);
             return nil; }
-        if (nvmtl_vk_image_create_typed_placed(w, hh, vkf, bpp, a8, mips, wantStex, type, layers, &_hm, off, &t->_i)
+        NSUInteger rel = off; nvk_heap *mem = nvmtl_heap_mem_for(self, off, charge, &rel);
+        if (!mem || nvmtl_vk_image_create_typed_placed(w, hh, vkf, bpp, a8, mips, wantStex, type, layers, mem, rel, &t->_i)
             || !nvmtl_vk_image_placed_fits(&t->_i, charge)) {
             if (t->_i.img) { nvmtl_vk_image_destroy(&t->_i); atomic_fetch_add(&gHTMisfit, 1); }
             const char *why = nvmtl_heap_give(self, off, charge);
@@ -4828,6 +5234,7 @@ void nvmtl_heap_back(NVMTLHeap *h, NSUInteger size, int shared) {
     MTLSizeAndAlign sa = [_dev heapTextureSizeAndAlignWithDescriptor:d];
     NSUInteger charge = sa.size;
     if (_backed && charge) { id<MTLTexture> pt = [self nvmtlPlacedTexture:d charge:charge align:sa.align]; if (pt) return pt;
+                             if (nvmtl_heap_unkeep(self) && (pt = [self nvmtlPlacedTexture:d charge:charge align:sa.align])) return pt;
                              atomic_fetch_add(&gHTFallback, 1); nvmtl_heaptex_census("fallback"); }
     if (!charge) charge = d.width * d.height * 4;
     id<MTLTexture> t = [_dev newTextureWithDescriptor:d];
@@ -6653,7 +7060,7 @@ typedef enum : uint8_t {
     NVP_INV = 0, NVP_PIPE, NVP_DS, NVP_VBUF, NVP_FBUF, NVP_VTEX, NVP_FTEX, NVP_VSAMP, NVP_FSAMP,
     NVP_CULL, NVP_WIND, NVP_FILL, NVP_SREF, NVP_SREF2, NVP_VIEWPORT, NVP_SCISSOR, NVP_DEPTHBIAS, NVP_BLENDCOL,
     NVP_DRAWIDX, NVP_DRAWIDX5, NVP_DRAW, NVP_DRAW3, NVP_USERES, NVP_USERES3, NVP_VBYTES, NVP_FBYTES,
-    NVP_VOFF, NVP_FOFF, NVP_DEPTHCLIP
+    NVP_VOFF, NVP_FOFF, NVP_DEPTHCLIP, NVP_VBUFST, NVP_VOFFST, NVP_USEHEAP, NVP_USEHEAP2
 } nvp_kind;
 typedef struct {
     nvp_kind kind;
@@ -6668,6 +7075,39 @@ typedef struct {
 // replay in -endEncoding, which is what puts them on the command buffer (nvmtl_retain_heaps).
 @interface NVMTLDeferredRenderCommandEncoder : NSProxy { @public __weak NVMTLParallelRenderCommandEncoder *_owner; NSMutableArray *_inv, *_keep, *_heaps; BOOL _ended; NSString *_label; nvp_cmd *_cmds; uint32_t _ncmd, _capcmd; }
 @end
+// Method signatures for the sub-encoder, by selector. The translated game asks the proxy for a signature before
+// messaging it, and +instanceMethodSignatureForSelector: walks the class's protocol lists each time (class_copyProtocolList,
+// a malloc, a hash probe): ~320 render-thread samples in 20 s. A signature never changes for a selector, so the first
+// answer is kept. Reads take no lock: a slot's signature is published before its selector. NVMTL_PAR_SIGCACHE=0 turns it off.
+#define NVP_SIG_SLOTS 512u
+static struct { _Atomic(SEL) sel; void *sig; } nvp_sig_tab[NVP_SIG_SLOTS];
+static os_unfair_lock nvp_sig_lock = OS_UNFAIR_LOCK_INIT;
+static int nvp_sig_on(void) {
+    static int on = -1;
+    if (on < 0) { const char *e = getenv("NVMTL_PAR_SIGCACHE"); on = !(e && e[0] == '0'); }
+    return on;
+}
+static inline unsigned nvp_sig_slot(SEL s) { return (unsigned)(((uintptr_t)(const void *)s >> 3) * 0x9E3779B1u) & (NVP_SIG_SLOTS - 1); }
+static NSMethodSignature *nvp_sig_cached(SEL s) {
+    if (!s || !nvp_sig_on()) return nil;
+    for (unsigned k = 0, i = nvp_sig_slot(s); k < NVP_SIG_SLOTS; k++, i = (i + 1) & (NVP_SIG_SLOTS - 1)) {
+        SEL t = atomic_load_explicit(&nvp_sig_tab[i].sel, memory_order_acquire);
+        if (t == s) return (__bridge NSMethodSignature *)nvp_sig_tab[i].sig;
+        if (!t) return nil;
+    }
+    return nil;
+}
+static void nvp_sig_remember(SEL s, NSMethodSignature *m) {
+    if (!s || !m || !nvp_sig_on()) return;
+    os_unfair_lock_lock(&nvp_sig_lock);
+    for (unsigned k = 0, i = nvp_sig_slot(s); k < NVP_SIG_SLOTS * 3 / 4; k++, i = (i + 1) & (NVP_SIG_SLOTS - 1)) {
+        SEL t = atomic_load_explicit(&nvp_sig_tab[i].sel, memory_order_relaxed);
+        if (t == s) break;
+        if (!t) { nvp_sig_tab[i].sig = (__bridge_retained void *)m;   // held for the life of the process
+                  atomic_store_explicit(&nvp_sig_tab[i].sel, s, memory_order_release); break; }
+    }
+    os_unfair_lock_unlock(&nvp_sig_lock);
+}
 @implementation NVMTLDeferredRenderCommandEncoder
 static int nvp_fast_off(void) {
     static int off = -1;
@@ -6708,6 +7148,32 @@ static int nvp_fast_off(void) {
 - (void)setVertexBuffer:(id<MTLBuffer>)b offset:(NSUInteger)o atIndex:(NSUInteger)i { [self nvpBind:NVP_VBUF obj:b u0:o idx:i]; }
 - (void)setFragmentBuffer:(id<MTLBuffer>)b offset:(NSUInteger)o atIndex:(NSUInteger)i { [self nvpBind:NVP_FBUF obj:b u0:o idx:i]; }
 - (void)setVertexBufferOffset:(NSUInteger)o atIndex:(NSUInteger)i { [self nvpBind:NVP_VOFF obj:nil u0:o idx:i]; }
+// The strided and heap forms used to fall through to -forwardInvocation:, which costs a method-signature lookup, an
+// NSInvocation, retainArguments, and an -invokeWithTarget: at replay - for a call the game makes per draw. Measured on
+// Cyberpunk: ~1,100 render-thread samples in 20 s between recording and replay. NVMTL_NO_PARFAST=1 restores the old path.
+- (void)nvpStrided:(nvp_kind)k obj:(id)o u0:(uint64_t)u0 stride:(uint64_t)st idx:(uint64_t)i {
+    @synchronized (self) { nvp_cmd *c = [self nvpPush:k]; if (!c) return; [self nvpKeep:o]; c->o0 = (__bridge void *)o; c->u0 = u0; c->u1 = i; c->u2 = st; }
+}
+- (void)setVertexBuffer:(id<MTLBuffer>)b offset:(NSUInteger)o attributeStride:(NSUInteger)st atIndex:(NSUInteger)i {
+    if (nvp_fast_off()) {
+        SEL sel = @selector(setVertexBuffer:offset:attributeStride:atIndex:);
+        NSMethodSignature *m = [NVMTLRenderCommandEncoder instanceMethodSignatureForSelector:sel]; if (!m) return;
+        NSInvocation *inv = [NSInvocation invocationWithMethodSignature:m]; inv.selector = sel;
+        [inv setArgument:&b atIndex:2]; [inv setArgument:&o atIndex:3]; [inv setArgument:&st atIndex:4]; [inv setArgument:&i atIndex:5];
+        [self forwardInvocation:inv]; return;
+    }
+    [self nvpStrided:NVP_VBUFST obj:b u0:o stride:st idx:i];
+}
+- (void)setVertexBufferOffset:(NSUInteger)o attributeStride:(NSUInteger)st atIndex:(NSUInteger)i {
+    if (nvp_fast_off()) {
+        SEL sel = @selector(setVertexBufferOffset:attributeStride:atIndex:);
+        NSMethodSignature *m = [NVMTLRenderCommandEncoder instanceMethodSignatureForSelector:sel]; if (!m) return;
+        NSInvocation *inv = [NSInvocation invocationWithMethodSignature:m]; inv.selector = sel;
+        [inv setArgument:&o atIndex:2]; [inv setArgument:&st atIndex:3]; [inv setArgument:&i atIndex:4];
+        [self forwardInvocation:inv]; return;
+    }
+    [self nvpStrided:NVP_VOFFST obj:nil u0:o stride:st idx:i];
+}
 - (void)setFragmentBufferOffset:(NSUInteger)o atIndex:(NSUInteger)i { [self nvpBind:NVP_FOFF obj:nil u0:o idx:i]; }
 - (void)setVertexTexture:(id<MTLTexture>)t atIndex:(NSUInteger)i { [self nvpBind:NVP_VTEX obj:t u0:0 idx:i]; }
 - (void)setFragmentTexture:(id<MTLTexture>)t atIndex:(NSUInteger)i { [self nvpBind:NVP_FTEX obj:t u0:0 idx:i]; }
@@ -6781,8 +7247,11 @@ static int nvp_fast_off(void) {
     @synchronized (self) { if (!_keep) _keep = [NSMutableArray new]; [_keep addObject:d]; [_inv addObject:inv]; }
 }
 - (NSMethodSignature *)methodSignatureForSelector:(SEL)s {
-    NSMethodSignature *m = [NVMTLRenderCommandEncoder instanceMethodSignatureForSelector:s];
+    NSMethodSignature *m = nvp_sig_cached(s);
+    if (m) return m;
+    m = [NVMTLRenderCommandEncoder instanceMethodSignatureForSelector:s];
     if (!m) { nvlog("parallel sub-encoder: %s is not a render-encoder selector — recorded as a no-op", sel_getName(s)); m = [NSMethodSignature signatureWithObjCTypes:"v@:"]; }
+    nvp_sig_remember(s, m);
     return m;
 }
 - (void)forwardInvocation:(NSInvocation *)inv {
@@ -6821,8 +7290,15 @@ static int nvp_fast_off(void) {
 - (void)useResources:(const id<MTLResource> __unsafe_unretained [])r count:(NSUInteger)n usage:(MTLResourceUsage)u stages:(MTLRenderStages)st { for (NSUInteger i = 0; i < n; i++) [(id)self useResource:r[i] usage:u stages:st]; }
 - (void)useHeaps:(const id<MTLHeap> __unsafe_unretained [])h count:(NSUInteger)n { for (NSUInteger i = 0; i < n; i++) [self useHeap:h[i]]; }
 - (void)useHeaps:(const id<MTLHeap> __unsafe_unretained [])h count:(NSUInteger)n stages:(MTLRenderStages)st { for (NSUInteger i = 0; i < n; i++) [self useHeap:h[i] stages:st]; }
-- (void)useHeap:(id<MTLHeap>)h { [self nvpSlowObj:@selector(useHeap:) obj:h]; }
+- (void)useHeap:(id<MTLHeap>)h {
+    if (nvp_fast_off()) { [self nvpSlowObj:@selector(useHeap:) obj:h]; return; }
+    @synchronized (self) { nvp_cmd *c = [self nvpPush:NVP_USEHEAP]; if (!c) return; [self nvpKeep:h]; c->o0 = (__bridge void *)h; }
+}
 - (void)useHeap:(id<MTLHeap>)h stages:(MTLRenderStages)st {
+    if (!nvp_fast_off()) {
+        @synchronized (self) { nvp_cmd *c = [self nvpPush:NVP_USEHEAP2]; if (!c) return; [self nvpKeep:h]; c->o0 = (__bridge void *)h; c->u0 = st; }
+        return;
+    }
     SEL sel = @selector(useHeap:stages:);
     NSMethodSignature *m = [NVMTLRenderCommandEncoder instanceMethodSignatureForSelector:sel];
     NSInvocation *inv = [NSInvocation invocationWithMethodSignature:m]; inv.selector = sel;
@@ -6867,6 +7343,10 @@ static int nvp_fast_off(void) {
                     case NVP_FBUF:   [real setFragmentBuffer:(__bridge id)c->o0 offset:(NSUInteger)c->u0 atIndex:(NSUInteger)c->u1]; n++; break;
                     case NVP_VOFF:   [real setVertexBufferOffset:(NSUInteger)c->u0 atIndex:(NSUInteger)c->u1]; n++; break;
                     case NVP_FOFF:   [real setFragmentBufferOffset:(NSUInteger)c->u0 atIndex:(NSUInteger)c->u1]; n++; break;
+                    case NVP_VBUFST: [real setVertexBuffer:(__bridge id)c->o0 offset:(NSUInteger)c->u0 attributeStride:(NSUInteger)c->u2 atIndex:(NSUInteger)c->u1]; n++; break;
+                    case NVP_VOFFST: [real setVertexBufferOffset:(NSUInteger)c->u0 attributeStride:(NSUInteger)c->u2 atIndex:(NSUInteger)c->u1]; n++; break;
+                    case NVP_USEHEAP:  nvmtl_use_heap(real->_cb, (__bridge id)c->o0); n++; break;   // what -[real useHeap:] does
+                    case NVP_USEHEAP2: [real useHeap:(__bridge id)c->o0 stages:(MTLRenderStages)c->u0]; n++; break;
                     case NVP_VTEX:   [real setVertexTexture:(__bridge id)c->o0 atIndex:(NSUInteger)c->u1]; n++; break;
                     case NVP_FTEX:   [real setFragmentTexture:(__bridge id)c->o0 atIndex:(NSUInteger)c->u1]; n++; break;
                     case NVP_VSAMP:  [real setVertexSamplerState:(__bridge id)c->o0 atIndex:(NSUInteger)c->u1]; n++; break;
