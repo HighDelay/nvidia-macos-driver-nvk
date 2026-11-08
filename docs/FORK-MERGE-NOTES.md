@@ -47,6 +47,12 @@ files and does not modify Wine. Include signed local helper builds, their
 licenses and the [native DLSS guide](METALFX-DLSS.md) in the installable package.
 Keep audio and Intel-panel choices independent and default No.
 
+The DLSS coverage guard must accept both `./relative` paths from the fork's
+packager and bare paths in standard text/binary checksum records. Anchor the
+whole record so a different filename ending in a helper's name cannot count as
+coverage. Exercise the actual guarded DLSS step with `stage_package.write_manifest`
+output: testing the prompt function alone missed a silently skipped prompt.
+
 The stager carries release versions and dependency minima onto rebuilt/reused
 core kexts while retaining fork personalities and additional dependencies. Re-sign
 a changed plist. Do not ship the accelerator template version `0.1` or an old
@@ -54,9 +60,9 @@ AGDC release version in a new package; packaging alone needs no recompilation.
 
 Validation on RTX 2060 SUPER / 8 GiB BAR1 / Tahoe 26.7.1 includes 2,247 translator
 library tests and 44 wrapper tests (two existing ignores and two unavailable
-private fixtures excluded), the retained driver host suite, eight installer-choice
-tests, DLSS worker/download/OS-version fixtures, sanitizer checks and offscreen
-GPU readbacks. Update the callback fixture for existing timing diagnostics and
+private fixtures excluded), the retained driver host suite, 15 installer-choice
+and payload-coverage tests, DLSS worker/download/OS-version fixtures, sanitizer
+checks and offscreen GPU readbacks. Update the callback fixture for existing timing diagnostics and
 the OS-version fixture for a real host older than its application's profile floor.
 Keep original assertions and never weaken missing-validator failures into passes.
 Package signatures, manifests, OS minima, core/optional kernel-collection links

@@ -832,8 +832,15 @@ choose_native_dlss() {
 # Optional DLSS 4 / 4.5 files: downloaded from NVIDIA on this Mac and checked against pinned hashes. A failure here
 # never undoes the driver install.
 # dlss_fetch.sh runs as root from the private copy; it is only trusted when SHA256SUMS covered it and its tools.
-if [ -f "$HERE/dlss_fetch.sh" ] && ! { grep -qE '[ *]dlss_fetch\.sh$' "$HERE/SHA256SUMS" && grep -qE '[ *]dlss/dlss_cache$' "$HERE/SHA256SUMS" \
-      && grep -qE '[ *]dlss/nm_unzstd$' "$HERE/SHA256SUMS" && grep -qE '[ *]dlss/assertfail_trap\.ptx$' "$HERE/SHA256SUMS"; }; then
+dlss_step_covered() {
+  local entry
+  # The fork's packager writes ./relative paths; upstream also uses bare paths.
+  # Match the complete checksum record so another filename cannot cover a tool.
+  for entry in 'dlss_fetch\.sh' 'dlss/dlss_cache' 'dlss/nm_unzstd' 'dlss/assertfail_trap\.ptx'; do
+    grep -qE "^[0-9a-fA-F]{64} [ *](\./)?${entry}$" "$HERE/SHA256SUMS" || return 1
+  done
+}
+if [ -f "$HERE/dlss_fetch.sh" ] && ! dlss_step_covered; then
   echo "   NOTE: this package's SHA256SUMS does not cover the DLSS step; skipping it."
 elif [ -f "$HERE/dlss_fetch.sh" ]; then
   if choose_native_dlss; then
