@@ -83,6 +83,30 @@ def bundle(path, executable):
     require(info.get("CFBundleExecutable") == executable, "unexpected bundle executable: " + str(path))
 
 
+def preserve_kext_release_metadata(target, original):
+    """Retain fork personalities while carrying the matched release's identity."""
+    target_plist = target / "Contents/Info.plist"
+    original_plist = original / "Contents/Info.plist"
+    current = plistlib.loads(target_plist.read_bytes())
+    release = plistlib.loads(original_plist.read_bytes())
+    require(current.get("CFBundleIdentifier") == release.get("CFBundleIdentifier"),
+            "replacement kext bundle ID differs from release: " + str(target))
+    merged = dict(current)
+    for key in ("CFBundleVersion", "CFBundleShortVersionString", "OSBundleCompatibleVersion"):
+        if key in release:
+            merged[key] = release[key]
+    if "OSBundleLibraries" in release:
+        require(isinstance(release["OSBundleLibraries"], dict)
+                and isinstance(current.get("OSBundleLibraries", {}), dict), "invalid kernel dependency metadata")
+        dependencies = dict(current.get("OSBundleLibraries", {}))
+        dependencies.update(release["OSBundleLibraries"])
+        merged["OSBundleLibraries"] = dependencies
+    if merged != current:
+        target_plist.write_bytes(plistlib.dumps(merged, sort_keys=False))
+        run("codesign", "--force", "--sign", "-", "--timestamp=none", target)
+        run("codesign", "--verify", "--strict", target)
+
+
 def manifest_name(name):
     if any(c in name for c in "\\\r\n"):
         return "\\", name.replace("\\", "\\\\").replace("\n", "\\n").replace("\r", "\\r")
@@ -406,6 +430,11 @@ def stage(args):
             shutil.rmtree(destination)
             shutil.copytree(agdc, destination, symlinks=True)
         replace_file(plist, work / FRAMEBUFFER / "Contents/Info.plist")
+        # Build templates and reused bundles may carry older versions. Keep
+        # per-OS release metadata without replacing the fork's personalities.
+        for relative in (*ACCEL.values(), FRAMEBUFFER, AGDC, Path("Library/Extensions/NVAccel.kext")):
+            if (work / relative).is_dir() and (base / relative).is_dir():
+                preserve_kext_release_metadata(work / relative, base / relative)
         for source, relative in replacements:
             replace_file(source, work / relative)
         if minecraft:

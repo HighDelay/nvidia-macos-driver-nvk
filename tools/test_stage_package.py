@@ -67,7 +67,7 @@ class StagePackage(unittest.TestCase):
         return path
 
     def make_bundle(self, path, name, data):
-        self.put(path / "Contents/Info.plist", plistlib.dumps({"CFBundleExecutable": name}))
+        self.put(path / "Contents/Info.plist", plistlib.dumps({"CFBundleExecutable": name, "CFBundleIdentifier": "com.nullmoth." + name}))
         self.put(path / "Contents/MacOS" / name, data)
         return path
 
@@ -93,8 +93,13 @@ class StagePackage(unittest.TestCase):
             self.assertEqual(args[2:], ("-verify_arch", "x86_64"))
             status = int(Path(args[1]).read_bytes().startswith(b"ARM64"))
         elif tool == "codesign":
-            self.assertEqual(args[1:3], ("--verify", "--strict"))
-            status = int(Path(args[3]).read_bytes().startswith(b"BAD-SIGNATURE"))
+            if args[1] == "--force":
+                self.assertEqual(args[1:6], ("--force", "--sign", "-", "--timestamp=none", args[5]))
+                self.assertTrue(Path(args[5]).is_dir())
+            else:
+                self.assertEqual(args[1:3], ("--verify", "--strict"))
+                target = Path(args[3])
+                status = int(target.is_file() and target.read_bytes().startswith(b"BAD-SIGNATURE"))
         elif tool.endswith("/nullmoth-runtime-check"):
             self.assertEqual(args[1], "15.5")
             status = int(Path(args[2]).read_bytes().startswith(b"MINOS26"))
@@ -499,6 +504,35 @@ class StagePackage(unittest.TestCase):
         for name in ("./plain name", "./with\\backslash", "./with\nnewline", "./with\rcarriage"):
             prefix, escaped = STAGE.manifest_name(name)
             self.assertEqual(STAGE.decode_name(escaped) if prefix else escaped, name)
+
+
+    def test_replacements_keep_release_versions_dependencies_and_fork_personalities(self):
+        pairs = [(STAGE.ACCEL["15"], "NVAccel"), (STAGE.ACCEL["26"], "NVAccel"), (STAGE.AGDC, "NVRMAGDC")]
+        for relative, name in pairs:
+            source = self.make_bundle(self.build / relative, name, b"fork compiled binary")
+            upstream = {"CFBundleExecutable": name, "CFBundleIdentifier": "com.nullmoth." + name,
+                        "CFBundleVersion": "2.8", "CFBundleShortVersionString": "2.8",
+                        "OSBundleLibraries": {"com.apple.kpi.iokit": "8.0"}}
+            built = {**upstream, "CFBundleVersion": "0.1", "CFBundleShortVersionString": "0.1",
+                     "IOKitPersonalities": {"fork": {"IOGLBundleName": "NVKZinkGLDriver"}},
+                     "OSBundleLibraries": {"com.apple.kpi.iokit": "7.0", "com.fork.required": "1.0"}}
+            self.put(self.base / relative / "Contents/Info.plist", plistlib.dumps(upstream))
+            self.put(source / "Contents/Info.plist", plistlib.dumps(built))
+            before = (source / "Contents/MacOS" / name).read_bytes()
+            with mock.patch.object(STAGE, "run", side_effect=self.fake_run):
+                STAGE.preserve_kext_release_metadata(source, self.base / relative)
+            info = plistlib.loads((source / "Contents/Info.plist").read_bytes())
+            self.assertEqual(info["CFBundleVersion"], "2.8")
+            self.assertEqual(info["CFBundleShortVersionString"], "2.8")
+            self.assertEqual(info["OSBundleLibraries"], {"com.apple.kpi.iokit": "8.0", "com.fork.required": "1.0"})
+            self.assertEqual(info["IOKitPersonalities"], built["IOKitPersonalities"])
+            self.assertEqual((source / "Contents/MacOS" / name).read_bytes(), before)
+
+    def test_kext_metadata_refuses_a_mismatched_bundle_identifier(self):
+        source = self.make_bundle(self.build / "mismatch.kext", "NVAccel", b"compiled binary")
+        self.put(source / "Contents/Info.plist", plistlib.dumps({"CFBundleIdentifier": "com.other.kext"}))
+        with self.assertRaisesRegex(ValueError, "bundle ID differs"):
+            STAGE.preserve_kext_release_metadata(source, self.base / STAGE.ACCEL["15"])
 
 
 if __name__ == "__main__":

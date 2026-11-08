@@ -47,6 +47,11 @@ files and does not modify Wine. Include signed local helper builds, their
 licenses and the [native DLSS guide](METALFX-DLSS.md) in the installable package.
 Keep audio and Intel-panel choices independent and default No.
 
+The stager carries release versions and dependency minima onto rebuilt/reused
+core kexts while retaining fork personalities and additional dependencies. Re-sign
+a changed plist. Do not ship the accelerator template version `0.1` or an old
+AGDC release version in a new package; packaging alone needs no recompilation.
+
 Validation on RTX 2060 SUPER / 8 GiB BAR1 / Tahoe 26.7.1 includes 2,247 translator
 library tests and 44 wrapper tests (two existing ignores and two unavailable
 private fixtures excluded), the retained driver host suite, eight installer-choice
