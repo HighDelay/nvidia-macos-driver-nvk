@@ -176,6 +176,21 @@ static bool import_pages(struct nvk_zink_context *ctx, struct surface_binding *b
    if (!buffer) return false;
    pipe_resource_reference(&b->buffer,NULL); b->buffer=buffer; b->base=base; return true;
 }
+static struct pipe_resource *output_staging(struct nvk_zink_context *ctx, unsigned size)
+{
+   if (!ctx->iosurface_staging || ctx->iosurface_staging->width0<size) {
+      struct pipe_resource t={0}; t.target=PIPE_BUFFER; t.format=PIPE_FORMAT_R8_UNORM;
+      t.width0=size; t.height0=t.depth0=t.array_size=1;
+      /* Zink selects device-local, non-mappable storage for IMMUTABLE. A
+       * DEFAULT buffer can land in system memory on a small BAR, defeating
+       * the purpose of staging the image conversion before the DMA copy. */
+      t.usage=PIPE_USAGE_IMMUTABLE;
+      struct pipe_resource *buffer=ctx->screen->fscreen.screen->resource_create(ctx->screen->fscreen.screen,&t);
+      if (!buffer) return NULL;
+      pipe_resource_reference(&ctx->iosurface_staging,NULL); ctx->iosurface_staging=buffer;
+   }
+   return ctx->iosurface_staging;
+}
 static bool copy_surface(struct nvk_zink_context *ctx, struct surface_binding *b, bool output)
 {
    if (b->locked || b->fence) return false;
@@ -188,9 +203,27 @@ static bool copy_surface(struct nvk_zink_context *ctx, struct surface_binding *b
    if (!pipe->image_copy_buffer) goto safe_failure;
    uint64_t before=epoch(b);
    struct pipe_box box={.width=b->image->width0,.height=b->image->height0,.depth=1};
+   unsigned row=util_format_get_stride(b->image->format,b->image->width0);
+   unsigned size=row*b->image->height0; /* bounded by the validated IOSurface allocation */
+   struct pipe_resource *staging=output?output_staging(ctx,size):NULL;
    pipe->memory_barrier(pipe,PIPE_BARRIER_MAPPED_BUFFER);
-   pipe->image_copy_buffer(pipe,output?b->buffer:b->image,output?b->image:b->buffer,
-                           b->offset,b->row,b->layer,0,&box);
+   if (staging) {
+      /* NVK may implement image-to-buffer conversion with a compute shader.
+       * Shader stores directly into IOSurface host pages are very slow over
+       * PCIe, especially for the RGBA16F CAOpenGLLayer used by video players.
+       * Convert in VRAM, then use the buffer-copy engine to transfer the
+       * packed pixels. Keep the same completion fence and seed publication. */
+      pipe->image_copy_buffer(pipe,staging,b->image,0,row,size,0,&box);
+      struct pipe_box bytes={.width=size,.height=1,.depth=1};
+      if (row==b->row) pipe->resource_copy_region(pipe,b->buffer,0,b->offset,0,0,staging,0,&bytes);
+      else for (unsigned y=0;y<b->image->height0;++y) {
+         /* Copy only pixels, leaving the caller's row padding and other
+          * IOSurface planes unchanged. */
+         bytes.x=y*row; bytes.width=row;
+         pipe->resource_copy_region(pipe,b->buffer,0,b->offset+y*b->row,0,0,staging,0,&bytes);
+      }
+   } else pipe->image_copy_buffer(pipe,output?b->buffer:b->image,output?b->image:b->buffer,
+                                  b->offset,b->row,b->layer,0,&box);
    pipe->memory_barrier(pipe,PIPE_BARRIER_MAPPED_BUFFER);
    st_context_flush(ctx->st,0,&b->fence,NULL,NULL);
    struct pipe_screen *screen=ctx->screen->fscreen.screen;

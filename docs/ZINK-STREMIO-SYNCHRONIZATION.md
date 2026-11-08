@@ -1,9 +1,56 @@
-# Stremio shared-IOSurface synchronization trial
+# Stremio native Zink IOSurface repairs
 
-This is an experimental, locally validated native-Zink repair, not a public
-release or a confirmed fix on the affected RTX 5070 Laptop. Native Zink remains
-enabled. No codec, kernel, Metal plugin, Minecraft Vulkan provider or Wine
-provider changes are included, and nothing is installed by building or testing it.
+The combined shared-context and HDR-export repairs are locally validated with
+Zink enabled, including user-confirmed smoother Stremio playback on RTX 2060
+SUPER. The RTX 5070 Laptop result remains unverified. No codec, kernel, Metal
+plugin, Minecraft Vulkan provider or Wine provider changes are included.
+
+## HDR export follow-up
+
+The shared-lock repair alone did not resolve playback lag on either user's
+machine. A second trace of the actual local application found RGBA16F
+`CAOpenGLLayer` output at 1920×943, eight bytes per pixel and a 15,360-byte row.
+The preceding real-libmpv test used RGBA16F worker textures but exported to a
+BGRA8 IOSurface, missing the expensive half-float output path.
+
+The live layer accumulated 479,845 ms across 13,840 GPU completion waits
+(34.67 ms mean); acquiring IOSurface locks was negligible by comparison.
+NVK's image-to-buffer path can perform its format/layout conversion with a
+compute shader. Writing the resulting pixels directly to imported system pages
+over PCIe is much slower than converting into GPU-local memory first.
+
+The export now converts to a packed, device-local buffer, then performs a buffer
+copy into the IOSurface pages. One buffer per context grows as required and is
+released on normal destruction; uncertain completion retains the entire context.
+`PIPE_USAGE_IMMUTABLE` keeps the staging allocation on the device-only path even
+with the fork's small-BAR policy. Allocation failure retains the original copy
+path. Padded rows copy only their pixel bytes, preserving padding and other
+planes. Publication still waits for the complete transfer before unlocking and
+advancing the surface seed. No CPU pixel transfer or asynchronous early-success
+handoff is introduced.
+
+The actual Stremio layer's mean wait fell to about 1.7 ms, and the user reported
+"so much smoother" playback with Zink enabled. A separate HDR transfer probe
+at the same dimensions fell from a 53.08 ms mean flush to 6.29 ms while Stremio
+was also running; this is a transfer comparison under load, not application FPS.
+Both measurements use the same 2.8 / 620 renderer and unchanged video codecs.
+The RTX 5070 Laptop is expected to benefit from the same path; local success
+does not establish its result or Apple-OpenGL performance parity.
+
+The dedicated probe renders changing HDR values above 1.0, checks exact channel
+values within half-float/UNORM precision, rejects non-finite output, verifies
+orientation and untouched padding, and records both flush and CPU-visible
+publication latency. It includes a large padded surface and context-local
+staging growth/reuse across surface sizes:
+
+```sh
+python3 tools/test_zink_iosurface_transfers.py \
+  --runtime /candidate/runtime --output /new/transfer-results
+```
+
+The original synchronization-only results below are retained as historical
+evidence. They establish lock progress and pixel correctness; their BGRA8
+publication timings did not qualify normal Stremio HDR presentation.
 
 ## Evidence and repair
 

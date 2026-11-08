@@ -27,6 +27,7 @@ struct nvk_zink_context {
       struct pipe_fence_handle *fence;
    } present[2];
    struct nvk_iosurface_group *iosurfaces;
+   struct pipe_resource *iosurface_staging;
 };
 int nvk_iosurface_group_init(struct nvk_zink_context *, struct nvk_zink_context *share);
 int nvk_iosurface_group_release(struct nvk_zink_context *);

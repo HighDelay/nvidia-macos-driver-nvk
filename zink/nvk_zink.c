@@ -222,6 +222,7 @@ NVK_EXPORT void nvk_zink_destroy(struct nvk_zink_context *ctx)
       nvk_zink_present_release(ctx);
       if (p_atomic_read(&ctx->screen->uncertain)) return;
       if (st_api_get_current() == ctx->st) nvk_zink_make_current(NULL);
+      pipe_resource_reference(&ctx->iosurface_staging, NULL);
       st_destroy_context(ctx->st);
    }
    st_api_destroy_drawable(&ctx->drawable);

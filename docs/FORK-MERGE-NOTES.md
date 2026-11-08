@@ -1,5 +1,28 @@
 # Retained fork changes for upstream merges
 
+## Native Zink HDR IOSurface export, 2026-11-08
+
+The shared-lock repair below alone still left Stremio laggy on the local host
+and the affected laptop. Actual `CAOpenGLLayer` output is RGBA16F, 1920×943,
+with a 15,360-byte row; the earlier libmpv probe exported BGRA8. Retain the
+GPU-local conversion buffer followed by a buffer/DMA copy into imported
+IOSurface pages. Direct compute stores into those host pages dominated the
+remaining publication wait. `PIPE_USAGE_IMMUTABLE` selects device-local staging
+even when the small-BAR policy puts ordinary mappable buffers in system memory.
+
+Reuse one growable buffer per context, release it on normal context teardown,
+and retain it with that context after uncertain GPU completion. Keep the direct
+copy as an allocation-failure fallback. Preserve row padding, plane offsets,
+the completion fence, surface lock/seed ordering, and the shared-context repair.
+There is no CPU pixel copy and no codec or presenter policy change.
+
+On the RTX 2060 SUPER / 8 GiB BAR1 host, the real Stremio layer's mean wait fell
+from 34.7 ms to about 1.7 ms; the user confirmed substantially smoother playback
+with Zink enabled. Keep the HDR/padding/resize transfer probe and existing
+interop/concurrency tests. This is not an Apple-OpenGL parity result or a
+confirmed RTX 5070 Laptop result; that machine uses the same path but needs its
+own playback test. Detailed evidence is in the synchronization record below.
+
 ## Stremio shared-IOSurface synchronization trial, 2026-11-08
 
 Retain native Zink and the target-filter fast path for ordinary non-rectangle
