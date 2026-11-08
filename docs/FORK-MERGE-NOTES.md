@@ -1,5 +1,29 @@
 # Retained fork changes for upstream merges
 
+## Stremio shared-IOSurface synchronization trial, 2026-11-08
+
+Retain native Zink and the target-filter fast path for ordinary non-rectangle
+texture binds. Keep the short share-group list lock, refcounted binding snapshots
+and per-IOSurface transfer locks, shared by separately imported aliases/planes.
+An unrelated shared context's uploads, publication and teardown must not wait
+behind a different surface's GPU fence. Same-surface consumers still wait for
+completion, with exact pixels, seeds and external refresh ordering preserved.
+Retain deleted/replaced bindings through queued writes and active snapshots.
+
+Keep the pre-flush before reading backend write generations: deferred clears
+acquire their writer/generation during that flush. Uncertain copies need their
+own idempotent quarantine reference even if another snapshot has retired their
+normal list entry. Never free imported pages, a locked surface or its image
+merely because the last snapshot was released after a timeout.
+
+The sanitizer, forced-fence negative controls, shared-context/alias/lifetime
+probes and real-libmpv harness are described in
+[the trial record](ZINK-STREMIO-SYNCHRONIZATION.md). Local RTX 2060 SUPER / full
+BAR1 tests are not Blackwell-laptop playback or a reproduced fix for the old
+query/descriptor crashes. Codecs, kernels, NVMTL, native Minecraft/Wine runtimes
+and existing Zink presentation/compatibility policies remain unchanged.
+No driver installation, draft, tag or release is authorized by this local trial.
+
 ## Upstream 2.8 integration, 2026-11-08
 
 Merge `60fb7255e18c31fe0747091fd9a961f30c1cd82a` onto fork `02027c1`,

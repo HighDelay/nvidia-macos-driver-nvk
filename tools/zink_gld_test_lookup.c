@@ -101,9 +101,15 @@ static void refuse_family_vram(const struct test_surface_import *record)
     refused.surface = 0;
     real_stage(&refused);
 }
+#ifdef ZINK_TEST_IOSURFACE_WAITS
+#include "zink_iosurface_test_hooks.h"
+#endif
 static void *find_symbol(void *handle, const char *name)
 {
     void *symbol = dlsym(handle,name);
+#ifdef ZINK_TEST_IOSURFACE_WAITS
+    symbol = zink_test_wrap_symbol(name,symbol,__builtin_return_address(0));
+#endif
     if (symbol && getenv("ZINK_TEST_NO_FAMILY_VRAM") && !strcmp(name,"nvmtl_nvk_stage_import")) {
         Dl_info caller = {0};
         if (dladdr(__builtin_return_address(0),&caller) && caller.dli_fname &&

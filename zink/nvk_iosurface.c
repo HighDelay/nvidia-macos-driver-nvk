@@ -24,8 +24,16 @@
 /* Keep this Gallium frontend independent of Apple's OpenGL headers. */
 enum { IO_BAD_CONTEXT=10004, IO_BAD_STATE=10007, IO_BAD_VALUE=10008,
        IO_BAD_ENUM=10010, IO_BAD_ADDRESS=10014, IO_BAD_ALLOC=10016 };
+struct surface_storage {
+   struct surface_storage *next;
+   pthread_mutex_t mutex;
+   IOSurfaceRef surface;
+   unsigned refs;
+};
 struct surface_binding {
-   struct surface_binding *next;
+   struct surface_binding *next, *quarantine_next;
+   struct surface_storage *storage;
+   int refs;
    struct gl_texture_object *texture;
    struct pipe_resource *image, *buffer;
    struct pipe_fence_handle *fence;
@@ -34,12 +42,13 @@ struct surface_binding {
    unsigned plane, offset, row, layer;
    uint32_t seed;
    uint64_t published;
-   bool locked, readonly;
+   bool locked, readonly, quarantined;
 };
 struct nvk_iosurface_group {
    pthread_mutex_t mutex;
    int refs, count;
-   struct surface_binding *bindings;
+   struct surface_binding *bindings, *quarantine;
+   struct surface_storage *surfaces;
 };
 
 int nvk_iosurface_group_init(struct nvk_zink_context *ctx, struct nvk_zink_context *share)
@@ -54,8 +63,12 @@ static bool usable(struct nvk_zink_context *ctx)
 {
    return ctx && ctx->iosurfaces && !p_atomic_read(&ctx->screen->uncertain);
 }
-static struct zink_context *backend(struct nvk_zink_context *ctx)
+static struct zink_context *drain(struct nvk_zink_context *ctx)
 {
+   /* Deferred clears acquire their write generations during driver flush. */
+   if (st_api_get_current()==ctx->st) {
+      void (*flush)(void)=(void *)nvk_zink_get_proc_address("glFlush"); flush();
+   } else st_context_flush(ctx->st,0,NULL,NULL,NULL);
    return zink_context(threaded_context_unwrap_sync(ctx->st->pipe));
 }
 static uint64_t epoch(struct surface_binding *b)
@@ -67,26 +80,87 @@ static bool active(struct surface_binding *b)
 {
    return b->texture->surface_based && b->texture->pt==b->image;
 }
-static void release_binding(struct surface_binding *b)
+static struct surface_storage *retain_storage(struct nvk_iosurface_group *g, IOSurfaceRef surface)
 {
-   /* Every GPU operation referencing these pages has completed. */
+   pthread_mutex_lock(&g->mutex);
+   struct surface_storage *s=g->surfaces;
+   while (s && IOSurfaceGetID(s->surface)!=IOSurfaceGetID(surface)) s=s->next;
+   if (s) ++s->refs;
+   else {
+      s=calloc(1,sizeof(*s));
+      if (s && pthread_mutex_init(&s->mutex,NULL)) { free(s); s=NULL; }
+      if (s) {
+         s->surface=(IOSurfaceRef)CFRetain(surface); s->refs=1;
+         s->next=g->surfaces; g->surfaces=s;
+      }
+   }
+   pthread_mutex_unlock(&g->mutex);
+   return s;
+}
+static void release_storage(struct nvk_iosurface_group *g, struct surface_storage *s)
+{
+   pthread_mutex_lock(&g->mutex);
+   bool last=!--s->refs;
+   if (last) {
+      struct surface_storage **link=&g->surfaces;
+      while (*link!=s) link=&(*link)->next;
+      *link=s->next;
+   }
+   pthread_mutex_unlock(&g->mutex);
+   if (last) { pthread_mutex_destroy(&s->mutex); CFRelease(s->surface); free(s); }
+}
+static void release_binding(struct nvk_iosurface_group *g, struct surface_binding *b)
+{
+   if (!p_atomic_dec_zero(&b->refs)) return;
+   /* The list and every in-progress operation have relinquished this binding;
+    * every GPU operation referencing its pages has completed. */
    p_atomic_set(&zink_resource(b->image)->nvk_iosurface_tracked,0);
    _mesa_reference_texobj(&b->texture,NULL);
    pipe_resource_reference(&b->image,NULL); pipe_resource_reference(&b->buffer,NULL);
-   CFRelease(b->surface); free(b);
+   release_storage(g,b->storage); free(b);
+}
+static struct surface_binding **snapshot(struct nvk_iosurface_group *g, unsigned *count)
+{
+   pthread_mutex_lock(&g->mutex);
+   struct surface_binding **items=calloc(MAX2(g->count,1),sizeof(*items));
+   *count=0;
+   if (items) for (struct surface_binding *b=g->bindings;b;b=b->next) {
+      p_atomic_inc(&b->refs); items[(*count)++]=b;
+   }
+   pthread_mutex_unlock(&g->mutex);
+   return items;
+}
+static void release_snapshot(struct nvk_iosurface_group *g, struct surface_binding **items, unsigned count)
+{
+   for (unsigned i=0;i<count;++i) release_binding(g,items[i]);
+   free(items);
+}
+static void unlink_binding(struct nvk_iosurface_group *g, struct surface_binding *b)
+{
+   pthread_mutex_lock(&g->mutex);
+   struct surface_binding **link=&g->bindings;
+   while (*link && *link!=b) link=&(*link)->next;
+   bool found=*link!=NULL;
+   if (found) { *link=b->next; p_atomic_dec(&g->count); }
+   pthread_mutex_unlock(&g->mutex);
+   if (found) release_binding(g,b);
+}
+static void quarantine_binding(struct nvk_iosurface_group *g, struct surface_binding *b)
+{
+   pthread_mutex_lock(&g->mutex);
+   if (!b->quarantined) {
+      /* A retained snapshot can publish after another snapshot retires the
+       * list entry. Uncertain work needs its own process-lifetime reference. */
+      p_atomic_inc(&b->refs); b->quarantined=true;
+      b->quarantine_next=g->quarantine; g->quarantine=b;
+   }
+   pthread_mutex_unlock(&g->mutex);
 }
 static bool obsolete(struct nvk_zink_context *ctx, struct surface_binding *b)
 {
    if (!active(b)) return true;
    return p_atomic_read(&b->texture->RefCount)==1 &&
       _mesa_lookup_texture(ctx->st->ctx,b->texture->Name)!=b->texture;
-}
-static void raw_flush(struct nvk_zink_context *ctx)
-{
-   if (st_api_get_current()==ctx->st) {
-      void (*flush)(void)=(void *)nvk_zink_get_proc_address("glFlush"); flush();
-   } else st_context_flush(ctx->st,0,NULL,NULL,NULL);
-   threaded_context_unwrap_sync(ctx->st->pipe);
 }
 static bool import_pages(struct nvk_zink_context *ctx, struct surface_binding *b)
 {
@@ -123,6 +197,7 @@ static bool copy_surface(struct nvk_zink_context *ctx, struct surface_binding *b
    if (!b->fence || !screen->fence_finish(screen,pipe,b->fence,5000000000ull)) {
       /* Keep the fence, imported pages, image, surface and lock alive. No
        * further context can use this screen after uncertain completion. */
+      quarantine_binding(ctx->iosurfaces,b);
       p_atomic_set(&ctx->screen->uncertain,1);
       _mesa_error(ctx->st->ctx,GL_OUT_OF_MEMORY,"IOSurface GPU completion uncertain");
       return false;
@@ -130,6 +205,7 @@ static bool copy_surface(struct nvk_zink_context *ctx, struct surface_binding *b
    screen->fence_reference(screen,&b->fence,NULL);
    threaded_context_unwrap_sync(pipe);
    if (IOSurfaceUnlock(b->surface,output?0:kIOSurfaceLockReadOnly,&seed)!=kIOReturnSuccess) {
+      quarantine_binding(ctx->iosurfaces,b);
       p_atomic_set(&ctx->screen->uncertain,1); return false;
    }
    b->locked=false; b->seed=seed; b->published=output?before:epoch(b);
@@ -144,20 +220,27 @@ NVK_EXPORT int nvk_zink_flush_iosurfaces(struct nvk_zink_context *ctx)
    if (!ctx || !ctx->iosurfaces || !p_atomic_read(&ctx->iosurfaces->count)) return 1;
    if (!usable(ctx)) return 0;
    if (st_api_get_current()==ctx->st && _mesa_inside_begin_end(ctx->st->ctx)) return 1;
-   raw_flush(ctx); struct zink_context *writer=backend(ctx);
+   struct zink_context *writer=drain(ctx);
    struct nvk_iosurface_group *g=ctx->iosurfaces; int ok=1;
-   pthread_mutex_lock(&g->mutex);
-   struct surface_binding **link=&g->bindings;
-   while (*link) {
-      struct surface_binding *b=*link;
-      if (dirty(b) && p_atomic_read(&zink_resource(b->image)->nvk_iosurface_writer)==writer) {
-         if (!copy_surface(ctx,b,true)) { ok=0; break; }
+   unsigned count;
+   struct surface_binding **items=snapshot(g,&count);
+   if (!items) ok=0;
+   for (unsigned i=0;i<count && ok;++i) {
+      struct surface_binding *b=items[i];
+      bool own=p_atomic_read(&zink_resource(b->image)->nvk_iosurface_writer)==writer;
+      /* Another context's publication must not hold up this context's flush.
+       * Opportunistic retirement never waits behind an unrelated transfer. */
+      if (own) pthread_mutex_lock(&b->storage->mutex);
+      else if (pthread_mutex_trylock(&b->storage->mutex)) continue;
+      if (!usable(ctx)) ok=0;
+      else {
+         if (dirty(b) && p_atomic_read(&zink_resource(b->image)->nvk_iosurface_writer)==writer)
+            ok=copy_surface(ctx,b,true);
+         if (ok && !dirty(b) && obsolete(ctx,b)) unlink_binding(g,b);
       }
-      if (!dirty(b) && obsolete(ctx,b)) {
-         *link=b->next; release_binding(b); p_atomic_dec(&g->count);
-      } else link=&b->next;
+      pthread_mutex_unlock(&b->storage->mutex);
    }
-   pthread_mutex_unlock(&g->mutex);
+   release_snapshot(g,items,count);
    if (!ok && !p_atomic_read(&ctx->screen->uncertain))
       _mesa_error(ctx->st->ctx,GL_OUT_OF_MEMORY,"Cannot publish IOSurface GPU writes");
    return ok;
@@ -182,26 +265,37 @@ static bool selected(struct nvk_zink_context *ctx, struct surface_binding *b, un
 }
 NVK_EXPORT int nvk_zink_refresh_iosurfaces(struct nvk_zink_context *ctx, unsigned target, int framebuffer)
 {
+   if ((!framebuffer && target!=GL_TEXTURE_RECTANGLE) ||
+       (framebuffer && target!=GL_FRAMEBUFFER && target!=GL_DRAW_FRAMEBUFFER && target!=GL_READ_FRAMEBUFFER)) return 1;
    if (!ctx || !ctx->iosurfaces || !p_atomic_read(&ctx->iosurfaces->count)) return 1;
    if (!usable(ctx) || st_api_get_current()!=ctx->st) return 0;
    if (_mesa_inside_begin_end(ctx->st->ctx)) return 1;
-   struct nvk_iosurface_group *g=ctx->iosurfaces; bool stale=false;
-   pthread_mutex_lock(&g->mutex);
-   for (struct surface_binding *b=g->bindings;b;b=b->next)
-      if (selected(ctx,b,target,framebuffer) && IOSurfaceGetSeed(b->surface)!=b->seed) { stale=true; break; }
-   pthread_mutex_unlock(&g->mutex);
-   if (!stale) return 1;
-   raw_flush(ctx);
-   int ok=1; pthread_mutex_lock(&g->mutex);
-   for (struct surface_binding *b=g->bindings;b;b=b->next) {
-      if (!selected(ctx,b,target,framebuffer) || IOSurfaceGetSeed(b->surface)==b->seed) continue;
-      if (dirty(b)) {
-         _mesa_error(ctx->st->ctx,GL_INVALID_OPERATION,"IOSurface changed with unflushed GL writes");
-         ok=0; break;
+   struct nvk_iosurface_group *g=ctx->iosurfaces;
+   unsigned count;
+   struct surface_binding **items=snapshot(g,&count);
+   if (!items) { _mesa_error(ctx->st->ctx,GL_OUT_OF_MEMORY,"IOSurface binding snapshot"); return 0; }
+   int ok=1; bool drained=false;
+   for (unsigned i=0;i<count && ok;++i) {
+      struct surface_binding *b=items[i];
+      if (!selected(ctx,b,target,framebuffer)) continue;
+      pthread_mutex_lock(&b->storage->mutex);
+      if (usable(ctx) && IOSurfaceGetSeed(b->surface)!=b->seed && !drained) {
+         /* Queued work may depend on a different context's submission. */
+         pthread_mutex_unlock(&b->storage->mutex);
+         drain(ctx); drained=true;
+         pthread_mutex_lock(&b->storage->mutex);
       }
-      if (!copy_surface(ctx,b,false)) { ok=0; break; }
+      if (!usable(ctx)) ok=0;
+      else if (selected(ctx,b,target,framebuffer) && IOSurfaceGetSeed(b->surface)!=b->seed) {
+         if (dirty(b)) {
+            _mesa_error(ctx->st->ctx,GL_INVALID_OPERATION,"IOSurface changed with unflushed GL writes");
+            ok=0;
+         } else ok=copy_surface(ctx,b,false);
+      }
+      pthread_mutex_unlock(&b->storage->mutex);
    }
-   pthread_mutex_unlock(&g->mutex); return ok;
+   release_snapshot(g,items,count);
+   return ok;
 }
 
 static enum pipe_format surface_format(unsigned internal, unsigned format, unsigned type)
@@ -267,14 +361,18 @@ NVK_EXPORT int nvk_zink_bind_iosurface(struct nvk_zink_context *ctx, unsigned ta
        !screen->is_format_supported(screen,fmt,PIPE_TEXTURE_RECT,0,0,PIPE_BIND_SAMPLER_VIEW|PIPE_BIND_RENDER_TARGET)) return IO_BAD_ENUM;
    if (!nvk_zink_flush_iosurfaces(ctx)) return IO_BAD_STATE;
    struct surface_binding *b=calloc(1,sizeof(*b)); if (!b) return IO_BAD_ALLOC;
-   b->surface=(IOSurfaceRef)CFRetain(surface);b->plane=plane;b->row=(unsigned)row;b->layer=(unsigned)row*height;
+   b->storage=retain_storage(ctx->iosurfaces,surface);
+   if (!b->storage) { free(b); return IO_BAD_ALLOC; }
+   b->refs=1; b->surface=b->storage->surface;b->plane=plane;b->row=(unsigned)row;b->layer=(unsigned)row*height;
    struct pipe_resource t={0};t.target=PIPE_TEXTURE_RECT;t.format=fmt;t.width0=width;t.height0=height;
    t.depth0=t.array_size=1;t.bind=PIPE_BIND_RENDER_TARGET|PIPE_BIND_SAMPLER_VIEW;t.usage=PIPE_USAGE_DEFAULT;
    b->image=screen->resource_create(screen,&t);
-   if (!b->image) { CFRelease(b->surface);free(b);return IO_BAD_ALLOC; }
+   if (!b->image) { release_storage(ctx->iosurfaces,b->storage);free(b);return IO_BAD_ALLOC; }
    _mesa_reference_texobj(&b->texture,texture);
    p_atomic_set(&zink_resource(b->image)->nvk_iosurface_tracked,1);
    int error=IO_BAD_ALLOC;
+   pthread_mutex_lock(&b->storage->mutex);
+   if (!usable(ctx)) goto failed;
    if (IOSurfaceLock(surface,kIOSurfaceLockReadOnly,NULL)!=kIOReturnSuccess) goto failed;
    void *base=IOSurfaceGetBaseAddress(surface),*part=count?IOSurfaceGetBaseAddressOfPlane(surface,plane):base;
    bool layout=base && part && (uintptr_t)part>=(uintptr_t)base;
@@ -301,13 +399,15 @@ NVK_EXPORT int nvk_zink_bind_iosurface(struct nvk_zink_context *ctx, unsigned ta
    ctx->st->ctx->NewState|=_NEW_BUFFERS;
    pthread_mutex_lock(&ctx->iosurfaces->mutex);
    b->next=ctx->iosurfaces->bindings;ctx->iosurfaces->bindings=b;p_atomic_inc(&ctx->iosurfaces->count);
-   pthread_mutex_unlock(&ctx->iosurfaces->mutex);return 0;
+   pthread_mutex_unlock(&ctx->iosurfaces->mutex);
+   pthread_mutex_unlock(&b->storage->mutex);return 0;
 failed:
+   pthread_mutex_unlock(&b->storage->mutex);
    if (p_atomic_read(&ctx->screen->uncertain)) {
       pthread_mutex_lock(&ctx->iosurfaces->mutex);
       b->next=ctx->iosurfaces->bindings;ctx->iosurfaces->bindings=b;p_atomic_inc(&ctx->iosurfaces->count);
       pthread_mutex_unlock(&ctx->iosurfaces->mutex);
-   } else release_binding(b);
+   } else release_binding(ctx->iosurfaces,b);
    return error;
 }
 int nvk_iosurface_group_release(struct nvk_zink_context *ctx)
@@ -326,7 +426,7 @@ int nvk_iosurface_group_release(struct nvk_zink_context *ctx)
    }
    if (p_atomic_dec_zero(&g->refs)) {
       while (g->bindings) {
-         struct surface_binding *b=g->bindings;g->bindings=b->next;release_binding(b);
+         struct surface_binding *b=g->bindings;g->bindings=b->next;release_binding(g,b);
       }
       pthread_mutex_destroy(&g->mutex);free(g);
    }

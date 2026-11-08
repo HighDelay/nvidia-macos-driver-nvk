@@ -158,6 +158,12 @@ Deleted textures retain their surface through queued writes, covering Avalonia's
 delete-before-flush order. Failed imports leave the previous binding intact;
 uncertain GPU completion retains resources and stops the affected Zink screen.
 
+The [Stremio synchronization trial](ZINK-STREMIO-SYNCHRONIZATION.md) narrows
+publication locking to the affected IOSurface, retaining aliases and binding
+lifetimes while unrelated shared contexts continue uploading and rendering.
+External publication still waits for GPU completion. The affected Blackwell
+laptop's playback behavior is not yet confirmed, and this trial is not a release.
+
 The CGL bridge clones a validated per-context integer callback vector and restores
 the original vector during Apple presentation and teardown. It does not replace
 OpenGL.framework, globally interpose `dlsym`, or opt Ryujinx out of Zink. Ryujinx

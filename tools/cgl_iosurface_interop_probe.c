@@ -248,10 +248,13 @@ static void capabilities(void)
    glGetFloatv(GL_NUM_EXTENSIONS,&f);glGetDoublev(GL_NUM_EXTENSIONS,&d);glGetInteger64v(GL_NUM_EXTENSIONS,&n);glGetBooleanv(GL_NUM_EXTENSIONS,&b);
    CHECK(f==count && d==count && n==count && b==GL_TRUE);
    CHECK(!strcmp((const char *)glGetString(GL_SHADING_LANGUAGE_VERSION),"4.10 Mesa CGL"));
+   int texture_storage=0;
    for(GLint i=0;i<count;++i){
       const char *ext=(const char *)glGetStringi(GL_EXTENSIONS,(GLuint)i);CHECK(ext);
-      CHECK(strcmp(ext,"GL_ARB_clear_texture") && strcmp(ext,"GL_ARB_texture_storage") && strcmp(ext,"GL_KHR_debug") && strcmp(ext,"GL_ARB_multi_draw_indirect"));
+      CHECK(strcmp(ext,"GL_ARB_clear_texture") && strcmp(ext,"GL_KHR_debug") && strcmp(ext,"GL_ARB_multi_draw_indirect"));
+      if(!strcmp(ext,"GL_ARB_texture_storage"))texture_storage=1;
    }
+   CHECK(texture_storage);
    CHECK(glGetStringi(GL_EXTENSIONS,(GLuint)count)==NULL);CHECK(glGetError()==GL_INVALID_VALUE);
    CHECK(glGetString(GL_EXTENSIONS)==NULL);CHECK(glGetError()==GL_INVALID_ENUM);
    void *(*resolve)(const char *)=dlsym(bridge_library,"nvk_zink_get_proc_address");CHECK(resolve);
