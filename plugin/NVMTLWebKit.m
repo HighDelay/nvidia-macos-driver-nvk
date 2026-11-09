@@ -16,6 +16,12 @@
 static Class nvmtl_webkit_preferences_class;
 static id nvmtl_webkit_video_feature;
 static const void *nvmtl_webkit_video_key;
+// Tahoe's GraphicsContext filter path drops filtered images when WebKit's GPU
+// process cannot load NVMTL. WebKit's software CSS/SVG filter implementation
+// preserves the image/filter semantics. Select it in Safari only, without
+// changing compositing, WebGL, codec selection or GPU-process isolation.
+static id nvmtl_webkit_filter_feature;
+static const void *nvmtl_webkit_filter_key;
 static void (*nvmtl_webkit_set_ephemeral_bool)(const void *, bool, const void *);
 static uint64_t (*nvmtl_webkit_type_id)(const void *);
 static uint64_t nvmtl_webkit_preferences_type_id;
@@ -40,11 +46,15 @@ static void nvmtl_webkit_apply(id preferences) {
     const void *ref = (__bridge const void *)preferences;
     if (nvmtl_webkit_type_id(ref) != nvmtl_webkit_preferences_type_id) return;
     SEL enabled = sel_registerName("_isEnabledForFeature:");
-    if (((BOOL (*)(id, SEL, id))objc_msgSend)(preferences, enabled, nvmtl_webkit_video_feature)) return;
     // This exported WebKit API's final argument selects a key, not a memory
     // offset. It updates live pages with ephemeral=true, including preferences
     // with an autosave identifier. The regular feature setter can persist it.
-    nvmtl_webkit_set_ephemeral_bool(ref, true, nvmtl_webkit_video_key);
+    if (nvmtl_webkit_video_feature &&
+        !((BOOL (*)(id, SEL, id))objc_msgSend)(preferences, enabled, nvmtl_webkit_video_feature))
+        nvmtl_webkit_set_ephemeral_bool(ref, true, nvmtl_webkit_video_key);
+    if (nvmtl_webkit_filter_feature &&
+        ((BOOL (*)(id, SEL, id))objc_msgSend)(preferences, enabled, nvmtl_webkit_filter_feature))
+        nvmtl_webkit_set_ephemeral_bool(ref, false, nvmtl_webkit_filter_key);
 }
 
 static id nvmtl_webkit_preferences(id configuration, SEL selector) {
@@ -72,6 +82,12 @@ static void nvmtl_webkit_visit_view(id view, Class webView) {
 }
 
 static void nvmtl_webkit_install_on_main(void) {
+    if (nvmtl_webkit_preferences_class) return;
+    const char *videoOption = getenv("NVMTL_WEBKIT_STABLE_VIDEO");
+    const char *filterOption = getenv("NVMTL_WEBKIT_FILTERS");
+    BOOL video = !videoOption || strcmp(videoOption, "0");
+    BOOL filters = !filterOption || strcmp(filterOption, "0");
+    if (!video && !filters) return;
     Class preferences = objc_getClass("WKPreferences"), configuration = objc_getClass("WKWebViewConfiguration");
     Class webView = objc_getClass("WKWebView"), appClass = objc_getClass("NSApplication");
     SEL features = sel_registerName("_features"), getter = sel_registerName("preferences");
@@ -84,16 +100,17 @@ static void nvmtl_webkit_install_on_main(void) {
         !nvmtl_webkit_signature(getMethod, @encode(id), @[]) ||
         !nvmtl_webkit_signature(setMethod, @encode(void), @[@"@"])) return;
 
-    id feature = nil;
+    id feature = nil, filterFeature = nil;
     for (id candidate in ((id (*)(id, SEL))objc_msgSend)(preferences, features)) {
         if (!nvmtl_webkit_signature(class_getInstanceMethod([candidate class], sel_registerName("key")), @encode(id), @[])) continue;
         id key = ((id (*)(id, SEL))objc_msgSend)(candidate, sel_registerName("key"));
-        if ([key isKindOfClass:[NSString class]] && [key isEqualToString:@"MediaSourcePrefersDecompressionSession"]) {
+        if (![key isKindOfClass:[NSString class]]) continue;
+        if (video && [key isEqualToString:@"MediaSourcePrefersDecompressionSession"])
             feature = candidate;
-            break;
-        }
+        if (filters && [key isEqualToString:@"GraphicsContextFiltersEnabled"])
+            filterFeature = candidate;
     }
-    if (!feature) return; // An older or changed WebKit keeps its own behavior.
+    if (!feature && !filterFeature) return; // An older or changed WebKit keeps its own behavior.
 
     const char *path = class_getImageName(preferences);
     void *webkit = path ? dlopen(path, RTLD_LAZY | RTLD_LOCAL | RTLD_NOLOAD) : NULL;
@@ -102,20 +119,30 @@ static void nvmtl_webkit_install_on_main(void) {
     const void *(*makeString)(const char *) = dlsym(webkit, "WKStringCreateWithUTF8CString");
     uint64_t (*typeID)(const void *) = dlsym(webkit, "WKGetTypeID");
     uint64_t (*preferencesTypeID)(void) = dlsym(webkit, "WKPreferencesGetTypeID");
-    const void *key = setBool && makeString && typeID && preferencesTypeID ? makeString("MediaSourcePrefersDecompressionSession") : NULL;
-    if (!key) { dlclose(webkit); return; }
+    void (*release)(const void *) = dlsym(webkit, "WKRelease");
+    if (!setBool || !makeString || !typeID || !preferencesTypeID || !release) { dlclose(webkit); return; }
+    const void *key = feature ? makeString("MediaSourcePrefersDecompressionSession") : NULL;
+    const void *filterKey = filterFeature ? makeString("GraphicsContextFiltersEnabled") : NULL;
+    if ((feature && !key) || (filterFeature && !filterKey)) {
+        if (key) release(key);
+        if (filterKey) release(filterKey);
+        dlclose(webkit);
+        return;
+    }
     // Pin both images: the runtime keeps our IMPs and their WebKit key alive.
     Dl_info info = {0};
     if (!dladdr((void *)nvmtl_webkit_install_on_main, &info) || !info.dli_fname ||
         !dlopen(info.dli_fname, RTLD_LAZY | RTLD_LOCAL | RTLD_NODELETE)) {
-        void (*release)(const void *) = dlsym(webkit, "WKRelease");
-        if (release) release(key);
+        if (key) release(key);
+        if (filterKey) release(filterKey);
         dlclose(webkit);
         return;
     }
     nvmtl_webkit_preferences_class = preferences;
     nvmtl_webkit_video_feature = feature;
     nvmtl_webkit_video_key = key;
+    nvmtl_webkit_filter_feature = filterFeature;
+    nvmtl_webkit_filter_key = filterKey;
     nvmtl_webkit_set_ephemeral_bool = setBool;
     nvmtl_webkit_type_id = typeID;
     nvmtl_webkit_preferences_type_id = preferencesTypeID();
@@ -130,13 +157,14 @@ static void nvmtl_webkit_install_on_main(void) {
     id app = ((id (*)(id, SEL))objc_msgSend)(appClass, sel_registerName("sharedApplication"));
     for (id window in ((id (*)(id, SEL))objc_msgSend)(app, sel_registerName("windows")))
         nvmtl_webkit_visit_view(((id (*)(id, SEL))objc_msgSend)(window, sel_registerName("contentView")), webView);
-    nvlog("Safari video: retaining MediaSource decoder/frames through visibility changes; codec registration unchanged");
+    if (feature)
+        nvlog("Safari video: retaining MediaSource decoder/frames through visibility changes; codec registration unchanged");
+    if (filterFeature)
+        nvlog("Safari filters: using WebKit software CSS/SVG filters; GPU-process isolation unchanged");
 }
 
 static void nvmtl_webkit_install(void) {
     if (!nvmtl_webkit_process(getprogname(), [NSBundle mainBundle].bundleIdentifier)) return;
-    const char *option = getenv("NVMTL_WEBKIT_STABLE_VIDEO");
-    if (option && !strcmp(option, "0")) return;
     static dispatch_once_t once;
     dispatch_once(&once, ^{
         // Metal creation can be inside WebKit initialization or on a worker.

@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
-"""Exercise the Safari adapter with the installed WebKit preferences API.
+"""Exercise Safari's video/filter adapter with the real WebKit preferences API.
 
 No driver installation, user preference writes, video playback or network access.
 The test loads the production adapter into this process only.
 """
 from pathlib import Path
+import os
 import subprocess
 import tempfile
 
@@ -50,12 +51,19 @@ static void set(id prefs,id f,BOOL value) {
 - (id)preferences { return @1; }
 @end
 int main(int argc,char **argv) { @autoreleasepool {
- assert(argc==2); [NSApplication sharedApplication];
+ assert(argc==4); [NSApplication sharedApplication];
+ BOOL video=atoi(argv[2]),filters=atoi(argv[3]);
  id mode=feature(@"MediaSourcePrefersDecompressionSession");
+ id filterMode=feature(@"GraphicsContextFiltersEnabled");
  id protectedMode=feature(@"VideoRendererUseDecompressionSessionForProtected");
- assert(mode&&protectedMode);
+ assert(mode&&filterMode&&protectedMode);
  WKWebViewConfiguration *before=[WKWebViewConfiguration new];
+ BOOL nativeVideo=enabled(before.preferences,mode),nativeFilters=enabled(before.preferences,filterMode);
+ NSArray *unchangedKeys=@[@"UseGPUProcessForWebGLEnabled",@"UseGPUProcessForCanvasRenderingEnabled",@"UseGPUProcessForDOMRenderingEnabled",@"WebGLEnabled",@"AcceleratedFiltersEnabled"];
+ NSMutableArray *unchangedValues=[NSMutableArray new];
+ for(NSString *key in unchangedKeys){id f=feature(key);assert(f);[unchangedValues addObject:@(enabled(before.preferences,f))];}
  set(before.preferences,mode,NO);
+ set(before.preferences,filterMode,YES);
  BOOL originalProtected=enabled(before.preferences,protectedMode);
  before.preferences.minimumFontSize=17;
  WKWebView *view=[[WKWebView alloc]initWithFrame:NSMakeRect(0,0,320,200) configuration:before];
@@ -80,22 +88,29 @@ int main(int argc,char **argv) { @autoreleasepool {
  assert(!signature(class_getInstanceMethod([WKPreferences class],@selector(minimumFontSize)),@encode(id),@[]));
  assert(!signature(NULL,@encode(id),@[]));
  install();
- assert(enabled(before.preferences,mode));
- assert(enabled(view.configuration.preferences,mode));
+ install(); // Repeated initialization must not recursively hook itself.
+ assert(enabled(before.preferences,mode)==video);
+ assert(enabled(view.configuration.preferences,mode)==video);
+ assert(enabled(before.preferences,filterMode)==!filters);
+ assert(enabled(view.configuration.preferences,filterMode)==!filters);
  assert(before.preferences==view.configuration.preferences);
  assert(enabled(before.preferences,protectedMode)==originalProtected);
  assert(before.preferences.minimumFontSize==17);
  assert([defaultsBefore isEqual:[[NSUserDefaults standardUserDefaults]dictionaryRepresentation]]);
  WKWebViewConfiguration *after=[WKWebViewConfiguration new];
- assert(enabled(after.preferences,mode));
+ assert(enabled(after.preferences,mode)==(video?YES:nativeVideo));
+ assert(enabled(after.preferences,filterMode)==(filters?NO:nativeFilters));
  WKPreferences *replacement=[WKPreferences new];
  set(replacement,mode,NO);replacement.minimumFontSize=23;
+ set(replacement,filterMode,YES);
  after.preferences=replacement;
- assert(enabled(replacement,mode) && after.preferences==replacement);
+ assert(enabled(replacement,mode)==video && after.preferences==replacement);
+ assert(enabled(replacement,filterMode)==!filters);
  assert(after.preferences.minimumFontSize==23);
  assert(enabled(replacement,protectedMode)==originalProtected);
  ((void(*)(id,SEL,id))objc_msgSend)(after,@selector(setPreferences:),nil); // Preserve WebKit's lazy creation contract.
- assert(enabled(after.preferences,mode));
+ assert(enabled(after.preferences,mode)==(video?YES:nativeVideo));
+ assert(enabled(after.preferences,filterMode)==(filters?NO:nativeFilters));
  assert([[[NMUnrelatedConfiguration new]preferences]isEqual:@1]);
 
  // Named C-API preferences normally autosave setters. The adapter must use
@@ -111,14 +126,22 @@ int main(int argc,char **argv) { @autoreleasepool {
  id named=(__bridge id)ref;assert([named isKindOfClass:[WKPreferences class]]);
  NSDictionary *namedBefore=[[NSUserDefaults standardUserDefaults]dictionaryRepresentation];
  after.preferences=named;
- assert(enabled(after.preferences,mode));
+ assert(enabled(after.preferences,mode)==(video?YES:nativeVideo));
+ assert(enabled(after.preferences,filterMode)==(filters?NO:nativeFilters));
  assert([namedBefore isEqual:[[NSUserDefaults standardUserDefaults]dictionaryRepresentation]]);
+ for(NSUInteger i=0;i<unchangedKeys.count;i++){
+  id f=feature(unchangedKeys[i]);BOOL expected=[unchangedValues[i]boolValue];
+  assert(enabled(before.preferences,f)==expected);
+  assert(enabled(view.configuration.preferences,f)==expected);
+  assert(enabled(after.preferences,f)==expected);
+ }
  release(ref);release(key);dlclose(webkit);
  [window close];
  // Runtime methods still point into this image after the caller closes it.
  dlclose(library);
- assert(enabled([WKWebViewConfiguration new].preferences,mode));
- puts("PASS: API signatures, Safari-only identity, live/new/copied/nil/replaced preferences, protected-content flag, other settings, unrelated classes, ephemeral named preferences and pinned hook lifetime");
+ assert(enabled([WKWebViewConfiguration new].preferences,mode)==(video?YES:nativeVideo));
+ assert(enabled([WKWebViewConfiguration new].preferences,filterMode)==(filters?NO:nativeFilters));
+ printf("PASS: video=%d filters=%d; API signatures, Safari-only identity, live/new/copied/nil/replaced preferences, idempotency, protected-content flag, WebGL/GPU-process settings, independent opt-outs, unrelated classes, ephemeral named preferences and pinned hook lifetime\n",video,filters);
 }return 0;}
 '''
 
@@ -134,4 +157,14 @@ with tempfile.TemporaryDirectory(prefix="nvmtl-webkit-policy-") as directory:
                             "-framework", "Foundation", "-o", str(root / "adapter.dylib")], check=True)
     subprocess.run(common + [str(root / "probe.m"), "-framework", "Cocoa", "-framework", "WebKit",
                             "-o", str(root / "probe")], check=True)
-    subprocess.run([str(root / "probe"), str(root / "adapter.dylib")], check=True, timeout=45)
+    for video, filters in [(True, True), (False, True), (True, False), (False, False)]:
+        env = dict(os.environ)
+        # The installed release driver can be loaded by AppKit before our test
+        # adapter. Keep this probe's explicit opt-outs through its env cleanup.
+        env["NVMTL_PROCESS_ENV"] = "1"
+        for name, enabled in [("NVMTL_WEBKIT_STABLE_VIDEO", video), ("NVMTL_WEBKIT_FILTERS", filters)]:
+            env.pop(name, None)
+            if not enabled:
+                env[name] = "0"
+        subprocess.run([str(root / "probe"), str(root / "adapter.dylib"), str(int(video)), str(int(filters))],
+                       env=env, check=True, timeout=45)

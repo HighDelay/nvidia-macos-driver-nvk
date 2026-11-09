@@ -259,6 +259,32 @@ driver and kernel collection remain unchanged. Source/build records are under
 `/Volumes/Games/upstream-272-review-20261106/`. Package installation and boot
 testing are separate from these source-integration checks.
 
+## Safari filtered-icon compatibility trial (2026-11-09)
+
+`NVMTLWebKit.m` also selects WebKit's software CSS/SVG filter implementation
+when `GraphicsContextFiltersEnabled` exists. The exact Facebook WebP assets and
+`invert/sepia/hue-rotate` filter reproduce missing onscreen icons in a separate
+WebKit window; the alternate implementation renders them. This is a filter
+fallback, with possible CPU cost for large filtered elements, not a hardware
+WebGL or Safari codec fix. The user confirmed reaction and profile-popup icons
+render correctly after a normal Safari relaunch on RTX 2060 SUPER / Tahoe
+26.7.1. Other GPUs and operating systems have not been tested for this policy.
+
+Keep the exact Safari/NVIDIA scope, ephemeral updates, API checks and existing
+video policy. Do not change GPU-process, WebGL, canvas, DOM-rendering, protected
+content or persistent browser settings. `NVMTL_WEBKIT_FILTERS=0` disables only
+the filter policy; `NVMTL_WEBKIT_STABLE_VIDEO=0` disables only the video policy.
+The real WebKit API test covers both policies and all four opt-out combinations
+under ASan/UBSan against system WebKit and Safari's staged framework.
+
+Safari's GPU subprocess separately reports a sandbox denial of executable
+mapping for `/Library/GPUBundles/NVMTLDriver.bundle`. Apple's staged ANGLE can
+compile shaders, draw and read correct pixels after preloading the driver in
+a standalone process before a matching mapping restriction. That is a loading
+reproducer, not a repaired Safari GPU process: the plugin cannot initialize in
+a process that blocks loading it. Preserve this distinction and do not disable
+the sandbox or modify Apple's binaries/profiles as a driver-side repair.
+
 ## Safari MediaSource visibility repair (2026-11-06)
 
 Retain `NVMTLWebKit.m` and its call after successful NVIDIA NVMTL device creation.
@@ -274,7 +300,7 @@ same-image API lookup and pinned callback lifetime. Apply it to existing views a
 new/replaced configurations. Do not replace this with video-frame JavaScript,
 persistent browser defaults, private C++ object offsets or suppression of real
 flush/error notifications. `NVMTL_WEBKIT_STABLE_VIDEO=0` in `nvrm610.conf` disables
-the adapter after relaunching Safari.
+the video policy after relaunching Safari.
 
 Preserve native decoder-service delegation, Chromium's sandbox/bridge checks,
 codec ratings, generation selection and the separate protected-content setting.
