@@ -1,5 +1,32 @@
 # Retained fork changes for upstream merges
 
+## Selective upstream 2.9 backports, 2026-11-10
+
+The user approved the narrow scope in [the 2.9 review](UPSTREAM-2.9-REVIEW.md):
+take BAR allocation/address preflight from `3889d54` and package manifest
+completeness from `28afa39`. Keep the NVIDIA 620.70.06 / upstream 2.8 base;
+do not mark the entire `7412cdd` range merged. Unsafe or redundant shader,
+surface, shutdown, backlight, codec and Safari alternatives remain excluded.
+All existing NVMTL optimizations and fork implementations/repairs are retained.
+Do not resolve future overlapping code by replacing it wholesale with upstream.
+
+The root-owned private installer copy verifies every digest before executing
+its covered `sums_complete.sh`; the checker rejects unlisted regular payload
+files and understands the fork's escaped checksum names. The build verifier
+also requires completeness. Wine provider input directories retain their
+verified-file allowlist: local Wine/cache extras are never copied and need
+not be hashed as installable files. Complete delivered package manifests remain
+mandatory. Preserve the Intel/audio/DLSS/WebKit prompts and rollback behavior.
+
+BAR1 sizing and display/startup policy stay unchanged. Allocate and populate
+the full replacement aperture list before touching PCI configuration, clip
+physical placement to CPU/IOKit limits, and drop stale BAR1 descriptors using
+the full old 64-bit address. Keep allocation-failure cleanup and PCI readback
+rollback. The [NVRM build recipe](NVRM-BUILD.md) rebuilds the same 620 core with
+the fork's five existing patches; two patch contexts are mechanically updated
+for 620, whose FSP cleanup already clears its poll pointer. Do not add the 2.9
+YUV/color/power patch chain while rebuilding this backport.
+
 ## Native Zink HDR IOSurface export, 2026-11-08
 
 The shared-lock repair below alone still left Stremio laggy on the local host

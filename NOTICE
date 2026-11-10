@@ -8,13 +8,13 @@ translator/  Based on metal2vulkan, Copyright (C) Anees Iqbal
              (translator/LICENSE, translator/COPYING). Modifications by NullMoth Systems
              are released under the same licence.
 
-kexts/       Builds against NVIDIA's open GPU kernel modules 615.78.08, MIT (with GPL-2.0 alternatives
+kexts/       Builds against NVIDIA's open GPU kernel modules 620.70.06, MIT (with GPL-2.0 alternatives
              where noted), https://github.com/NVIDIA/open-gpu-kernel-modules
              (licenses/NVIDIA-open-gpu-kernel-modules-COPYING.txt).
 
 NVK          Vulkan driver from Mesa, MIT (licenses/Mesa-license.rst). NullMoth's changes ship as patches.
 
-GSP firmware gsp_tu10x.bin, gsp_ga10x.bin and the matching ucode images from NVIDIA's 615.78.08 driver,
+GSP firmware gsp_tu10x.bin, gsp_ga10x.bin and the matching ucode images from NVIDIA's 620.70.06 driver,
              redistributed unmodified under NVIDIA's licence (licenses/NVIDIA-firmware-LICENCE.txt), the same
              terms under which linux-firmware redistributes these images.
 
@@ -40,3 +40,8 @@ video/       Optional codec addon based on mickys/nvenc, Copyright (c) 2026 mick
              The pinned source and Turing changes are in video/nvenc-source.json and
              video/nvenc-turing.patch. Packages include NVIDIA MIT header notices and
              WebKit BSD SPI notices under /Library/GPUBundles/nvmtl/video/LICENSES.
+
+Selective upstream backports: BAR preflight/address limits from GeekAudio's
+             contribution to NullMoth (3889d54; based on yuanjing-hash's preflight
+             work), and package manifest completeness from NullMoth (28afa39).
+             See docs/UPSTREAM-2.9-REVIEW.md for the retained implementation scope.

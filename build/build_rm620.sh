@@ -1,0 +1,96 @@
+#!/bin/bash
+# build_rm620.sh: NVIDIA's RM core 620.70.06 compiled for macOS (libnvkernel.a), the way the 610 archive was made:
+# NVIDIA's own Makefile dry-run with TARGET_OS=Darwin, then cc -> clang -mkernel, -DNV_DARWIN, -fcf-protection=branch,
+# without -mcmodel=kernel / -fno-pic, for macOS 15.0 like the kext that links it (built for the SDK's macOS instead, every
+# object drew a linker note against NVRM's 15.0 target). Four headers learn NV_DARWIN; the patch chain is applied first.
+# Usage: build_rm620.sh <work dir> <pristine open-gpu-kernel-modules-<version> tree>; the work dir gets ogkm-<version>.
+set -uo pipefail
+B=$(cd "${1:?work dir}" && pwd) || exit 2
+V=${NV_VERSION:-620.70.06}
+SRC=${2:?pristine open-gpu-kernel-modules tree}
+[ "$V" = 620.70.06 ] && [ "$(git -C "$SRC" rev-parse HEAD 2>/dev/null)" = e6a2e01579fbbd1ca2ed43fef2ee2589e9bd8bd9 ] \
+  && [ -z "$(git -C "$SRC" status --porcelain --untracked-files=all)" ] \
+  || { echo "STOP: use an unchanged NVIDIA 620.70.06 checkout (e6a2e015)"; exit 2; }
+T=$B/ogkm-$V
+JOBS=${JOBS:-6}
+HERE=$(cd "$(dirname "$0")/.." && pwd)
+# Build a fresh tree with only this fork's patch series. A previously built tree
+# is not evidence of matching source bytes: do not silently reuse stale objects.
+[ ! -e "$T" ] && [ ! -L "$T" ] || { echo "STOP: use a new work directory; $T already exists"; exit 2; }
+if [ ! -d "$T" ]; then
+  mkdir "$T" && git -C "$SRC" archive HEAD | tar -x -C "$T" || exit 2
+  : > "$T/.nm-patches"
+  for f in "$HERE"/kexts/NVRM/patches/*.patch; do
+    ok=0
+    for root in "" "src/nvidia-modeset"; do
+      ( cd "$T/$root" && patch -p1 --fuzz=0 --batch --dry-run < "$f" >/dev/null 2>&1 && patch -p1 --fuzz=0 --batch --no-backup-if-mismatch < "$f" >/dev/null ) && { ok=1; break; }
+    done
+    [ $ok = 1 ] || { echo "STOP: $(basename "$f") does not apply to $SRC"; rm -rf "$T"; exit 2; }
+    basename "$f" >> "$T/.nm-patches"
+  done
+  find "$T/src" -name '*.orig' -delete
+fi
+[ -f "$T/.nm-patches" ] || { echo "STOP: $T has no record of the patches applied to it (patched by hand?); use a new work dir"; exit 2; }
+want=$(cd "$HERE/kexts/NVRM/patches" && ls *.patch | LC_ALL=C sort | tr '\n' ' ')
+have=$(LC_ALL=C sort "$T/.nm-patches" | tr '\n' ' ')
+[ "$want" = "$have" ] || { echo "STOP: $T was built with [$have], this tree has [$want]; use a new work dir"; exit 2; }
+echo "patch chain applied: $have"
+python3 - "$T" <<'PY' || exit 3
+import os, sys
+t = sys.argv[1]
+def edit(rel, old, new):
+    p = os.path.join(t, rel); s = open(p).read()
+    if new in s: return
+    assert s.count(old) == 1, f"{rel}: anchor found {s.count(old)} times"
+    s = s.replace(old, new); open(p + ".tmp", "w").write(s); os.replace(p + ".tmp", p)
+edit("src/common/sdk/nvidia/inc/cpuopsys.h", "defined(__INTEGRITY) ) && !defined(nvmacosx)", "defined(__INTEGRITY) || defined(NV_DARWIN) ) && !defined(nvmacosx)")
+for rel in ("src/common/inc/nvVer.h", "src/common/inc/nvUnixVersion.h"):
+    edit(rel, "defined(NV_QNX) || defined(NV_INTEGRITY) || \\", "defined(NV_QNX) || defined(NV_INTEGRITY) || defined(NV_DARWIN) || \\")
+edit("src/common/inc/nvBldVer.h", "#if defined(NV_LINUX) || defined(NV_BSD) || defined(NV_SUNOS)\n", "#if defined(NV_LINUX) || defined(NV_BSD) || defined(NV_SUNOS) || defined(NV_DARWIN)\n")
+# the OS-timer fix comes from the patch chain (610-fsp-timer-double-destroy.patch); it must be there
+assert "pTmrEvent->super.pOSTmrCBdata = NULL;" in open(os.path.join(t, "src/nvidia/src/kernel/gpu/timer/timer_ostimer.c")).read(), "the OS-timer fix is missing"
+print("source edits applied")
+PY
+python3 - "$T" "$HERE" "$SRC" <<'PY' || exit 3
+import hashlib, json, pathlib, subprocess, sys
+t, repo, pristine = map(pathlib.Path, sys.argv[1:])
+sha = lambda p: hashlib.sha256(p.read_bytes()).hexdigest()
+names = subprocess.check_output(['git', '-C', str(pristine), 'ls-files'], text=True).splitlines()
+files = {name: sha(t / name) for name in names if (t / name).is_file()}
+data = {'nvidia_commit': 'e6a2e01579fbbd1ca2ed43fef2ee2589e9bd8bd9',
+        'patches': {p.name: sha(p) for p in sorted((repo / 'kexts/NVRM/patches').glob('*.patch'))},
+        'files': files}
+(t / '.nm-source.json').write_text(json.dumps(data, sort_keys=True, indent=2) + '\n')
+PY
+cd "$T/src/nvidia" || exit 2
+O=_out/Darwin_x86_64; mkdir -p "$O"
+make -B -n TARGET_OS=Darwin TARGET_ARCH=x86_64 NV_VERBOSE=1 > "$B/make-n.txt" 2> "$B/make-n.err" \
+  || { echo "STOP: NVIDIA RM command generation failed"; tail -10 "$B/make-n.err"; exit 3; }
+# the generated version header and string file are make steps, not compiles: run those first
+grep -E "^echo .*version\.h" "$B/make-n.txt" > "$B/pre.sh"; bash "$B/pre.sh"
+# NVIDIA's rule bakes user@host and the date into the identity string; the shipped string names no machine or person.
+printf '%s\n' 'const char  NVRM_ID[] = "nvidia id: NVIDIA UNIX Open Kernel Module for x86_64 '"$V"' Release Build (NullMoth Systems)";' \
+  'const char *const pNVRM_ID =  NVRM_ID + 11;' > "$O/g_nvid_string.c"
+grep " -c " "$B/make-n.txt" | python3 -c '
+import sys
+for l in sys.stdin:
+    l = l.rstrip("\n")
+    assert l.startswith("cc "), l[:40]
+    l = "clang -arch x86_64 -mmacosx-version-min=15.0 -mkernel -DNV_DARWIN -fcf-protection=branch " + l[3:]
+    l = l.replace(" -mcmodel=kernel", "").replace(" -fno-pic", "")
+    print(l)' > "$O/compile_cmds.sh" || { echo "STOP: RM command transform failed"; exit 3; }
+n=$(wc -l < "$O/compile_cmds.sh"); echo "compile commands: $n"
+[ "$n" -gt 0 ] || { echo "STOP: no RM compile commands generated"; exit 3; }
+rm -rf "$O/.err"; mkdir -p "$O/.err"
+rm -rf "$B/cmds"; mkdir -p "$B/cmds"; awk -v d="$B/cmds" '{ f = d "/" NR ".sh"; print > f; close(f) }' "$O/compile_cmds.sh"
+seq 1 "$n" | xargs -P "$JOBS" -I{} bash -c 'bash "$1/cmds/$2.sh" 2> "$3/.err/$2.txt" || echo "FAIL $2"' _ "$B" '{}' "$O" > "$B/fails.txt" \
+  || { echo "STOP: RM compile workers failed"; exit 5; }
+nf=$(grep -c FAIL "$B/fails.txt"); echo "failed: $nf of $n"
+[ "$nf" = 0 ] || { head -5 "$B/fails.txt"; for i in $(grep FAIL "$B/fails.txt" | head -3 | awk '{print $2}'); do sed -n "${i}p" "$O/compile_cmds.sh" | grep -oE " -c [^ ]+"; grep -m3 "error:" "$O/.err/$i.txt"; done; exit 5; }
+rm -f "$O/libnvkernel.a"
+ls "$O"/*.o > "$B/objs.txt"; xcrun libtool -static -o "$O/libnvkernel.a" -filelist "$B/objs.txt" 2>"$B/libtool.err" || { tail -5 "$B/libtool.err"; exit 4; }
+echo "libnvkernel.a $(stat -f%z "$O/libnvkernel.a") B from $(wc -l < "$B/objs.txt") objects"
+left=$(strings -a "$O/libnvkernel.a" | grep -ciE "$(id -un)|$(hostname -s)" || true)   # the building account or host
+[ "$left" = 0 ] || { echo "STOP: $left personal string(s) in libnvkernel.a"; strings -a "$O/libnvkernel.a" | grep -iE "$(id -un)|$(hostname -s)" | head -3; exit 6; }
+echo "personal strings in libnvkernel.a: 0"
+shasum -a 256 "$O/libnvkernel.a" > "$T/.nm-rm-archive.sha256"

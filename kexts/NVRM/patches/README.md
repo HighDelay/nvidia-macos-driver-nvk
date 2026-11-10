@@ -1,5 +1,13 @@
 # NVIDIA 610 display completion archive
 
+Current fork builds target NVIDIA **620.70.06**, revision
+`e6a2e01579fbbd1ca2ed43fef2ee2589e9bd8bd9`; see
+[the complete build recipe](../../../docs/NVRM-BUILD.md). The five patches below
+retain the same behavior. Completion contexts are adjusted to 620; NVIDIA's
+620 FSP cleanup already clears `pPollEvent`, so that already-fixed hunk is
+removed while the OS timer handle clear remains. The older instructions below
+describe the origin of those repairs, not the current build target.
+
 The framebuffer and accelerator allocation interface changes must be built and installed together. Use the NVRMFB framebuffer source and the matching NVRM headers from this revision.
 
 `610-display-completion.patch` implements the mapped flip notifier query and resets the selected slot for each committed surface. NVIDIA modeset treats the BEGUN notifier state as the latched flip; FINISHED is also accepted. Invalid or unavailable notifier state keeps the transaction pending.
