@@ -70,7 +70,7 @@ def target_oc(target):
         if re.fullmatch(r'disk[0-9]+s[0-9]+', target):
             info = disk_info(target)
             esp(info)
-            if not info.get('Mounted'):
+            if not info.get('MountPoint'):
                 command('/usr/sbin/diskutil', 'mount', target)
                 mounted_here = target
                 info = disk_info(target)
@@ -86,7 +86,9 @@ def target_oc(target):
         no_links(oc)
         plain(oc, True)
         require(Path(info['MountPoint']) / 'EFI/OC' == oc, 'EFI mount and OC path disagree')
-        require(not info.get('ReadOnlyVolume', False), 'EFI volume is read-only')
+        require(not any(info.get(key, False) for key in ('ReadOnlyVolume', 'VolumeReadOnly', 'MediaReadOnly'))
+                and all(info.get(key, True) is not False for key in ('Writable', 'WritableMedia', 'WritableVolume')),
+                'EFI volume is read-only')
         plain(oc/'OpenCore.efi')
         yield oc
     finally:
@@ -174,6 +176,10 @@ def prepare(oc, payload):
     revised = [e for e in entries if e.get('BundlePath') != NAME]
     lilu_entry = entries[lilu[0]]
     revised.insert(next(i for i, e in enumerate(revised) if e is lilu_entry)+1, addition)
+    if revised == entries:
+        # Preserve XML comments, formatting and binary-plist layout when the
+        # requested settings already match. Serialization alone is not an update.
+        return original, original
     config['Kernel']['Add'] = revised
     fmt = plistlib.FMT_BINARY if original.startswith(b'bplist') else plistlib.FMT_XML
     return original, plistlib.dumps(config, fmt=fmt, sort_keys=False)
@@ -207,6 +213,11 @@ def install(oc, payload):
         original, updated = prepare(oc, payload)
         old_tree = tree(destination) if destination.exists() else None
         new_tree = tree(payload/NAME)
+        kext_changed = old_tree != new_tree
+        config_changed = original != updated
+        if not kext_changed and not config_changed:
+            print('WebKit helper and configuration are already current; no update or backup needed.')
+            return None
         backups = oc/'NVWebKitFixup-backups'
         if backups.exists() or backups.is_symlink():
             plain(backups, True)
@@ -217,19 +228,22 @@ def install(oc, payload):
         atomic(backup/'config.plist', original)
         previous = {'before_config_sha256':hashlib.sha256(original).hexdigest(),
                     'after_config_sha256':hashlib.sha256(updated).hexdigest(),
-                    'before_kext':old_tree, 'after_kext':new_tree}
+                    'before_kext':old_tree, 'after_kext':new_tree, 'kext_changed':kext_changed}
         atomic(backup/'state.json', json.dumps(previous, indent=2).encode())
-        shutil.copytree(payload/NAME, temporary, copy_function=shutil.copyfile)
-        require(tree(temporary) == new_tree, 'Copied helper differs from verified source')
+        if kext_changed:
+            shutil.copytree(payload/NAME, temporary, copy_function=shutil.copyfile)
+            require(tree(temporary) == new_tree, 'Copied helper differs from verified source')
         require(config_path.read_bytes() == original, 'Config changed during preflight; retry')
         require((tree(destination) if destination.exists() else None) == old_tree,
                 'Existing helper changed during preflight; retry')
-        if old_tree is not None:
-            os.rename(destination, backup/NAME)
-            moved_old = True
-        os.rename(temporary, destination)
-        placed_new = True
-        atomic(config_path, updated)  # Config is activated only after the helper is in place.
+        if kext_changed:
+            if old_tree is not None:
+                os.rename(destination, backup/NAME)
+                moved_old = True
+            os.rename(temporary, destination)
+            placed_new = True
+        if config_changed:
+            atomic(config_path, updated)  # Config is activated only after the helper is in place.
         require(config_path.read_bytes() == updated and tree(destination) == new_tree, 'Post-install verification failed')
         print('WebKit helper installed after Lilu. Reboot to activate it.')
         print('EFI backup: ' + str(backup))
@@ -268,8 +282,14 @@ def restore(oc, backup):
                 'Current config changed since installation; restore manually to preserve later edits')
         destination = oc/'Kexts'/NAME
         require(tree(destination) == state['after_kext'], 'Current helper changed; restore manually')
-        if state['before_kext'] is not None:
+        # Older backups always replaced the kext and did not record this flag.
+        kext_changed = state.get('kext_changed', True)
+        if state['before_kext'] is not None and kext_changed:
             require(tree(backup/NAME) == state['before_kext'], 'Old helper backup changed')
+        if not kext_changed:
+            atomic(oc/'config.plist', (backup/'config.plist').read_bytes())
+            print('Saved EFI config restored; the unchanged helper was retained. Reboot to apply.')
+            return
         removed = backup/'restored-new.kext'
         require(not removed.exists(), 'This backup was already used')
         os.rename(destination, removed)

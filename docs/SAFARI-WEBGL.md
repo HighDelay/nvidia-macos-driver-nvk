@@ -64,6 +64,12 @@ Official unsigned Lilu builds are supported: their identity, version and
 architecture are checked without re-signing them. The bundled helper must pass
 its signature check.
 
+An identical kext and Kernel/Add configuration are skipped without making a
+backup or rewriting either. Formatting-only differences do not count as an
+update. Actual kext/configuration changes create a new recovery backup; a
+configuration-only change backs up the config without duplicating the kext.
+Existing recovery backups are retained.
+
 Its transaction restores EFI changes on failure where possible. Unexpected
 concurrent edits are left for manual recovery. EFI failure does not undo the
 driver install. Review the reported error/backup and follow the manual guide.

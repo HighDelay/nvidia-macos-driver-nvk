@@ -90,6 +90,8 @@ Manual (default), Automatic or Skip. Manual must print the original extracted
 package path and OpenCore instructions, not a temporary private-copy path.
 Automatic requires an explicitly selected EFI target, verified compatible Lilu,
 an unvaulted config and guarded backup/rollback; never guess or silently edit EFI.
+Skip identical helper/configuration installs without a new backup or rewrite;
+back up actual changes only, avoiding kext copies for configuration-only updates.
 Keep it out of `/Library/Extensions` and the driver's kernel collections. A
 packaging step must verify its source/build identity and complete checksums.
 Do not accumulate duplicate identities, `BASE-*` histories, repair/validation
