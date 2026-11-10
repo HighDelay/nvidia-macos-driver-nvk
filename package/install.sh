@@ -263,8 +263,9 @@ if [ -e "$EXT/NMIntelFB.kext" ] || [ -L "$EXT/NMIntelFB.kext" ]; then
   [ "$INTEL_PANEL_CHOICE" != ask ] || INTEL_PANEL_CHOICE=yes
 fi
 if [ "$INTEL_PANEL_CHOICE" = ask ] && [ -d "$HERE/Optional/NMIntelFB.kext" ]; then
-  echo
+  printf '\n%s\n' '----------------------------------------------------------------------'
   echo "Optional Intel laptop panel support (experimental):"
+  printf '%s\n\n' '----------------------------------------------------------------------'
   echo "Use only for a laptop whose built-in screen is wired to an Intel GPU unsupported by macOS."
   echo "Skip for desktops, Apple-supported Intel graphics, or a panel driven directly by NVIDIA."
   echo "This adopts the firmware display mode; NVIDIA-to-Intel panel acceleration is still disabled by default."
@@ -298,8 +299,9 @@ if [ "$AUDIO_CHOICE" = ask ]; then
   AUDIO_CHOICE=no
   if [ "$MAJ" -ge 26 ] && [ -d "$HERE/Optional/NMXAudio.kext" ] && [ ! -e "$EXT/NMXAudio.kext" ] &&
      ioreg -r -c IOPCIDevice -l -w0 2>/dev/null | grep -q '"class-code" = <00030400>'; then
-    echo
+    printf '\n%s\n' '----------------------------------------------------------------------'
     echo "Optional NMXAudio HD Audio driver (Tahoe only). Skip if your audio already works."
+    printf '%s\n\n' '----------------------------------------------------------------------'
     if [ -t 0 ]; then
       printf 'Install the optional audio driver? [y/N] '
       answer=""; IFS= read -r answer || answer=""
@@ -826,7 +828,9 @@ fi
 
 # Native MetalFX DLSS is independent of the Wine/NVK provider.
 choose_native_dlss() {
+  printf '\n%s\n' '----------------------------------------------------------------------'
   echo "   Optional native MetalFX DLSS (RTX 20 series or newer)."
+  printf '%s\n\n' '----------------------------------------------------------------------'
   echo "   For native Mac games using MetalFX upscaling, denoising or frame interpolation."
   echo "   Downloads about 750 MB of NVIDIA files and compiles GPU kernels; allow a few minutes and 2.5 GB free."
   echo "   Wine/CrossOver DLSS uses the separate Wine/NVK setup and the game's original nvngx_dlss.dll."
@@ -877,7 +881,9 @@ webkit_manual() {
   printf '   Full guide and recovery steps: %s/Optional/NVWebKitFixup/README.md\n' "$SOURCE_PACKAGE"
 }
 choose_webkit_fixup() {
+  printf '\n%s\n' '----------------------------------------------------------------------'
   echo "   Optional Safari WebGL helper for Intel Sequoia/Tahoe (requires Lilu 1.7.2+)."
+  printf '%s\n\n' '----------------------------------------------------------------------'
   echo "   Manual gives copy/config instructions; automatic backs up and updates the OpenCore EFI you select."
   if [ "$WEBKIT_CHOICE" = ask ]; then
     WEBKIT_CHOICE=manual
