@@ -32,8 +32,8 @@ pub(crate) mod types;
 
 pub use fc_air_specialize::specialize_air_function_constants;
 pub use fc_specialize::{
-    specialize_function_constant_bytes, specialize_function_constants,
-    specialize_function_constants_zero,
+    apply_function_constant_values, fc_spec_id, specialize_function_constant_bytes, specialize_function_constants,
+    specialize_function_constants_as_spec_ids, specialize_function_constants_zero, SpecConstantEntry,
 };
 pub use passthrough::{
     translate_passthrough, translate_passthrough_specialized, translate_vertex_observer,
@@ -84,6 +84,13 @@ pub fn translate_sanitized_native(
 ) -> Result<Vec<u8>, String> {
     translate_sanitized_native_with_options(san_ll, stage, tmp, passes::TransformOptions::default())
 }
+
+/// Rewrites a tile function (implicit imageblock access) into a compute kernel that reads and writes the colour attachments
+/// as storage images, one threadgroup per `tile`; see native/tile_imageblock.rs.
+pub fn rewrite_tile_kernel(san_ll: &str, tile: [u32; 2], samples: u32) -> Result<String, String> {
+    native::tile_imageblock::rewrite(san_ll, tile, samples)
+}
+pub const TILE_TEXTURE_BASE: u32 = native::tile_imageblock::TILE_TEXTURE_BASE;
 
 fn lower_air_text_if_enabled(san_ll: &str) -> Cow<'_, str> {
     native::lower_air_text(san_ll)

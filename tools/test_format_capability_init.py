@@ -25,7 +25,8 @@ declarations = '\n'.join('typedef void (*PFN_' + name + ')(void);' for name in n
                          if name != 'vkGetPhysicalDeviceFormatProperties')
 loader = next(line for line in SOURCE.splitlines() if line.startswith('#define LOAD_I('))
 start = SOURCE.index('static pthread_once_t g_vk_once =')
-guard = SOURCE[start:SOURCE.index('const char *nvmtl_vk_device_name(', start)]
+init = SOURCE.index('int nvmtl_vk_init(void) {', start)
+guard = SOURCE[start:SOURCE.index('int nvmtl_vk_lost(void)', start)] + SOURCE[init:SOURCE.index('\n}\n', init) + 3]
 query = function('int nvmtl_vk_format_is_storage(uint32_t vkfmt)')
 negative = r'''
 int nvmtl_vk_format_is_storage(uint32_t vkfmt) {

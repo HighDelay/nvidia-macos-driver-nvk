@@ -57,6 +57,26 @@ class StagePackage(unittest.TestCase):
                                       accel_26=None)
         self.seal_base()
 
+    def test_loader_helper_is_required_before_any_output_is_published(self):
+        self.plugin.write_bytes(b"new plugin using nvmtl-air-dis")
+        with mock.patch.object(STAGE, "run", self.fake_run), mock.patch.object(STAGE.sys, "platform", "darwin"):
+            with self.assertRaises((ValueError, FileNotFoundError)):
+                STAGE.stage(self.args)
+        self.assertFalse(self.output.exists())
+
+    def test_loader_helper_is_copied_and_old_air_opt_removed(self):
+        self.plugin.write_bytes(b"new plugin using nvmtl-air-dis")
+        helper=self.put(self.build / "nvmtl-air-dis", b"open-source decoder")
+        helper.chmod(0o755)
+        self.args.air_dis=helper
+        self.put(self.base / STAGE.RUNTIME / "air-opt", b"obsolete tool")
+        self.seal_base()
+        with mock.patch.object(STAGE, "run", self.fake_run), mock.patch.object(STAGE.sys, "platform", "darwin"), redirect_stdout(io.StringIO()):
+            STAGE.stage(self.args)
+        self.assertEqual((self.output / STAGE.PLUGIN / "Contents/MacOS/nvmtl-air-dis").read_bytes(), helper.read_bytes())
+        self.assertFalse((self.output / STAGE.RUNTIME / "air-opt").exists())
+        STAGE.verify_manifest(self.output)
+
     def tearDown(self):
         self.temp.cleanup()
 

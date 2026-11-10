@@ -66,7 +66,10 @@ fn classify(name: &str) -> Option<Family> {
 }
 
 fn tags_are_carried(name: &str) -> bool {
-    !(name.contains("motion") || name.contains("curve") || name.contains("intersection_function"))
+    // The inline curve intersection (`air.intersect.*curve_data`) is carried: the driver's curve test runs inside the query and
+    // leaves curve_parameter in the first barycentric. Curve tags on other calls and on intersection functions are not.
+    let curve_ok = name.starts_with("air.intersect.") && name.contains("curve_data") && !name.contains("intersection_function");
+    !(name.contains("motion") || (name.contains("curve") && !curve_ok) || name.contains("intersection_function"))
 }
 
 fn air_function_names(ctx: &Ctx) -> HashMap<Word, String> {
@@ -1077,7 +1080,7 @@ fn intersection_field_type_matches(
         | Field::InstanceId
         | Field::UserInstanceId => integer(32),
         Field::InstanceLevel => integer(8),
-        Field::Distance => {
+        Field::Distance | Field::CurveParameter => {
             def.class.opcode == Op::TypeFloat && def.operands == [Operand::LiteralBit32(32)]
         }
         Field::FrontFacing => def.class.opcode == Op::TypeBool,
@@ -1545,6 +1548,16 @@ pub(in crate::passes) fn lower_ray_queries(
                     let value = ctx.module.fresh_id();
                     m.push(Instruction::new(Op::CompositeExtract, Some(field_ty), Some(value),
                         vec![Operand::IdRef(matrix), Operand::LiteralBit32(u32::from(column % 4))]));
+                    value
+                }
+                Field::CurveParameter => {
+                    // The driver's curve intersection leaves the curve parameter in the first barycentric of the committed hit.
+                    let vec2 = ctx.get_or_create(Op::TypeVector, None,
+                        vec![Operand::IdRef(field_ty), Operand::LiteralBit32(2)]);
+                    let bary = lw.get(&mut m, ctx, Op::RayQueryGetIntersectionBarycentricsKHR, vec2, query, true);
+                    let value = ctx.module.fresh_id();
+                    m.push(Instruction::new(Op::CompositeExtract, Some(field_ty), Some(value),
+                        vec![Operand::IdRef(bary), Operand::LiteralBit32(0)]));
                     value
                 }
                 Field::InstanceLevel => return Err("ray query: multi-level instancing requires hierarchy path metadata; unsupported".into()),

@@ -17,6 +17,7 @@ pub(in crate::passes) fn lower_air_calls(ctx: &mut Ctx, entry_idx: usize) -> Res
     });
     plan_mat8_nv_phis(ctx, entry_idx, &names);
     plan_mat8_fusion(ctx, entry_idx, &names);
+    let sampler_selects = sampler_select_defs(ctx, entry_idx);
     for bi in 0..n_blocks {
         ctx.air_call_block = bi;
         let mut new_insts: Vec<Instruction> = vec![];
@@ -49,7 +50,11 @@ pub(in crate::passes) fn lower_air_calls(ctx: &mut Ctx, entry_idx: usize) -> Res
             let res = inst.result_id;
             let rty = inst.result_type;
 
-            let lowered = match lower_one(ctx, name, res, rty, &args, v4) {
+            if let Err(error) = refuse_texture_from_unforwarded_field(ctx, name, &args) {
+                ctx.air_call_body = None;
+                return Err(error);
+            }
+            let lowered = match lower_sampling_call(ctx, name, res, rty, &args, v4, &sampler_selects) {
                 Ok(lowered) => lowered,
                 Err(error) => {
                     ctx.air_call_body = None;
@@ -70,6 +75,124 @@ pub(in crate::passes) fn lower_air_calls(ctx: &mut Ctx, entry_idx: usize) -> Res
     }
     ctx.air_call_body = None;
     Ok(())
+}
+
+/// `select cond, samplerA, samplerB` results of the function, by result id. A shader that picks one of two runtime
+/// samplers with a condition (a filtering mode held in a constant) leaves the choice as a select of sampler values, which
+/// Vulkan cannot sample through.
+fn sampler_select_defs(ctx: &Ctx, entry_idx: usize) -> HashMap<Word, (Word, Word, Word)> {
+    let mut defs = HashMap::default();
+    for block in &ctx.module.functions[entry_idx].blocks {
+        for inst in &block.instructions {
+            if inst.class.opcode != Op::Select {
+                continue;
+            }
+            let ids: Vec<Word> = inst
+                .operands
+                .iter()
+                .filter_map(|o| match o {
+                    Operand::IdRef(r) => Some(*r),
+                    _ => None,
+                })
+                .collect();
+            if let (Some(result), [cond, a, b]) = (inst.result_id, ids.as_slice()) {
+                defs.insert(result, (*cond, *a, *b));
+            }
+        }
+    }
+    defs
+}
+
+/// A call that samples or gathers through a sampler chosen by a select runs once per candidate sampler and keeps the
+/// result of the chosen one: both reads are side-effect free, and the choice is the original condition.
+fn lower_sampling_call(
+    ctx: &mut Ctx,
+    name: &str,
+    res: Option<Word>,
+    rty: Option<Word>,
+    args: &[Word],
+    v4: Word,
+    selects: &HashMap<Word, (Word, Word, Word)>,
+) -> Result<Vec<Instruction>, String> {
+    let samples = name.starts_with("air.sample_") || name.starts_with("air.gather_");
+    if let (true, Some(res), Some(rty), Some(&sampler)) = (samples, res, rty, args.get(1)) {
+        if let Some(&(cond, when_true, when_false)) = selects.get(&sampler) {
+            let sty = ctx.ty_sampler();
+            let is_sampler = |ctx: &Ctx, v: Word| {
+                value_result_type(ctx, v) == Some(sty) || selects.contains_key(&v)
+            };
+            if is_sampler(ctx, when_true) && is_sampler(ctx, when_false) {
+                let (first, second) = (ctx.module.fresh_id(), ctx.module.fresh_id());
+                let mut with_true = args.to_vec();
+                with_true[1] = when_true;
+                let mut with_false = args.to_vec();
+                with_false[1] = when_false;
+                let mut out = lower_sampling_call(ctx, name, Some(first), Some(rty), &with_true, v4, selects)?;
+                out.extend(lower_sampling_call(ctx, name, Some(second), Some(rty), &with_false, v4, selects)?);
+                out.push(Instruction::new(
+                    Op::Select,
+                    Some(rty),
+                    Some(res),
+                    vec![Operand::IdRef(cond), Operand::IdRef(first), Operand::IdRef(second)],
+                ));
+                return Ok(out);
+            }
+        }
+    }
+    lower_one(ctx, name, res, rty, args, v4)
+}
+
+/// A texture a call samples, gathers, reads or writes that came out of a field of a local object as a placeholder.
+///
+/// An operand that resolves to no image is read as a texture the shader never bound, and the call folds to zero (a read) or
+/// to nothing (a write). That is true of a handle Metal itself left null, and false of a handle the emitter could not see
+/// through: a helper that was not inlined reads the texture address out of the object its caller filled, and when the
+/// caller's stores were not matched to the helper's loads the same fold hides a texture that is bound. The whole shader then
+/// draws nothing and no error says why (a terminal with its background and no text). Facts recorded for such a load say
+/// where the placeholder came from, so a call whose texture operand is one is refused, with the words the inline retry
+/// looks for; the retry inlines the helper and forwards the fields, and the call is lowered again from the text it makes.
+fn refuse_texture_from_unforwarded_field(
+    ctx: &Ctx,
+    name: &str,
+    args: &[Word],
+) -> Result<(), String> {
+    let loses_data_when_absent = name.starts_with("air.sample_texture")
+        || name.starts_with("air.sample_depth")
+        || name.starts_with("air.sample_compare_depth")
+        || name.starts_with("air.gather_")
+        || name.starts_with("air.read_texture")
+        || name.starts_with("air.read_depth")
+        || name.starts_with("air.write_texture");
+    let Some(&handle) = args.first() else {
+        return Ok(());
+    };
+    if !loses_data_when_absent
+        || !ctx
+            .emit_sidecar
+            .local_pointer_field_loads
+            .iter()
+            .any(|fact| fact.id == handle)
+    {
+        return Ok(());
+    }
+    let img = resolve_image_value(ctx, handle);
+    if !texture_operand_is_absent(ctx, img) || operand_is_variant_absent_texture(ctx, img) {
+        return Ok(());
+    }
+    let recoverable = [
+        ImageOperandUse::Sampled,
+        ImageOperandUse::Storage,
+        ImageOperandUse::Query,
+    ]
+    .into_iter()
+    .any(|use_as| recovered_image_for_private_operand(ctx, img, name, use_as).is_some());
+    if recoverable {
+        return Ok(());
+    }
+    Err(format!(
+        "{name}: the texture operand is a pointer placeholder for a field of a local object whose store was not \
+         forwarded to the load; folding the call to zero would hide a texture that may be bound"
+    ))
 }
 
 fn record_read_sampler_values(ctx: &mut Ctx, entry_idx: usize, names: &HashMap<Word, String>) {

@@ -20,6 +20,7 @@ cp "$SRC/blake3/LICENSE_CC0" "$OUT/dlss/BLAKE3-LICENSE-CC0.txt"
 cp "$SRC/zstd/LICENSE" "$OUT/dlss/nm_unzstd.LICENSE"
 cp "$SRC/assertfail_trap.ptx" "$OUT/dlss/assertfail_trap.ptx"
 cp "$(dirname "$0")/../package/dlss_fetch.sh" "$OUT/dlss_fetch.sh"
+codesign -f -s - "$OUT/dlss/dlss_cache" >/dev/null && codesign -f -s - "$OUT/dlss/nm_unzstd" >/dev/null   # every program the package carries is signed (ad hoc)
 chmod 755 "$OUT/dlss/dlss_cache" "$OUT/dlss/nm_unzstd" "$OUT/dlss_fetch.sh"
 for binary in dlss_cache nm_unzstd; do
   codesign --force --sign - --timestamp=none "$OUT/dlss/$binary"

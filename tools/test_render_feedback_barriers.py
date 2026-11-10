@@ -23,6 +23,8 @@ fixture = r'''
 #import <Metal/Metal.h>
 #include <assert.h>
 #include <stdint.h>
+#define nvlog(...) ((void)0)
+#include "nvmtl_multiview.h"
 #define NVMTL_NCOL 8
 #define NVMTL_LOAD_COLOUR(i) (1u << (i))
 #define NVMTL_LOAD_DEPTH (1u << 8)
@@ -34,7 +36,7 @@ fixture = r'''
 typedef struct { int shadow; } nvk_image;
 typedef struct { nvk_image *col[8]; uint32_t load; } nvk_pass;
 typedef struct { unsigned ncol, cfmts[8], has_depth; } Signature;
-typedef struct { unsigned has_stencil; } Pipeline;
+typedef struct { unsigned has_stencil, view_mask, fetch_copy; } Pipeline;
 typedef struct { int hz_draw_due, hz_wm_dirty; } Commands;
 @interface NVMTLTexture : NSObject { @public nvk_image *image; NVMTLTexture *parent; }
 - (nvk_image *)nvi;
@@ -61,15 +63,17 @@ static void nvmtl_bind_embedded(id cb, int set, void *d, void *b, void *o) {}
 @interface NVMTLRenderCommandEncoder : NSObject {
 @public BOOL _hzFull,_begun,_passWritten,_visActive,_visPending;
     Signature _passSig; nvk_pass _pass; uint32_t _load;
-    NVMTLCommandBuffer *_cb; NVMTLRenderPipelineState *_ps;
+    NVMTLCommandBuffer *_cb; NVMTLRenderPipelineState *_ps; unsigned _ampCount; const char *_ampWhy;
     NSDictionary *_vertexSamplers,*_fragmentSamplers;
     void *_vbufAt,*_vbufOff,*_fbufAt,*_fbufOff;
 }
+- (BOOL)nvmtlFetchCopy:(Pipeline *)pipeline;
 - (void)nvmtlCloseVisibility;
 - (void)setRenderPipelineState:(NVMTLRenderPipelineState *)p;
 - (NVMTLRenderPipelineState *)nvmtlSamplerPipeline;
 @end
 @implementation NVMTLRenderCommandEncoder
+- (BOOL)nvmtlFetchCopy:(Pipeline *)pipeline { assert(!pipeline->fetch_copy); return YES; }
 - (void)nvmtlCloseVisibility { _visActive=NO; }
 - (NVMTLRenderPipelineState *)nvmtlSamplerPipeline { return _ps; }
 - (void)setRenderPipelineState:(NVMTLRenderPipelineState *)p {
@@ -124,5 +128,5 @@ with tempfile.TemporaryDirectory(prefix='nvmtl-render-feedback-') as directory:
     tmp = Path(directory)
     (tmp / 'test.m').write_text(fixture)
     subprocess.run(['xcrun', 'clang', '-O1', '-g', '-fobjc-arc', '-fsanitize=address,undefined',
-        str(tmp / 'test.m'), '-framework', 'Foundation', '-framework', 'Metal', '-o', str(tmp / 'test')], check=True)
+        '-I'+str(ROOT/'plugin'), str(tmp / 'test.m'), '-framework', 'Foundation', '-framework', 'Metal', '-o', str(tmp / 'test')], check=True)
     subprocess.run([str(tmp / 'test')], check=True)

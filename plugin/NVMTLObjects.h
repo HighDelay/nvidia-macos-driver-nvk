@@ -9,6 +9,13 @@
 #import <Metal/Metal.h>
 #import <IOSurface/IOSurface.h>
 #include "nvmtl_vk.h"
+#include "nvmtl_multiview.h"
+#include "nvmtl_caps_query.h"
+#include "nvmtl_sparse_query.h"
+#include "nvmtl_sparse_map.h"
+#include "nvmtl_counter_heap.h"
+#include "nvmtl_icb_range.h"
+#include "nvmtl_yuv422.h"
 #include "nvmtl_cmd_refusal.h"
 
 static inline NSMutableData *nvmtl_fc_storage(NSUInteger count) {
@@ -21,6 +28,7 @@ static inline NSMutableData *nvmtl_fc_storage(NSUInteger count) {
     void *_hostPtr; size_t _hostLen; id _hostDealloc;
     NVMTLHeap *_subHeap; NSUInteger _subCharge; BOOL _aliased;
     nvk_buffer _shadow; int _syncOut; int _zshadow;
+    void *_swc;   /* nvmtl_swc*: this Shared buffer has a VRAM working copy (_b) and its system-memory side in _shadow */
     NSUInteger _dirtyLo, _dirtyHi; } @end
 #include <sched.h>
 static inline void nvmtl_buf_settle(NVMTLBuffer *b) {
@@ -31,7 +39,8 @@ static inline void nvmtl_buf_settle(NVMTLBuffer *b) {
         __atomic_store_n(&b->_zshadow, 0, __ATOMIC_RELEASE); return; }
     while (__atomic_load_n(&b->_zshadow, __ATOMIC_ACQUIRE) == 2) sched_yield();
 }
-static inline void *nvmtl_buf_cpu(NVMTLBuffer *b) { nvmtl_buf_settle(b); return b->_shadow.map ? b->_shadow.map : b->_b.map; }
+/* a buffer with a working copy and a caller pointer (_swc and _hostPtr): the caller's pages are what the CPU sees and _shadow is only the staging for the transfers */
+static inline void *nvmtl_buf_cpu(NVMTLBuffer *b) { nvmtl_buf_settle(b); if (b->_swc && b->_hostPtr) return b->_hostPtr; return b->_shadow.map ? b->_shadow.map : b->_b.map; }
 @interface NVMTLTexture : NSObject <MTLTexture> {
   @public nvk_image _i; nvk_queue *_q; IOSurfaceRef _surf; MTLPixelFormat _fmt; NSUInteger _plane;
   NVMTLHeap *_heap; NSUInteger _heapOffset;
@@ -78,7 +87,8 @@ uint64_t nvmtl_resid_for_sampler(id s);
 @interface NVMTLArrayType : NVMTLType { @public MTLDataType _elem; NSUInteger _len, _stride; } @end
 @interface NVMTLStructMember : NSObject { @public NSString *_name; NSUInteger _offset; MTLDataType _dataType; NSUInteger _argIndex; NVMTLArrayType *_arr;
   NVMTLStructType *_struct; NVMTLTextureReferenceType *_texRef; NVMTLPointerType *_ptr; } @end
-@interface NVMTLArgument : NSObject { @public NSString *_name; MTLArgumentType _type; MTLBindingAccess _access; NSUInteger _index; BOOL _active;
+// _type holds MTLArgumentType values in its underlying NSUInteger; MTLBindingType, the replacement, numbers them the same
+@interface NVMTLArgument : NSObject { @public NSString *_name; NSUInteger _type; MTLBindingAccess _access; NSUInteger _index; BOOL _active;
   NSUInteger _arrayLength, _bufAlign, _bufSize; MTLDataType _bufDataType; NVMTLStructType *_bufStruct; NVMTLPointerType *_bufPtr;
   MTLTextureType _texType; MTLDataType _texDataType; BOOL _depth; } @end
 @interface NVMTLRenderPipelineReflection : NSObject { @public NSArray *_v, *_f, *_o, *_m; } @end
@@ -88,6 +98,7 @@ NVMTLArgument *nvmtl_argument_for_buffer(NVMTLFunction *fn, NSUInteger index);
 id nvmtl_render_reflection(MTLRenderPipelineDescriptor *d);
 id nvmtl_compute_reflection(id<MTLFunction> fn);
 id<MTLFunction> nvmtl_link_kernel(MTLComputePipelineDescriptor *d, NSError **err);
+NVMTLFunction *nvmtl_kernel_with_stage_in(NVMTLFunction *fn, MTLStageInputOutputDescriptor *sd, NSError **err);
 id<MTLFunction> nvmtl_link_stage(id<MTLFunction> k, MTLLinkedFunctions *lf, NSArray *dylibs, NSError **err);
 void nvmtl_render_keep_linked(id ps, id<MTLFunction> vf, id<MTLFunction> ff);
 void nvmtl_note_compile_dylibs(id lib, NSArray *libraries);
@@ -145,6 +156,11 @@ extern id gNVMTLMainDevice;
   NSMutableArray *_signals;
   NSMutableArray *_waits;
 }
+- (void)nvmtlReleaseCapacity;
+- (void)nvmtlRecordEncodingError:(NSError *)error;
+@end
+// implemented by the EventSubmission category in NVMTLEventSync.m, so declared on that category rather than on the class
+@interface NVMTLCommandBuffer (EventSubmission)
 - (void)nvmtlReserveQueue;
 - (void)nvmtlReleaseReservation;
 - (void)nvmtlRecordWait:(id)event value:(uint64_t)value;
@@ -152,8 +168,6 @@ extern id gNVMTLMainDevice;
 - (void)nvmtlSubmitWithEvents;
 - (BOOL)nvmtlAdvancePart;
 - (BOOL)nvmtlSubmitAhead;
-- (void)nvmtlReleaseCapacity;
-- (void)nvmtlRecordEncodingError:(NSError *)error;
 - (void)nvmtlFinishCallbacks;
 @end
 @interface NVMTLDepthStencilState : NSObject <MTLDepthStencilState> { @public int _write; int _compare;
@@ -189,6 +203,12 @@ extern id gNVMTLMainDevice;
 @interface NVMTLIndirectCommandBuffer : NSObject <MTLIndirectCommandBuffer> {
   @public NSMutableArray<NVMTLIndirectCommand *> *_cmds; id<MTLDevice> _dev; NSString *_label;
 } @end
+@class NVMTLBuffer;
+@interface NVMTLIndirectCommandBuffer () { @public NVMTLBuffer *_recBuf; } @end   // GPU-encoded commands (NVMTL_GPU_ICB=1): the record array a kernel writes
+// the pipelines made with supportIndirectCommandBuffers: the candidates a GPU-written command can name
+void nvmtl_icb_register_pipeline(id ps, BOOL compute);
+NSArray *nvmtl_icb_pipelines(BOOL compute);
+int nvmtl_gpu_icb_on(void);
 #ifndef NVMTL_NBUFAT
 #define NVMTL_NBUFAT 32   /* buffer argument indices an encoder tracks (Metal has 31) */
 #endif
@@ -218,6 +238,7 @@ uint32_t nvmtl_geoms_from_descriptor(id desc, nvmtl_geom *out, uint32_t max, int
   NSMutableArray *_pixelSamplerKeys; // at most eight recent value snapshots, owned by this encoder
   // the sampler last set at each index through the plain setter; the command buffer's resources keep it alive
   __unsafe_unretained NVMTLSamplerState *_vsampAt[16], *_fsampAt[16];
+  NVMTLRenderPipelineState *_svFor; NSData *_svKey; id _svSel; // the last sampler-variant choice of this encoder (NVMTL_NO_SV_MEMO)
   // the buffer and offset bound at each vertex/fragment index, read by embedded argument binding; plain arrays because
   // Apple's GL rebinds buffers for every draw, and a dictionary of (buffer, offset) arrays allocated on each one
   NVMTLBuffer *_vbufAt[NVMTL_NBUFAT], *_fbufAt[NVMTL_NBUFAT]; NSUInteger _vbufOff[NVMTL_NBUFAT], _fbufOff[NVMTL_NBUFAT];
@@ -232,6 +253,8 @@ uint32_t nvmtl_geoms_from_descriptor(id desc, nvmtl_geom *out, uint32_t max, int
   nvk_pass _pass; nvk_rtsig _passSig; BOOL _hasRef, _refused, _passWritten;
 } @end
 @interface NVMTLRenderCommandEncoder ()
+// this class's own implementation, which the deferred encoder replays a recorded two-argument call into
+- (void)useResource:(id<MTLResource>)r usage:(MTLResourceUsage)u;
 - (BOOL)nvmtlBuildPass:(MTLRenderPassDescriptor *)d;
 - (BOOL)nvmtlBeginPassLoad:(uint32_t)load;
 - (void)nvmtlApplyDepthStencil;
@@ -326,6 +349,11 @@ BOOL nvmtl_air_grid_only(NVMTLFunction *fn);
 @interface NVMTLRenderCommandEncoder () { @public NSString *_label; } @end
 @interface NVMTLRenderCommandEncoder () { @public BOOL _dbOn; float _dbLo, _dbHi; } @end   // setDepthTestMinBound:maxBound:
 @interface NVMTLRenderCommandEncoder () { @public uint32_t _vstride[NVMTL_NVIN]; uint32_t _vstrideSet; } @end
+@interface NVMTLTexture () { @public uint32_t _y422; NSMutableData *_y422Raw; BOOL _y422GpuWritten; IOSurfaceRef _y422Surf; NSUInteger _y422Plane; uint32_t _y422Seed; BOOL _y422Synced; }
+- (void)nvmtlY422SurfaceIn;
+- (void)nvmtlY422Upload:(uint32_t)y0 rows:(uint32_t)n;
+@end   // GBGR422 / BGRG422: _y422 is the Metal format, _y422Raw the packed bytes
+@interface NVMTLRenderCommandEncoder () { @public uint32_t _ampCount; const char *_ampWhy; } @end   // setVertexAmplificationCount:viewMappings: (0 = never set = 1 view)
 @interface NVMTLComputeCommandEncoder () { @public NSString *_label; } @end
 // _tailFull: the last command this encoder recorded was a transfer helper's trailing full barrier (nvmtl_vk_cmd_xfer_tail)
 @interface NVMTLBlitCommandEncoder () { @public NSString *_label; BOOL _tailFull; } @end
@@ -386,3 +414,19 @@ extern unsigned nvmtl_apps1_resolve_miss, nvmtl_apps1_resolve_extra, nvmtl_apps1
 @end
 
 NSDictionary *nvmtl_index_argument_fields(NSArray *fields);
+// a blit that names a 4:2:2 texture is refused (its packed bytes are not the image's bytes); 1 = refused
+int nvmtl_y422_blit_refused(id tex, const char *what);
+#include "nvmtl_icb_record.h"
+// tile shading (NVMTL_TILE_SHADING=1): a tile pipeline is a render pipeline state object that holds the tile function; its compute
+// pipelines (the function rewritten for one tile size) are made on first use
+@interface NVMTLRenderPipelineState () { @public NVMTLFunction *_tileFn; NSMutableDictionary *_tileCps; uint32_t _tileSamples; } @end
+@interface NVMTLRenderCommandEncoder () { @public NVMTLRenderPipelineState *_tilePs; NVMTLTexture *_colTex[NVMTL_NCOL]; NSMutableDictionary *_tileBuf, *_tileByt, *_tileTex, *_tileTg; uint32_t _tileW, _tileH; NSMutableDictionary *_tileSmp, *_tileVft, *_tileIft, *_tileAs; } @end
+int nvmtl_tile_on(void);
+#define NVMTL_TILE_TEXTURE_BASE 120u   /* the translator's TILE_TEXTURE_BASE: attachment A is texture 120 + A */
+id nvmtl_tile_compute_pipeline(NVMTLRenderPipelineState *tp, uint32_t tw, uint32_t th, NSString **why);
+// sparse textures and heaps (NVMTL_SPARSE_TEXTURES=1)
+@interface NVMTLHeap () { @public BOOL _sparse; nvmtl_page_pool _pool; uint64_t *_poolBits; } @end
+@interface NVMTLTexture () { @public NVMTLHeap *_sparseHeap; NSMutableDictionary *_sparseTiles; int _sparseTailFirst; uint32_t _sparseTailPages; } @end
+@interface NVMTLResourceStateCommandEncoder : NSObject <MTLResourceStateCommandEncoder> { @public NVMTLCommandBuffer *_cb; NSString *_label; } @end
+id nvmtl_sparse_heap_texture(NVMTLHeap *heap, MTLTextureDescriptor *d);
+void nvmtl_sparse_update(id<MTLTexture> tex, MTLSparseTextureMappingMode mode, MTLRegion region, NSUInteger mip, NSUInteger slice);

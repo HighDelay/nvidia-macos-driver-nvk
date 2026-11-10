@@ -1955,6 +1955,9 @@ declare float @air.fast_tanpi.f32(float)
     let _ = std::fs::remove_dir_all(&tmp);
 }
 
+// NVMTL_XLATE_TRIG_FLUSH is read from the process environment; the two sin/cos tests take turns.
+static TRIG_KNOB: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 #[test]
 fn native_fast_sincos_f32_zeroes_large_arguments() {
     // Environment flags belong in a child process: other tests translate

@@ -49,8 +49,49 @@ fn apply_rsc(mut o: metal2vulkan::passes::TransformOptions) -> metal2vulkan::pas
     o
 }
 
+// The compute pipeline's stage-input layout, for the next translation on this thread. The words are
+// [attribute count, (attribute, buffer index, byte offset, MTLAttributeFormat) per attribute,
+//  layout count, (buffer index, stride, MTLStepFunction, step rate) per layout]. A malformed or unsupported layout is
+// refused (the call returns 0 and nothing is set) rather than half applied; count 0 clears it.
+thread_local! { static STAGE_IN: std::cell::Cell<metal2vulkan::passes::KernelStageIn> = std::cell::Cell::new(Default::default()); }
+#[no_mangle]
+pub extern "C" fn nvmtl_translate_set_kernel_stage_in(words: *const u32, count: u32) -> u32 {
+    use metal2vulkan::passes::{KernelStageIn, StageInAttribute, StageInFormat as F, StageInLayout, StageInStep};
+    if words.is_null() || count == 0 {
+        STAGE_IN.with(|c| c.set(KernelStageIn::default()));
+        return 1;
+    }
+    let w = unsafe { std::slice::from_raw_parts(words, count as usize) };
+    let mut out = KernelStageIn::default();
+    let mut at = 0usize;
+    let mut take = |n: usize| { let s = w.get(at..at + n); at += n; s };
+    let Some(&[na]) = take(1) else { return 0 };
+    if na as usize > out.attributes.len() { return 0; }
+    for i in 0..na as usize {
+        let Some(&[attribute, buffer_index, offset, fmt]) = take(4) else { return 0 };
+        let format = match fmt {
+            9 => F::UChar4Normalized, 25 => F::Half2, 27 => F::Half4,
+            28 => F::Float, 29 => F::Float2, 30 => F::Float3, 31 => F::Float4,
+            32 => F::Int, 33 => F::Int2, 34 => F::Int3, 35 => F::Int4,
+            36 => F::UInt, 37 => F::UInt2, 38 => F::UInt3, 39 => F::UInt4,
+            _ => return 0,
+        };
+        out.attributes[i] = Some(StageInAttribute { attribute, buffer_index, offset, format });
+    }
+    let Some(&[nl]) = take(1) else { return 0 };
+    if nl as usize > out.layouts.len() { return 0; }
+    for i in 0..nl as usize {
+        let Some(&[buffer_index, stride, step, rate]) = take(4) else { return 0 };
+        let step = match step { 0 => StageInStep::Constant, 5 => StageInStep::GridX, 6 => StageInStep::GridY, _ => return 0 };
+        out.layouts[i] = Some(StageInLayout { buffer_index, stride, step, rate: rate.max(1) });
+    }
+    STAGE_IN.with(|c| c.set(out));
+    1
+}
+
 fn apply_tg(mut o: metal2vulkan::passes::TransformOptions) -> metal2vulkan::passes::TransformOptions {
     o = apply_rsc(o);
+    o.kernel_stage_in = STAGE_IN.with(|c| c.get());
     // Bit 2 is an explicit guarantee from the plugin: no rate map can be created or bound.
     o.no_rasterization_rate_maps = CAPS.load(Ordering::Relaxed) & 4 != 0;
     // Bit 3: the plugin reserved heap slots 1..5 for typed dummies, so a null resource id may be redirected to them.
@@ -511,6 +552,95 @@ pub extern "C" fn nvmtl_translate_fc(
     }
 }
 
+/// Fixes the function-constant values of a module made by nvmtl_translate_spec (no translation, one pass over the words).
+/// `table` is the table nvmtl_translate_spec returned for that module, `table_len` its length in BYTES; the values are the
+/// ones nvmtl_translate_fc takes. A constant left out of the set reads as zero and as not defined.
+#[no_mangle]
+pub extern "C" fn nvmtl_spec_apply(
+    spv: *const u8, spv_len: usize, table: *const u8, table_len: usize,
+    indices: *const u32, sizes: *const u32, payloads: *const *const u8, n: usize,
+    out: *mut *mut u8, out_len: *mut usize, err: *mut c_char, err_len: usize,
+) -> i32 {
+    let set_err = |msg: &str| unsafe {
+        if !err.is_null() && err_len > 0 {
+            let b = msg.as_bytes();
+            let k = b.len().min(err_len - 1);
+            std::ptr::copy_nonoverlapping(b.as_ptr(), err as *mut u8, k);
+            *err.add(k) = 0;
+        }
+    };
+    if spv.is_null() || table.is_null() || out.is_null() || out_len.is_null() || table_len % 20 != 0 { return -1; }
+    if n > 0 && (indices.is_null() || sizes.is_null() || payloads.is_null()) { return -1; }
+    let tb = unsafe { std::slice::from_raw_parts(table, table_len) };
+    let w = |c: &[u8], i: usize| u32::from_le_bytes([c[i * 4], c[i * 4 + 1], c[i * 4 + 2], c[i * 4 + 3]]);
+    let entries: Vec<metal2vulkan::SpecConstantEntry> = tb.chunks_exact(20).map(|c| metal2vulkan::SpecConstantEntry {
+        fc_index: w(c, 0), lane: w(c, 1), spec_id: w(c, 2), size: w(c, 3), byte_offset: w(c, 4) }).collect();
+    let mut values: Vec<(u32, Vec<u8>)> = Vec::with_capacity(n);
+    for i in 0..n {
+        let (idx, len, ptr) = unsafe { (*indices.add(i), *sizes.add(i) as usize, *payloads.add(i)) };
+        if ptr.is_null() { set_err("null payload"); return -1; }
+        values.push((idx, unsafe { std::slice::from_raw_parts(ptr, len) }.to_vec()));
+    }
+    match metal2vulkan::apply_function_constant_values(unsafe { std::slice::from_raw_parts(spv, spv_len) }, &entries, &values) {
+        Ok(v) => {
+            let mut b = v.into_boxed_slice();
+            unsafe { *out = b.as_mut_ptr(); *out_len = b.len(); }
+            std::mem::forget(b);
+            0
+        }
+        Err(e) => { set_err(&e); -1 }
+    }
+}
+
+/// Translates AIR once, whatever its function constants will be, into SPIR-V whose function constants are
+/// specialization constants (see `specialize_function_constants_as_spec_ids`). `table` receives five u32 per constant:
+/// function-constant index, lane, SpecId, size in bytes, byte offset inside that constant's payload; `table_len` is its
+/// length in BYTES. Free both with nvmtl_translate_free. A module without function constants is an error (-1): it has
+/// nothing to specialize and goes through nvmtl_translate.
+#[no_mangle]
+pub extern "C" fn nvmtl_translate_spec(
+    ll: *const c_char, stage: *const c_char,
+    out: *mut *mut u8, out_len: *mut usize, table: *mut *mut u8, table_len: *mut usize,
+    err: *mut c_char, err_len: usize,
+) -> i32 {
+    let set_err = |msg: &str| unsafe {
+        if !err.is_null() && err_len > 0 {
+            let b = msg.as_bytes();
+            let k = b.len().min(err_len - 1);
+            std::ptr::copy_nonoverlapping(b.as_ptr(), err as *mut u8, k);
+            *err.add(k) = 0;
+        }
+    };
+    if ll.is_null() || stage.is_null() || out.is_null() || out_len.is_null() || table.is_null() || table_len.is_null() { return -1; }
+    let ll = match unsafe { CStr::from_ptr(ll) }.to_str() { Ok(s) => s, Err(_) => { set_err("ll is not utf-8"); return -1; } };
+    let st = match unsafe { CStr::from_ptr(stage) }.to_str() {
+        Ok("vertex") => Stage::Vertex, Ok("fragment") => Stage::Fragment, Ok("kernel") => Stage::Kernel,
+        _ => { set_err("stage must be vertex|fragment|kernel"); return -1; }
+    };
+    // the same visible-function closure as nvmtl_translate_fc: an unsupplied stub must not stay a live reference
+    let closed = match metal2vulkan::linked_functions::specialize_visible_function_references(
+        ll, &metal2vulkan::linked_functions::LinkedFunctionLinkage::default(),
+    ) {
+        Ok(v) => v,
+        Err(e) => { set_err(&format!("visible function reference: {e}")); return -1; }
+    };
+    let spv = match translate_one(closed.as_str(), st) { Ok(v) => v, Err(e) => { set_err(&e); return -1; } };
+    let (spv, entries) = match metal2vulkan::specialize_function_constants_as_spec_ids(&spv) {
+        Ok(v) => v,
+        Err(e) => { set_err(&e); return -1; }
+    };
+    let mut tb: Vec<u8> = Vec::with_capacity(entries.len() * 20);
+    for e in &entries {
+        for w in [e.fc_index, e.lane, e.spec_id, e.size, e.byte_offset] { tb.extend_from_slice(&w.to_le_bytes()); }
+    }
+    let mut b = spv.into_boxed_slice();
+    let mut t = tb.into_boxed_slice();
+    unsafe { *out = b.as_mut_ptr(); *out_len = b.len(); *table = t.as_mut_ptr(); *table_len = t.len(); }
+    std::mem::forget(b);
+    std::mem::forget(t);
+    0
+}
+
 #[no_mangle]
 pub extern "C" fn nvmtl_reflect(
     ll: *const c_char, stage: *const c_char,
@@ -761,6 +891,10 @@ pub unsafe extern "C" fn nvmtl_translate_samplers(
         let mut opts=formatless_options(ll,st,CAPS.load(Ordering::Relaxed)).unwrap_or_default();
         let a8=j["a8_targets"].as_u64().unwrap_or(0) as u32;   // Metal A8Unorm colour attachments, bit per location
         opts=opts.with_a8_render_targets(a8);
+        // Vertex amplification: the pipeline's render pass runs this many views (VK_KHR_multiview); the shader's view
+        // index reads the Vulkan view index. 0 or 1 keeps the single-view translation (a view index reads constant 0).
+        let amp=j["vertex_amplification"].as_u64().unwrap_or(0).min(32) as u32;
+        if amp>1 { opts.vertex_amplification_count=amp; }
         let mut used=0;
         for (idx,state) in states {
             if reflection.bindings.iter().any(|b| {
@@ -771,7 +905,7 @@ pub unsafe extern "C" fn nvmtl_translate_samplers(
                 opts=opts.with_runtime_sampler(idx,state)?;used+=1;
             }
         }
-        if used==0 && a8==0{return translate_one(ll,st)}
+        if used==0 && a8==0 && amp<=1{return translate_one(ll,st)}
         let opts=apply_tg(opts);
         translate_with_pointer_retry(ll, |ll| {
             metal2vulkan::translate_native_no_retry_constructed_with_options(ll,st,opts)
@@ -955,5 +1089,182 @@ declare { <4 x float>, i8 } @air.sample_texture_2d.v4f32(ptr addrspace(1), ptr a
         assert_eq!(workgroup_array_elements_after_sampler_translation(None), 512, "no length: the default");
         assert_eq!(workgroup_array_elements_after_sampler_translation(Some(16384)), 1024, "16384 bytes of float4");
         assert_eq!(workgroup_array_elements_after_sampler_translation(Some(4096)), 256, "4096 bytes of float4");
+    }
+}
+
+#[cfg(test)]
+mod stage_in_tests {
+    use super::*;
+
+    #[test]
+    fn a_well_formed_stage_input_layout_is_accepted_and_applied_to_the_next_translation() {
+        // one Float3 attribute at offset 0 of buffer 1, which steps by thread x with a 12-byte stride
+        let words = [1u32, 0, 1, 0, 30, 1, 1, 12, 5, 1];
+        assert_eq!(nvmtl_translate_set_kernel_stage_in(words.as_ptr(), words.len() as u32), 1);
+        let o = apply_tg(Default::default());
+        let (attribute, layout) = o.kernel_stage_in.attribute(0).expect("attribute 0 is described");
+        assert_eq!((attribute.buffer_index, attribute.offset), (1, 0));
+        assert_eq!(layout.stride, 12);
+        assert_eq!(nvmtl_translate_set_kernel_stage_in(std::ptr::null(), 0), 1);
+        assert!(apply_tg(Default::default()).kernel_stage_in.is_empty(), "count 0 clears it");
+    }
+
+    #[test]
+    fn a_truncated_or_unsupported_stage_input_layout_is_refused_and_leaves_nothing_set() {
+        let truncated = [1u32, 0, 1, 0];
+        assert_eq!(nvmtl_translate_set_kernel_stage_in(truncated.as_ptr(), 4), 0);
+        let unsupported_format = [1u32, 0, 1, 0, 26, 0];
+        assert_eq!(nvmtl_translate_set_kernel_stage_in(unsupported_format.as_ptr(), 6), 0);
+        let indexed_step = [1u32, 0, 1, 0, 30, 1, 1, 12, 7, 1];
+        assert_eq!(nvmtl_translate_set_kernel_stage_in(indexed_step.as_ptr(), 10), 0);
+        assert!(apply_tg(Default::default()).kernel_stage_in.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod vertex_amplification_tests {
+    use super::*;
+    use spirv_tools::val::Validator;
+
+    const VERT: &str = r#"
+source_filename = "synth_vertex_amplification_id"
+target datalayout = "e-p:64:64:64"
+target triple = "air64-apple-macosx14.0.0"
+
+define <4 x float> @vert(i16 %amp) local_unnamed_addr #0 {
+  %wide = zext i16 %amp to i32
+  %f = uitofp i32 %wide to float
+  %v = insertelement <4 x float> zeroinitializer, float %f, i64 0
+  ret <4 x float> %v
+}
+
+attributes #0 = { nounwind }
+
+!air.vertex = !{!0}
+!0 = !{ptr @vert, !1, !3}
+!1 = !{!2}
+!2 = !{i32 0, !"air.position", !"air.arg_type_name", !"float4", !"air.arg_name", !"pos"}
+!3 = !{!4}
+!4 = !{i32 0, !"air.amplification_id", !"air.arg_type_name", !"ushort", !"air.arg_name", !"amp"}
+"#;
+
+    fn words(b: &[u8]) -> Vec<u32> { b.chunks_exact(4).map(|c| u32::from_le_bytes(c.try_into().unwrap())).collect() }
+    // true when the module declares OpCapability MultiView (4439) and decorates a variable BuiltIn ViewIndex (4440)
+    fn multiview(w: &[u32]) -> (bool, bool) {
+        let (mut cap, mut view) = (false, false);
+        let mut i = 5;
+        while i < w.len() {
+            let (op, len) = (w[i] & 0xffff, (w[i] >> 16) as usize);
+            if len == 0 || i + len > w.len() { break; }
+            if op == 17 && len == 2 && w[i + 1] == 4439 { cap = true; }
+            if op == 71 && len >= 4 && w[i + 2] == 11 && w[i + 3] == 4440 { view = true; }
+            i += len;
+        }
+        (cap, view)
+    }
+    fn run(json: serde_json::Value) -> Vec<u32> {
+        let ll = std::ffi::CString::new(VERT).unwrap();
+        let stage = std::ffi::CString::new("vertex").unwrap();
+        let j = std::ffi::CString::new(json.to_string()).unwrap();
+        let (mut out, mut len) = (std::ptr::null_mut(), 0usize);
+        let mut err = [0i8; 2048];
+        let rc = unsafe { nvmtl_translate_samplers(ll.as_ptr(), stage.as_ptr(), j.as_ptr(), &mut out, &mut len, err.as_mut_ptr(), err.len()) };
+        assert_eq!(rc, 0, "{}", unsafe { CStr::from_ptr(err.as_ptr()) }.to_string_lossy());
+        let w = words(unsafe { std::slice::from_raw_parts(out, len) });
+        nvmtl_translate_free(out, len);
+        w
+    }
+
+    #[test]
+    fn a_pipeline_that_amplifies_gets_a_multiview_shader_and_one_that_does_not_keeps_constant_zero() {
+        let plain = run(serde_json::json!({"samplers": {}, "constants": {}}));
+        assert_eq!(multiview(&plain), (false, false), "an ordinary pipeline's shader must not use the view index");
+        let one = run(serde_json::json!({"samplers": {}, "constants": {}, "vertex_amplification": 1}));
+        assert_eq!(multiview(&one), (false, false), "count 1 is the ordinary shader");
+        let two = run(serde_json::json!({"samplers": {}, "constants": {}, "vertex_amplification": 2}));
+        assert_eq!(multiview(&two), (true, true), "count 2 must declare MultiView and read the ViewIndex builtin");
+        spirv_tools::val::create(Some(spirv_tools::TargetEnv::Vulkan_1_2)).validate(&two, None).expect("the amplified module validates");
+    }
+}
+
+// A tile function (implicit imageblock access) as AIR text for a compute kernel over the colour attachments, one threadgroup per
+// tile of tile_w x tile_h pixels. The returned text is what the ordinary translation entry points take; free it with
+// nvmtl_translate_free (len bytes). The attachments appear as read_write textures at metal index 120 + attachment.
+#[no_mangle]
+pub unsafe extern "C" fn nvmtl_tile_rewrite(
+    ll: *const c_char, tile_w: u32, tile_h: u32, samples: u32,
+    out: *mut *mut u8, out_len: *mut usize, err: *mut c_char, err_len: usize,
+) -> i32 {
+    let result = (|| -> Result<String, String> {
+        if ll.is_null() || out.is_null() || out_len.is_null() { return Err("null tile argument".into()) }
+        if tile_w == 0 || tile_h == 0 || tile_w > 1024 || tile_h > 1024 { return Err(format!("tile {tile_w}x{tile_h} is outside 1..1024")) }
+        let ll = CStr::from_ptr(ll).to_str().map_err(|e| e.to_string())?;
+        if !matches!(samples, 1 | 2 | 4 | 8) { return Err(format!("{samples} samples is not a Metal sample count")) }
+        metal2vulkan::rewrite_tile_kernel(ll, [tile_w, tile_h], samples)
+    })();
+    match result {
+        Ok(text) => { let mut b = text.into_bytes().into_boxed_slice(); *out = b.as_mut_ptr(); *out_len = b.len(); std::mem::forget(b); 0 }
+        Err(e) => { if !err.is_null() && err_len > 0 { let n = e.len().min(err_len - 1); std::ptr::copy_nonoverlapping(e.as_ptr(), err.cast(), n); *err.add(n) = 0; } -1 }
+    }
+}
+
+#[cfg(test)]
+mod tile_function_constant_tests {
+    use super::*;
+    use spirv_tools::val::Validator;
+
+    // a tile function with a function constant, in the sanitized shape (AIR from Apple's compiler, pointers opaque)
+    const TILE_FC: &str = r#"
+%"struct.metal::_imageblock_base" = type { ptr addrspace(4) }
+@_ZL5boost = internal unnamed_addr addrspace(2) global i8 undef, align 1
+@_Z5boost.MTL_FC_INIT_0_b = linkonce_odr hidden local_unnamed_addr addrspace(2) externally_initialized constant i8 undef, section "air.fc_initializer", align 1
+define void @tile_fc(%"struct.metal::_imageblock_base" %0, <2 x i16> noundef %1) local_unnamed_addr #0 {
+  %3 = tail call fast <4 x half> @air.load.implicit_imageblock.v4f16(i32 0, <2 x i16> %1, i32 0, i16 0) #4
+  %4 = load i8, ptr addrspace(2) @_ZL5boost, align 1, !range !27
+  %5 = icmp eq i8 %4, 0
+  %6 = extractelement <4 x half> %3, i64 0
+  %7 = fadd fast half %6, 0xH3800
+  %8 = insertelement <4 x half> %3, half %7, i64 0
+  %9 = select i1 %5, <4 x half> %3, <4 x half> %8
+  tail call void @air.store.implicit_imageblock.v4f16(<4 x half> %9, i32 0, <2 x i16> %1, i32 0, i16 0) #5
+  ret void
+}
+declare <4 x half> @air.load.implicit_imageblock.v4f16(i32, <2 x i16>, i32, i16) local_unnamed_addr #1
+declare void @air.store.implicit_imageblock.v4f16(<4 x half>, i32, <2 x i16>, i32, i16) local_unnamed_addr #2
+define internal void @_GLOBAL__sub_I_fc.metal() #3 section "air.static_init" {
+  %1 = load i8, ptr addrspace(2) @_Z5boost.MTL_FC_INIT_0_b, align 1, !range !27
+  store i8 %1, ptr addrspace(2) @_ZL5boost, align 1
+  ret void
+}
+!air.kernel = !{!9}
+!air.function_constants = !{!18}
+!9 = !{ptr @tile_fc, !10, !11}
+!10 = !{}
+!11 = !{!12, !14}
+!12 = !{i32 0, !"air.imageblock", !"implicit", !"air.struct_type_info", !13, !"air.arg_type_align_size", i32 8, !"air.arg_type_name", !"imageblock<Px, layout_implicit>", !"air.arg_name", !"ib"}
+!13 = !{i32 0, i32 8, i32 0, !"half4", !"c", !"air.render_target", i32 0}
+!14 = !{i32 1, !"air.thread_position_in_threadgroup", !"air.arg_type_name", !"ushort2", !"air.arg_name", !"tid"}
+!18 = !{ptr addrspace(2) @_Z5boost.MTL_FC_INIT_0_b, !"bool", !"boost", i32 0}
+!27 = !{i8 0, i8 2}
+"#;
+
+    fn words(b: &[u8]) -> Vec<u32> { b.chunks_exact(4).map(|c| u32::from_le_bytes(c.try_into().unwrap())).collect() }
+    fn translate(text: &str, constant: Option<u8>) -> Result<Vec<u32>, String> {
+        let ll = std::ffi::CString::new(text).unwrap(); let stage = std::ffi::CString::new("kernel").unwrap();
+        let (idx, size, pay) = ([0u32], [1u32], [constant.unwrap_or(0)]); let payloads = [pay.as_ptr()];
+        let (mut out, mut len) = (std::ptr::null_mut(), 0usize); let mut err = [0i8; 2048];
+        let n = usize::from(constant.is_some());
+        let rc = nvmtl_translate_fc(ll.as_ptr(), stage.as_ptr(), idx.as_ptr(), size.as_ptr(), payloads.as_ptr(), n, &mut out, &mut len, err.as_mut_ptr(), err.len());
+        if rc != 0 { return Err(unsafe { CStr::from_ptr(err.as_ptr()) }.to_string_lossy().into_owned()); }
+        let w = words(unsafe { std::slice::from_raw_parts(out, len) }); nvmtl_translate_free(out, len); Ok(w)
+    }
+
+    #[test]
+    fn a_tile_function_with_a_function_constant_specializes_after_the_rewrite() {
+        let text = metal2vulkan::rewrite_tile_kernel(TILE_FC, [32, 32], 1).expect("the rewrite keeps the function constant machinery intact");
+        assert!(text.contains("@_Z5boost.MTL_FC_INIT_0_b") && text.contains("!air.function_constants"), "the constants survive the rewrite:\n{text}");
+        let (on, off) = (translate(&text, Some(1)).expect("boost = true"), translate(&text, Some(0)).expect("boost = false"));
+        for m in [&on, &off] { spirv_tools::val::create(Some(spirv_tools::TargetEnv::Vulkan_1_2)).validate(m, None).expect("valid"); }
+        assert_ne!(on, off, "the two constant values must give two different kernels");
     }
 }

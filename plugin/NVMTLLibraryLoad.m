@@ -23,7 +23,20 @@ extern char **environ;
 void nvlog(const char *fmt, ...);
 
 #import <CommonCrypto/CommonDigest.h>
-#define NVMTL_AIR_OPT   "/Library/GPUBundles/nvmtl/air-opt"
+// The out-of-process AIR decoder: nvmtl-air-dis (plugin/air_dis.c) beside this plugin, built on the same upstream LLVM as the
+// in-process reader (air-runtime/libLLVM.dylib). Earlier packages ran a copy of the Metal toolchain's air-opt from
+// /Library/GPUBundles/nvmtl; that program is not ours to redistribute and is no longer looked for.
+static const char *nvmtl_air_dis_path(void) {
+    static char path[PATH_MAX]; static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        Dl_info info;
+        if (dladdr((const void *)&nvmtl_air_dis_path, &info) && info.dli_fname) {
+            NSString *p = [[@(info.dli_fname) stringByDeletingLastPathComponent] stringByAppendingPathComponent:@"nvmtl-air-dis"];
+            strlcpy(path, p.fileSystemRepresentation, sizeof path);
+        }
+    });
+    return path[0] ? path : NULL;
+}
 #include <unistd.h>
 #include <libproc.h>
 static inline const char *nvmtl_pick_ll(const char *staged, const char *dev) {
@@ -41,7 +54,6 @@ typedef int (*nvmtl_refl_fn)(const char *ll, const char *stage, uint8_t **out, s
 typedef int (*nvmtl_refl_fc_fn)(const char *ll, const char *stage,
                                 const uint32_t *idx, const uint32_t *sizes, const uint8_t **payloads, size_t n,
                                 uint8_t **out, size_t *out_len, char *err, size_t err_len);
-typedef void (*nvmtl_free_fn)(uint8_t *p, size_t len);
 
 typedef int (*nvmtl_lower_fn)(const uint8_t *, size_t, uint8_t **, size_t *, char *, size_t);
 static nvmtl_lower_fn xlate_lower;
@@ -51,6 +63,9 @@ typedef int (*nvmtl_to_uniform_fn)(const uint8_t *, size_t, uint8_t **, size_t *
 static nvmtl_to_uniform_fn xlate_to_uniform;   /* the table of an unlowered module moved to a Uniform block */
 static nvmtl_translate_fn xlate;
 #include "nvmtl_spvcache_name.h"
+#include "nvmtl_pretranslate.h"
+#include "nvmtl_cache_file.h"
+int nvmtl_vk_lost(void);
 // The cache tag: the translator build (sha256-<64 hex>, 71 characters) plus every mode suffix. This buffer was 80 bytes,
 // so a tag with -u2 and -p5 had room for only "-a" of "-as1", and any suffix after it was silently dropped: entries
 // translated with and without the switches that follow shared one name, and a lookup could be served a module made in
@@ -87,10 +102,19 @@ typedef int (*nvmtl_sampler_fn)(const char *, const char *, const char *, uint8_
 static nvmtl_sampler_fn xlate_sampler;
 typedef void (*nvmtl_tglen_fn)(const uint32_t *, uint32_t);
 static nvmtl_tglen_fn xlate_tglen;
+typedef uint32_t (*nvmtl_stagein_fn)(const uint32_t *, uint32_t);
+static nvmtl_stagein_fn xlate_stagein;
+static _Thread_local BOOL g_translate_variant_forced;
 static nvmtl_fc_fn xlate_fc;
+// One translation per function for every set of function constants (NVMTL_FC_SPEC=1): nvmtl_translate_spec makes a module
+// whose function constants are specialization constants, nvmtl_spec_apply fixes a set of values in it in one pass.
+typedef int (*nvmtl_spec_fn)(const char *, const char *, uint8_t **, size_t *, uint8_t **, size_t *, char *, size_t);
+typedef int (*nvmtl_spec_apply_fn)(const uint8_t *, size_t, const uint8_t *, size_t, const uint32_t *, const uint32_t *,
+                                   const uint8_t *const *, size_t, uint8_t **, size_t *, char *, size_t);
+static nvmtl_spec_fn xlate_spec;
+static nvmtl_spec_apply_fn xlate_spec_apply;
 static nvmtl_refl_fn xlate_refl;
 static nvmtl_refl_fc_fn xlate_refl_fc;
-static nvmtl_free_fn xlate_free;
 typedef int (*nvmtl_vrefs_fn)(const char *, uint8_t **, size_t *, char *, size_t);
 typedef int (*nvmtl_link_fn)(const char *, const char *, const char *const *, const char *const *, size_t, uint8_t **, size_t *, char *, size_t);
 static nvmtl_vrefs_fn xlate_vrefs;
@@ -102,13 +126,11 @@ typedef int (*nvmtl_link_ext_fn)(const char *, const char *const *, size_t, uint
 static nvmtl_link_ext_fn xlate_link_ext;
 typedef int (*nvmtl_lower_mesh_fn)(const char *, const char *, uint8_t **, size_t *, uint8_t **, size_t *, uint32_t *, char *, size_t);
 static nvmtl_lower_mesh_fn xlate_lower_mesh;
-typedef int (*nvmtl_lower_mesh2_fn)(const char *, const char *, const char *, const char *, uint32_t, uint32_t,
-    uint8_t **, size_t *, uint8_t **, size_t *, uint8_t **, size_t *, uint32_t *, char *, size_t);
-static nvmtl_lower_mesh2_fn xlate_lower_mesh2;
 typedef int (*nvmtl_promote_uniform_fn)(const uint8_t *, size_t, uint32_t, uint32_t,
                                        uint8_t **, size_t *, uint32_t *, char *, size_t);
 static nvmtl_promote_uniform_fn xlate_promote_uniform;
-static char kNVMTLTableFns;
+typedef int (*nvmtl_tile_rewrite_fn)(const char *, uint32_t, uint32_t, uint32_t, uint8_t **, size_t *, char *, size_t);
+static nvmtl_tile_rewrite_fn xlate_tile_rewrite;
 
 static int nvmtl_xlate_ready(void) {
     static dispatch_once_t once;
@@ -148,13 +170,18 @@ static int nvmtl_xlate_ready(void) {
         xlate_free = (nvmtl_free_fn)dlsym(h, "nvmtl_translate_free");
         xlate_sampler = (nvmtl_sampler_fn)dlsym(h, "nvmtl_translate_samplers");
         xlate_tglen = (nvmtl_tglen_fn)dlsym(h, "nvmtl_translate_set_threadgroup_lengths");
+        xlate_stagein = (nvmtl_stagein_fn)dlsym(h, "nvmtl_translate_set_kernel_stage_in");
         if (!xlate_tglen) nvlog("translate: no nvmtl_translate_set_threadgroup_lengths in this translator — dynamic threadgroup memory stays unsized (MPS convolutions read zeros)");
         xlate_fc = (nvmtl_fc_fn)dlsym(h, "nvmtl_translate_fc");
+        xlate_spec = (nvmtl_spec_fn)dlsym(h, "nvmtl_translate_spec");
+        xlate_spec_apply = (nvmtl_spec_apply_fn)dlsym(h, "nvmtl_spec_apply");
         xlate_vrefs = (nvmtl_vrefs_fn)dlsym(h, "nvmtl_visible_refs");
         xlate_link = (nvmtl_link_fn)dlsym(h, "nvmtl_link_visible");
         xlate_link_rt = (nvmtl_link_rt_fn)dlsym(h, "nvmtl_link_runtime");
         if (!xlate_link_rt) nvlog("translate: no nvmtl_link_runtime in this translator - visible function tables cannot be linked");
         xlate_link_ext = (nvmtl_link_ext_fn)dlsym(h, "nvmtl_link_externs");
+        xlate_tile_rewrite = (nvmtl_tile_rewrite_fn)dlsym(h, "nvmtl_tile_rewrite");
+        if (!xlate_tile_rewrite) nvlog("translate: no nvmtl_tile_rewrite in this translator - tile functions cannot be built");
         xlate_lower_mesh = (nvmtl_lower_mesh_fn)dlsym(h, "nvmtl_lower_mesh");
         if (!xlate_lower_mesh) nvlog("translate: no nvmtl_lower_mesh in this translator - mesh pipelines will be refused");
         xlate_lower_mesh2 = (nvmtl_lower_mesh2_fn)dlsym(h, "nvmtl_lower_mesh2");
@@ -181,29 +208,82 @@ static int nvmtl_xlate_ready(void) {
 
 static _Atomic unsigned long gAirHit, gAirMiss, gAirStored;
 
+static BOOL nvmtl_dir_writable(NSString *d);   // defined with the SPIR-V cache folder below
+
+// The AIR cache folder is chosen once, by writing to it. access(W_OK) answers yes for a folder a sandbox then refuses to
+// open for writing, which is what WindowServer's sandbox does to the shared folder (it allows writes only inside its own
+// named folders), so every AIR decode ran again on each boot. The first folder that takes a real write wins.
 static NSString *nvmtl_aircache_dir(void) {
     static NSString *dir; static dispatch_once_t once;
     dispatch_once(&once, ^{
         const char *e = getenv("NVMTL_AIRCACHE");
         if (e) { dir = @(e); return; }
-        if (access(NVMTL_AIRCACHE_DIR, W_OK) == 0) { dir = @NVMTL_AIRCACHE_DIR; return; }
-        NSArray *c = NSSearchPathForDirectoriesInDomains(NSCachesDirectory, NSUserDomainMask, YES);
-        NSString *base = c.count ? c[0] : NSTemporaryDirectory();
-        dir = [base stringByAppendingPathComponent:@"nvmtl/aircache"];
-        [[NSFileManager defaultManager] createDirectoryAtPath:dir withIntermediateDirectories:YES attributes:nil error:nil];
-        if (access(dir.fileSystemRepresentation, W_OK) != 0) {
-            char ucd[PATH_MAX];
-            const size_t n = confstr(_CS_DARWIN_USER_CACHE_DIR, ucd, sizeof ucd);
-            NSString *alt = (n > 0 && n <= sizeof ucd) ? [@(ucd) stringByAppendingPathComponent:@"nvmtl/aircache"] : nil;
-            if (alt) [[NSFileManager defaultManager] createDirectoryAtPath:alt withIntermediateDirectories:YES attributes:nil error:nil];
-            if (alt && access(alt.fileSystemRepresentation, W_OK) == 0) dir = alt;
-            else {
-                dir = [NSTemporaryDirectory() stringByAppendingPathComponent:@"nvmtl/aircache"];
-                [[NSFileManager defaultManager] createDirectoryAtPath:dir withIntermediateDirectories:YES attributes:nil error:nil];
-            }
+        NSMutableArray<NSString *> *c = [NSMutableArray arrayWithObject:@NVMTL_AIRCACHE_DIR];
+        NSArray *caches = NSSearchPathForDirectoriesInDomains(NSCachesDirectory, NSUserDomainMask, YES);
+        if (caches.count) [c addObject:[caches[0] stringByAppendingPathComponent:@"nvmtl/aircache"]];
+        char ucd[PATH_MAX];
+        const size_t n = confstr(_CS_DARWIN_USER_CACHE_DIR, ucd, sizeof ucd);
+        if (n > 0 && n <= sizeof ucd) {
+            [c addObject:[@(ucd) stringByAppendingPathComponent:@"nvmtl/aircache"]];
+            // WindowServer's own named folder under the user cache folder
+            [c addObject:[[@(ucd) stringByAppendingPathComponent:@(getprogname())] stringByAppendingPathComponent:@"nvmtl/aircache"]];
         }
+        NSString *tmp = [NSTemporaryDirectory() stringByAppendingPathComponent:@"nvmtl/aircache"];
+        [c addObject:tmp];
+        for (NSString *d in c) if (nvmtl_dir_writable(d)) { dir = d; return; }
+        dir = tmp;   // nothing takes a write: the stores fail and are counted, as before
     });
     return dir;
+}
+
+// The AIR of a function the translator refused is kept (bounded, see nvmtl_failed_air.h) so a log report carries the
+// shader that failed, not only the reason. Nothing leaves the machine until the user presses Send logs. The folder is the
+// first of the shared one and the process's own cache folder that takes a real write. NVMTL_NO_FAILED_AIR=1, or the file
+// /Library/GPUBundles/nvmtl/no-failed-air, turns the capture off.
+static NSString *nvmtl_failed_air_dir(void) {
+    static NSString *dir; static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        const char *off = getenv("NVMTL_NO_FAILED_AIR");
+        if ((off && *off && *off != '0') || access("/Library/GPUBundles/nvmtl/no-failed-air", F_OK) == 0) return;
+        NSMutableArray<NSString *> *c = [NSMutableArray arrayWithObject:@"/Library/GPUBundles/nvmtl/failed-air"];
+        char ucd[PATH_MAX];
+        const size_t n = confstr(_CS_DARWIN_USER_CACHE_DIR, ucd, sizeof ucd);
+        if (n > 0 && n <= sizeof ucd) {
+            [c addObject:[@(ucd) stringByAppendingPathComponent:@"nvmtl/failed-air"]];
+            [c addObject:[[@(ucd) stringByAppendingPathComponent:@(getprogname())] stringByAppendingPathComponent:@"nvmtl/failed-air"]];
+        }
+        for (NSString *d in c) if (nvmtl_dir_writable(d)) { dir = d; return; }
+    });
+    return dir;
+}
+static void nvmtl_failed_air_store(NSString *function, const char *stage, const char *reason, NSString *text) {
+    NSString *dir = nvmtl_failed_air_dir();
+    if (!dir || !text.length) return;
+    static NSLock *lock; static dispatch_once_t once; static size_t files, bytes;
+    dispatch_once(&once, ^{
+        lock = [NSLock new];
+        for (NSString *f in [[NSFileManager defaultManager] contentsOfDirectoryAtPath:dir error:nil]) {
+            NSDictionary *a = [[NSFileManager defaultManager] attributesOfItemAtPath:[dir stringByAppendingPathComponent:f] error:nil];
+            if (a) { files++; bytes += (size_t)[a fileSize]; }
+        }
+    });
+    NSData *body = [text dataUsingEncoding:NSUTF8StringEncoding];
+    char head[480], file[160];
+    if (!body || !nvmtl_failed_air_header(head, sizeof head, stage, reason)) return;
+    if (!nvmtl_failed_air_file_name(file, sizeof file, function.UTF8String, nvmtl_failed_air_digest((const char *)body.bytes, body.length))) return;
+    NSString *path = [dir stringByAppendingPathComponent:@(file)];
+    [lock lock];
+    BOOL have = [[NSFileManager defaultManager] fileExistsAtPath:path];
+    const int admit = have ? NVMTL_FAILED_AIR_ADMIT : nvmtl_failed_air_admit(files, bytes, body.length + strlen(head));
+    if (!have && admit == NVMTL_FAILED_AIR_ADMIT) {
+        NSMutableData *out = [NSMutableData dataWithBytes:head length:strlen(head)];
+        [out appendData:body];
+        if ([out writeToFile:path atomically:YES]) { files++; bytes += out.length; }
+    }
+    [lock unlock];
+    if (!have && admit != NVMTL_FAILED_AIR_ADMIT)
+        nvlog("library: refused %s not kept for the report (%s)", function.UTF8String,
+              admit == NVMTL_FAILED_AIR_TOO_BIG ? "larger than the per-function limit" : "the failed-air folder is full");
 }
 static _Atomic unsigned long gSpvHit, gSpvMiss, gSpvStored;
 static _Atomic unsigned long gFcHit, gFcMiss, gFcStored;
@@ -582,25 +662,29 @@ static BOOL nvmtl_run_air_opt(const char *input, const char *output) {
     rc = posix_spawn_file_actions_addopen(&actions, STDOUT_FILENO, "/dev/null", O_WRONLY, 0);
     if (!rc) rc = posix_spawn_file_actions_addopen(&actions, STDERR_FILENO, "/dev/null", O_WRONLY, 0);
     pid_t child = -1;
-    char *argv[] = { NVMTL_AIR_OPT, "-S", (char *)input, "-o", (char *)output, NULL };
-    if (!rc) rc = posix_spawn(&child, NVMTL_AIR_OPT, &actions, NULL, argv, environ);
+    const char *tool = nvmtl_air_dis_path();
+    if (!tool) { posix_spawn_file_actions_destroy(&actions); nvlog("library: nvmtl-air-dis not found beside the plugin"); return NO; }
+    char *argv[] = { (char *)tool, "-S", (char *)input, "-o", (char *)output, NULL };
+    // an empty environment: the tool needs none, and the caller's DYLD_ and other variables are not handed on
+    char *noenv[] = { NULL };
+    if (!rc) rc = posix_spawn(&child, tool, &actions, NULL, argv, noenv);
     posix_spawn_file_actions_destroy(&actions);
-    if (rc) { nvlog("library: air-opt spawn failed: %s", strerror(rc)); return NO; }
+    if (rc) { nvlog("library: nvmtl-air-dis spawn failed: %s", strerror(rc)); return NO; }
     uint64_t deadline = clock_gettime_nsec_np(CLOCK_MONOTONIC_RAW) + 20ull * 1000000000ull;
     int status = 0;
     for (;;) {
         pid_t result = waitpid(child, &status, WNOHANG);
         if (result == child) {
             if (WIFEXITED(status) && WEXITSTATUS(status) == 0) return YES;
-            nvlog("library: air-opt failed (wait status %d)", status); return NO;
+            nvlog("library: nvmtl-air-dis failed (wait status %d)", status); return NO;
         }
         if (result < 0 && errno != EINTR) {
-            nvlog("library: air-opt wait failed: %s", strerror(errno)); return NO;
+            nvlog("library: nvmtl-air-dis wait failed: %s", strerror(errno)); return NO;
         }
         if (clock_gettime_nsec_np(CLOCK_MONOTONIC_RAW) >= deadline) {
             kill(child, SIGKILL);
             while (waitpid(child, &status, 0) < 0 && errno == EINTR) {}
-            nvlog("library: air-opt exceeded 20-second limit"); return NO;
+            nvlog("library: nvmtl-air-dis exceeded 20-second limit"); return NO;
         }
         usleep(10000);
     }
@@ -1061,34 +1145,125 @@ NSArray<NSString *> *nvmtl_externs_of_airs(NSDictionary<NSString *, NSString *> 
     }
 }
 
+// ---- cache files that prove they are whole (nvmtl_cache_file.h) ----
+// Every translated-shader entry is written as payload+footer and read back only when the footer agrees, so a torn,
+// truncated or older-format file is a miss (and is removed), never a shader. Nothing is persisted once the device is lost
+// in this process: what was translated while the GPU was dying is not evidence of anything.
+static _Atomic unsigned long gCacheRefused, gCacheSkippedLost;
+static NSData *nvmtl_cache_read(NSString *path) {
+    if (!path) return nil;
+    size_t n = 0; nvmtl_cf_status st = NVMTL_CF_MISSING;
+    uint8_t *b = nvmtl_cf_read(path.fileSystemRepresentation, &n, &st);
+    if (!b) {
+        if (st != NVMTL_CF_MISSING) {
+            unsigned long k = atomic_fetch_add(&gCacheRefused, 1) + 1;
+            if (!(k & (k - 1))) nvlog("shader cache: refused and removed %s: %s [%lu refused so far]", path.lastPathComponent.UTF8String, nvmtl_cf_why(st), k);
+        }
+        return nil;
+    }
+    return [NSData dataWithBytesNoCopy:b length:n freeWhenDone:YES];
+}
+// 0 on success, else the errno (or -1 when the device was lost and nothing was written)
+static int nvmtl_cache_write(NSString *path, NSData *d) {
+    if (!path || !d) return EINVAL;
+    if (nvmtl_vk_lost()) {
+        unsigned long k = atomic_fetch_add(&gCacheSkippedLost, 1) + 1;
+        if (!(k & (k - 1))) nvlog("shader cache: not writing %s - the device is lost in this process [%lu skipped]", path.lastPathComponent.UTF8String, k);
+        return -1;
+    }
+    return nvmtl_cf_write(path.fileSystemRepresentation, d.bytes, d.length);
+}
+
+// ---- one translation per module (nvmtl_pretranslate.h) ----
+static void *nvmtl_flight_retain(void *p) { return (void *)CFBridgingRetain((__bridge id)p); }
+static void nvmtl_flight_release(void *p) { CFRelease(p); }
+static nvmtl_sf *nvmtl_translate_flight(void) {
+    static nvmtl_sf sf; static dispatch_once_t once;
+    dispatch_once(&once, ^{ nvmtl_sf_init(&sf, nvmtl_flight_retain, nvmtl_flight_release); });
+    return &sf;
+}
+// A module the translator refused is refused again with the same message, so neither the application nor the background
+// pass pays for the same failure twice.
+static NSCache<NSString *, NSString *> *gTranslateFailures;
+static NSString *nvmtl_translate_failure_for(NSString *key) {
+    @synchronized([NSProcessInfo processInfo]) { return [gTranslateFailures objectForKey:key]; }
+}
+static void nvmtl_translate_failure_note(NSString *key, NSString *why) {
+    if (!key || !why) return;
+    const NSUInteger bytes = 2 * (key.length + why.length) + 64;
+    if (bytes > (256u << 10)) return;
+    @synchronized([NSProcessInfo processInfo]) {
+        if (!gTranslateFailures) { gTranslateFailures = [NSCache new]; gTranslateFailures.countLimit = 256; gTranslateFailures.totalCostLimit = 256u << 10; }
+        [gTranslateFailures setObject:why forKey:key cost:bytes];
+    }
+}
+
 NSData *nvmtl_compile_library_entry(NSData *air, NSString *ll, NSString *stage, NSString *name, NSString **error) {
     if (!air || !ll || !stage || !nvmtl_xlate_ready()) { if(error)*error=@"missing entry or translator"; return nil; }
     if (air.length >= 20 && *(const uint32_t *)air.bytes == 0x07230203u) return air;
         uint64_t t0 = clock_gettime_nsec_np(CLOCK_MONOTONIC_RAW);
         NSString *spvp = nvmtl_spvcache_path(air, stage);
-        NSData *spvData = getenv("NVMTL_SPVCACHE_OFF") ? nil : [NSData dataWithContentsOfFile:spvp];
+        NSData *spvData = getenv("NVMTL_SPVCACHE_OFF") ? nil : nvmtl_cache_read(spvp);
         int hit = spvData.length >= 20 && *(const uint32_t *)spvData.bytes == 0x07230203u;
         uint8_t *spv = NULL; size_t spvn = 0; char err[512] = { 0 };
         if (hit) { gSpvHit++; nvmtl_cache_touch(spvp); }
         else {
+            // One translation per module at a time: the background pre-translation (nvmtl_pretranslate_library) and the
+            // application ask for the same modules, and whoever comes second takes the first one's result. The key is the
+            // cache file name, which names the module and the translator's modes.
+            NSString *sfKey = spvp ?: [NSString stringWithFormat:@"%p/%@", (__bridge void *)air, stage];
+            nvmtl_sf *sf = nvmtl_translate_flight();
+            void *shared = NULL;
+            const int flight = nvmtl_sf_begin(sf, sfKey.UTF8String, 1, &shared);
+            const BOOL tracked = flight > 0;
+            if (flight == 0) {
+                NSData *got = shared ? (NSData *)CFBridgingRelease(shared) : nil;
+                if (!got) {
+                    if (error) *error = nvmtl_translate_failure_for(sfKey) ?: @"translation failed (see the first FAILED line for this function)";
+                    return nil;
+                }
+                gSpvHit++;
+                return got;
+            }
+            // The owner looks at the cache once more: a translation that finished just before this caller arrived has
+            // retired its entry because its file is stored.
+            NSData *again = getenv("NVMTL_SPVCACHE_OFF") ? nil : nvmtl_cache_read(spvp);
+            if (again.length >= 20 && *(const uint32_t *)again.bytes == 0x07230203u) {
+                gSpvHit++; nvmtl_cache_touch(spvp);
+                if (tracked) nvmtl_sf_publish(sf, sfKey.UTF8String, (__bridge void *)again);
+                if (tracked) nvmtl_sf_retire(sf, sfKey.UTF8String);
+                return again;
+            }
+            NSString *known = nvmtl_translate_failure_for(sfKey);
+            if (known) {   // refused before: the same module gives the same refusal
+                if (tracked) nvmtl_sf_publish(sf, sfKey.UTF8String, NULL); if (tracked) nvmtl_sf_retire(sf, sfKey.UTF8String);
+                if (error) *error = known;
+                return nil;
+            }
             gSpvMiss++;
             if (xlate(ll.UTF8String, stage.UTF8String, &spv, &spvn, err, sizeof err) != 0) {
-                nvlog("library: translate %s (%s) FAILED: %s", name.UTF8String, stage.UTF8String, err); if (error) *error = @(err); return nil;
+                nvlog("library: translate %s (%s) FAILED: %s", name.UTF8String, stage.UTF8String, err);
+                nvmtl_translate_failure_note(sfKey, @(err));
+                nvmtl_failed_air_store(name, stage.UTF8String, err, ll);
+                if (tracked) nvmtl_sf_publish(sf, sfKey.UTF8String, NULL); if (tracked) nvmtl_sf_retire(sf, sfKey.UTF8String);
+                if (error) *error = @(err); return nil;
             }
             spvData = [NSData dataWithBytes:spv length:spvn];
+            if (tracked) nvmtl_sf_publish(sf, sfKey.UTF8String, (__bridge void *)spvData);
             if (spvp) {
-                NSData *stored = [spvData copy]; NSString *file = [spvp copy];
+                NSData *stored = [spvData copy]; NSString *file = [spvp copy]; NSString *flightKey = [sfKey copy];
                 nvmtl_cache_io(^{
-                    NSError *werr = nil;
-                    if ([stored writeToFile:file options:NSDataWritingAtomic error:&werr]) {
+                    const int werr = nvmtl_cache_write(file, stored);
+                    if (werr == 0) {
                         gSpvStored++;
-                        atomic_fetch_add_explicit(&gSpvAdded, (unsigned long long)stored.length, memory_order_relaxed);
-                    } else {
+                        atomic_fetch_add_explicit(&gSpvAdded, (unsigned long long)(stored.length + NVMTL_CF_FOOTER), memory_order_relaxed);
+                    } else if (werr > 0) {
                         nvlog("spvcache: STORE FAILED %s (%zu bytes): %s", file.lastPathComponent.UTF8String,
-                              (size_t)stored.length, werr.localizedDescription.UTF8String ?: "?");
+                              (size_t)stored.length, strerror(werr));
                     }
+                    if (tracked) nvmtl_sf_retire(nvmtl_translate_flight(), flightKey.UTF8String);   // the file (or its failure) is final
                 });
-            }
+            } else if (tracked) nvmtl_sf_retire(sf, sfKey.UTF8String);
         }
         if (spv && xlate_free) xlate_free(spv, spvn);
         { double ms = (clock_gettime_nsec_np(CLOCK_MONOTONIC_RAW) - t0) / 1e6;
@@ -1108,6 +1283,63 @@ NSData *nvmtl_compile_library_entry(NSData *air, NSString *ll, NSString *stage, 
         }
     nvlog("library entry: spvcache %lu hit, %lu miss, %lu stored", gSpvHit, gSpvMiss, gSpvStored);
     return spvData;
+}
+
+// ---- background pre-translation of a new library's shaders ----
+// NVMTL_PRETRANSLATE=1 (the Cyberpunk profile sets it): every entry point of a library the application creates is
+// translated and stored in the shader cache by a small low-priority pool, so a cold first run does not translate each
+// shader on the thread that asks. It does the work the application's own request would do, through the same
+// single-flight entry (nvmtl_compile_library_entry), so a shader is translated once whoever asks first. Only the plain
+// translation is made here: variants that depend on function-constant values, and functions that need linking at pipeline
+// creation, are left to the pipeline path. NVMTL_PRETRANSLATE=0 or unset: nothing runs. NVMTL_PRETRANSLATE_THREADS (1..4, 2).
+typedef struct { void *lib; void *name; } nvmtl_pre_job;
+static _Atomic unsigned long gPreQueued, gPreDone, gPreTranslated, gPreCached, gPreSkipped, gPreFailed;
+static nvmtl_pool *nvmtl_pre_pool(void) {
+    static nvmtl_pool pool; static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        const char *t = getenv("NVMTL_PRETRANSLATE_THREADS"); int n = t ? atoi(t) : 2;
+        nvmtl_pool_init(&pool, n < 1 ? 1 : n > 4 ? 4 : n, 1);
+    });
+    return &pool;
+}
+static void nvmtl_pre_run(void *ctx) {
+    nvmtl_pre_job *j = ctx;
+    @autoreleasepool {
+        NVMTLLibrary *lib = CFBridgingRelease(j->lib); NSString *name = CFBridgingRelease(j->name); free(j);
+        NSData *air = lib->_fns[name]; NSString *ll = lib->_airs[name], *stage = lib->_stages[name];
+        if (!air || !ll || !stage.length || ![@[@"kernel", @"vertex", @"fragment"] containsObject:stage]
+            || (air.length >= 20 && *(const uint32_t *)air.bytes == 0x07230203u)
+            || (nvmtl_air_text_flags(ll) & (NVMTL_AIRF_DYLD_TABLE | NVMTL_AIRF_ISECT_TABLE))) atomic_fetch_add(&gPreSkipped, 1);
+        else {
+            NSString *file = getenv("NVMTL_SPVCACHE_OFF") ? nil : nvmtl_spvcache_path(air, stage);
+            if (file && access(file.fileSystemRepresentation, F_OK) == 0) atomic_fetch_add(&gPreCached, 1);
+            else {
+                NSString *why = nil;
+                if (nvmtl_compile_library_entry(air, ll, stage, name, &why)) atomic_fetch_add(&gPreTranslated, 1);
+                else atomic_fetch_add(&gPreFailed, 1);   // a refusal the pipeline path may still handle (linking, constants)
+            }
+        }
+    }
+    unsigned long done = atomic_fetch_add(&gPreDone, 1) + 1;
+    if (done == atomic_load(&gPreQueued) || done % 1000 == 0)
+        nvlog("pretranslate: %lu of %lu queued shaders processed - %lu translated, %lu already cached, %lu skipped, %lu refused",
+              done, (unsigned long)atomic_load(&gPreQueued), (unsigned long)atomic_load(&gPreTranslated),
+              (unsigned long)atomic_load(&gPreCached), (unsigned long)atomic_load(&gPreSkipped), (unsigned long)atomic_load(&gPreFailed));
+}
+void nvmtl_pretranslate_library(NVMTLLibrary *lib) {
+    const char *on = getenv("NVMTL_PRETRANSLATE");
+    if (!on || strcmp(on, "1") || !lib || !lib->_fns.count || !lib->_airs || !nvmtl_xlate_ready()) return;
+    unsigned long n = 0;
+    for (NSString *name in lib->_fns) {
+        nvmtl_pre_job *j = malloc(sizeof *j); if (!j) break;
+        j->lib = (void *)CFBridgingRetain(lib); j->name = (void *)CFBridgingRetain(name);
+        atomic_fetch_add(&gPreQueued, 1);
+        if (nvmtl_pool_submit(nvmtl_pre_pool(), nvmtl_pre_run, j)) {
+            atomic_fetch_sub(&gPreQueued, 1); CFRelease(j->lib); CFRelease(j->name); free(j); break;
+        }
+        n++;
+    }
+    nvlog("pretranslate: library of %lu entry points queued for background translation", n);
 }
 
 NSDictionary<NSString *, NSData *> *nvmtl_index_metallib_uncached(NSData *lib, NSDictionary **stageOut, NSDictionary **airOut, NSMutableArray *rec)
@@ -1442,6 +1674,72 @@ static void nvmtl_fc_dump(const char *dd, NSString *ll, NSString *stage, const u
     }
     [meta writeToFile:[base stringByAppendingString:@".txt"] atomically:YES encoding:NSUTF8StringEncoding error:nil];
 }
+// NVMTL_FC_SPEC=1: function-constant variants are made from one specialization-constant module per function instead of one
+// translation each. OFF by default: the module keeps the branches the values decide, so a variant whose constants would
+// have folded the module small in a translation of its own comes out larger here; whether that costs more in the GPU
+// compiler than the translation saved has to be measured on a card.
+static BOOL nvmtl_fc_spec_on(void)
+{
+    static int on = -1;
+    if (on < 0) { const char *e = getenv("NVMTL_FC_SPEC"); on = e && e[0] == '1';
+                  nvlog("function constants: one module per function with specialization constants %s (NVMTL_FC_SPEC=%s)", on ? "on" : "off", e ?: "unset"); }
+    return on;
+}
+// The specialization-constant module of an AIR function and the table of its constants, from memory, from the cache
+// folder, or translated now (once per function and translator build). Entry layout: 'SPC1', table bytes, table, module.
+static BOOL nvmtl_fc_spec_module(NSString *ll, NSString *stage, NSData **module, NSData **table, NSString **why)
+{
+    NVMTLAirDigest *ad = nvmtl_air_state(ll);
+    NSData *tail = [@"spec1" dataUsingEncoding:NSUTF8StringEncoding];
+    NSString *path = ad ? nvmtl_spvcache_path_air(ad, tail, stage) : nil;
+    NSString *key = ad ? (path ?: nvmtl_spvcache_memo_key_air(ad, tail, stage)) : nil;
+    NSData *entry = key ? [nvmtl_memo() objectForKey:key] : nil;
+    if (!entry && path) entry = nvmtl_cache_read(path);
+    uint32_t magic = 0, tlen = 0;
+    if (entry.length >= 8) { memcpy(&magic, entry.bytes, 4); memcpy(&tlen, (const char *)entry.bytes + 4, 4); }
+    if (magic != 0x31435053u || (size_t)tlen % 20 != 0 || entry.length < 8 + (size_t)tlen + 20) {
+        static NSObject *lock; static dispatch_once_t once; dispatch_once(&once, ^{ lock = [NSObject new]; });
+        @synchronized (lock) {
+            entry = key ? [nvmtl_memo() objectForKey:key] : nil;   // another thread may have just made it
+            if (entry.length >= 8) { memcpy(&magic, entry.bytes, 4); memcpy(&tlen, (const char *)entry.bytes + 4, 4); }
+            if (!(entry.length >= 8 && magic == 0x31435053u)) {
+                uint8_t *o = NULL, *t = NULL; size_t on = 0, tn = 0; char e[512] = {0};
+                const uint64_t t0 = clock_gettime_nsec_np(CLOCK_MONOTONIC_RAW);
+                if (xlate_spec(ll.UTF8String, stage.UTF8String, &o, &on, &t, &tn, e, sizeof e) != 0) {
+                    if (why) *why = [NSString stringWithUTF8String:e[0] ? e : "no specialization-constant module"];
+                    return NO;
+                }
+                NSMutableData *made = [NSMutableData dataWithCapacity:8 + tn + on];
+                uint32_t hdr[2] = { 0x31435053u, (uint32_t)tn };
+                [made appendBytes:hdr length:8]; [made appendBytes:t length:tn]; [made appendBytes:o length:on];
+                if (xlate_free) { xlate_free(o, on); xlate_free(t, tn); }
+                entry = made; tlen = (uint32_t)tn;
+                nvlog("fc spec: made the one module for this function: %lu B, %lu constants, %.1f ms", (unsigned long)on, (unsigned long)(tn / 20),
+                      (clock_gettime_nsec_np(CLOCK_MONOTONIC_RAW) - t0) / 1e6);
+                if (path) { NSData *stored = [entry copy]; NSString *file = [path copy]; nvmtl_cache_io(^{ (void)nvmtl_cache_write(file, stored); }); }
+            }
+            if (key) [nvmtl_memo() setObject:entry forKey:key cost:entry.length];
+        }
+    }
+    if (entry.length < 8 + (size_t)tlen) { if (why) *why = @"specialization-constant cache entry is short"; return NO; }
+    *table = [entry subdataWithRange:NSMakeRange(8, tlen)];
+    *module = [entry subdataWithRange:NSMakeRange(8 + tlen, entry.length - 8 - tlen)];
+    return YES;
+}
+static NSData *nvmtl_fc_via_spec(NSString *ll, NSString *stage, const uint32_t *idx, const uint32_t *sizes,
+                                 const uint8_t *const *payloads, size_t n, NSString **why)
+{
+    NSData *module = nil, *table = nil;
+    if (!nvmtl_fc_spec_module(ll, stage, &module, &table, why)) return nil;
+    uint8_t *out = NULL; size_t out_len = 0; char e[512] = {0};
+    if (xlate_spec_apply(module.bytes, module.length, table.bytes, table.length, idx, sizes, payloads, n, &out, &out_len, e, sizeof e) != 0) {
+        if (why) *why = [NSString stringWithUTF8String:e[0] ? e : "applying the constants failed"];
+        return nil;
+    }
+    NSData *d = [NSData dataWithBytes:out length:out_len];
+    if (xlate_free) xlate_free(out, out_len);
+    return d;
+}
 NSData *nvmtl_translate_with_fc(NSString *ll, NSString *stage, const uint32_t *idx, const uint32_t *sizes,
                                 const uint8_t *const *payloads, size_t n, NSString **err)
 {
@@ -1451,6 +1749,12 @@ NSData *nvmtl_translate_with_fc(NSString *ll, NSString *stage, const uint32_t *i
     uint8_t *out = NULL; size_t out_len = 0; char e[512] = {0};
     // NVMTL_FC_DUMP_ALL=<dir>: keep every module before it is translated, including one whose translation never returns.
     nvmtl_fc_dump(getenv("NVMTL_FC_DUMP_ALL"), ll, stage, idx, sizes, payloads, n, NULL);
+    if (n > 0 && nvmtl_fc_spec_on() && xlate_spec && xlate_spec_apply) {
+        NSString *why = nil;
+        NSData *viaSpec = nvmtl_fc_via_spec(ll, stage, idx, sizes, payloads, n, &why);
+        if (viaSpec) return viaSpec;
+        nvlog("function constants: the one-module path declined (%s); translating this set", why.UTF8String ?: "?");
+    }
     if (xlate_fc(ll.UTF8String, stage.UTF8String, idx, sizes, payloads, n, &out, &out_len, e, sizeof e) != 0) {
         if (g_fc_expect_link && nvmtl_needs_visible_link(ll, @(e)))
             nvlog("function constants: this function calls linked visible functions; it is specialized when its pipeline is created");
@@ -1464,6 +1768,190 @@ NSData *nvmtl_translate_with_fc(NSString *ll, NSString *stage, const uint32_t *i
     NSData *d = [NSData dataWithBytes:out length:out_len];
     if (xlate_free) xlate_free(out, out_len);
     return d;
+}
+
+/* Function-constant warm-up.
+ * WindowServer's watchdog killed it (bug_type 409, at the login window after a driver update) while its main thread
+ * translated Core Animation's fixed_frag variants one after another, 1.3-2 s each: the update's new translator build
+ * swept every cached variant, and the main thread asked for dozens. A set that took long is recorded beside the cache
+ * (.fcwarm.v1: the AIR text's digest and the exact key bytes), and the first time a process asks for any variant of
+ * that AIR text, every other recorded variant whose cache file is missing is translated on background threads into the
+ * same cache files. The main thread then reads a file, or waits for the translation already running for it, instead
+ * of starting its own. Entries are written by the same code with the same key bytes (recorded verbatim) and the same
+ * translator, so a warmed file is the file a live miss would have written. NVMTL_FCWARM_OFF=1 turns it off. */
+#define NVMTL_FCWARM_RECORD_MS 100      // chosen: a cached variant costs < 5 ms; the uber-shader variants cost 300-2000
+#define NVMTL_FCWARM_MAX_RECORDS 1024   // chosen: WindowServer held 67 such variants; bounds the file at ~1 MB
+#define NVMTL_FCWARM_JOIN_MS 2          // a foreground miss never waits behind speculative compilation
+#define NVMTL_FCWARM_MAX_QUEUED 8u
+#define NVMTL_FCWARM_WORKERS 2u
+static int nvmtl_fcwarm_on(void) {
+    static int on = -1;
+    if (on < 0) { const char *e = getenv("NVMTL_FCWARM_OFF"); on = (e && *e && *e != '0') ? 0 : 1; }
+    return on;
+}
+static NSString *nvmtl_fcwarm_records_path(void) {
+    NSString *d = nvmtl_spvcache_dir();
+    // a dot name: the stale-build sweep removes only *.c3.spv and the trimmer skips dot files
+    return d ? [d stringByAppendingPathComponent:@".fcwarm.v1"] : nil;
+}
+static NSString *nvmtl_fcwarm_air_hex(NVMTLAirDigest *ad) {
+    CC_SHA256_CTX c = ad->_ctx;
+    unsigned char h[CC_SHA256_DIGEST_LENGTH];
+    CC_SHA256_Final(h, &c);
+    char hex[2 * CC_SHA256_DIGEST_LENGTH + 1];
+    for (int i = 0; i < CC_SHA256_DIGEST_LENGTH; i++) snprintf(hex + 2 * i, 3, "%02x", h[i]);
+    return @(hex);
+}
+static os_unfair_lock gFcWarmLock = OS_UNFAIR_LOCK_INIT;
+static NSMutableSet<NSString *> *gFcWarmRecorded;          // "<airhex> <base64 key>" lines in the file
+static NSMutableSet<NSString *> *gFcWarmKicked;            // AIR digests this process has warmed
+@interface NVMTLFcWarmJob : NSObject {
+@public NSString *path, *ll, *stage; NSMutableData *packed; size_t n;
+    dispatch_group_t group; BOOL started;
+}
+@end
+@implementation NVMTLFcWarmJob @end
+static NSMutableDictionary<NSString *, NVMTLFcWarmJob *> *gFcWarmInFlight;
+static NSMutableArray<NVMTLFcWarmJob *> *gFcWarmPending;
+static unsigned gFcWarmWorkers;
+static void nvmtl_fcwarm_load_locked(NSString *file) {
+    if (gFcWarmRecorded) return;
+    gFcWarmRecorded = [NSMutableSet set]; gFcWarmKicked = [NSMutableSet set]; gFcWarmInFlight = [NSMutableDictionary dictionary]; gFcWarmPending = [NSMutableArray array];
+    NSString *text = file ? [NSString stringWithContentsOfFile:file encoding:NSUTF8StringEncoding error:NULL] : nil;
+    for (NSString *line in [text componentsSeparatedByString:@"\n"])
+        if (line.length > 65 && [line characterAtIndex:64] == ' ' && gFcWarmRecorded.count < NVMTL_FCWARM_MAX_RECORDS)
+            [gFcWarmRecorded addObject:line];
+}
+// Remembers a slow set for the next process, once per set, appended on the cache-io queue.
+static void nvmtl_fcwarm_record(NVMTLAirDigest *ad, NSData *key) {
+    NSString *file = nvmtl_fcwarm_records_path();
+    if (!file || !ad || !key) return;
+    NSString *line = [NSString stringWithFormat:@"%@ %@", nvmtl_fcwarm_air_hex(ad), [key base64EncodedStringWithOptions:0]];
+    os_unfair_lock_lock(&gFcWarmLock);
+    nvmtl_fcwarm_load_locked(file);
+    const BOOL fresh = ![gFcWarmRecorded containsObject:line] && gFcWarmRecorded.count < NVMTL_FCWARM_MAX_RECORDS;
+    if (fresh) [gFcWarmRecorded addObject:line];
+    os_unfair_lock_unlock(&gFcWarmLock);
+    if (!fresh) return;
+    NSData *append = [[line stringByAppendingString:@"\n"] dataUsingEncoding:NSUTF8StringEncoding];
+    nvmtl_cache_io(^{
+        int fd = open(file.fileSystemRepresentation, O_WRONLY | O_APPEND | O_CREAT | O_CLOEXEC | O_NOFOLLOW, 0644);
+        if (fd < 0) return;
+        if (write(fd, append.bytes, append.length) != (ssize_t)append.length) nvlog("fc warm-up: record write failed: %s", strerror(errno));
+        close(fd);
+    });
+}
+// The key bytes back to what nvmtl_translate_with_fc takes. NO for anything nvmtl_translate_with_fc_cached never wrote.
+static BOOL nvmtl_fcwarm_unpack(NSData *key, NSString **stage, NSMutableData **packed, size_t *n) {
+    NSDictionary *cfg = [NSJSONSerialization JSONObjectWithData:key options:0 error:NULL];
+    NSDictionary *fc = [cfg isKindOfClass:[NSDictionary class]] ? cfg[@"constants"] : nil;
+    NSString *st = [cfg isKindOfClass:[NSDictionary class]] ? cfg[@"stage"] : nil;
+    if (![fc isKindOfClass:[NSDictionary class]] || ![st isKindOfClass:[NSString class]] || !fc.count || fc.count > 4096) return NO;
+    const NSUInteger cap = fc.count;
+    NSMutableData *m = [NSMutableData dataWithLength:cap * (2 * sizeof(uint32_t) + sizeof(uint8_t *) + 16)];
+    uint32_t *idx = m.mutableBytes, *sz = idx + cap;
+    const uint8_t **pay = (const uint8_t **)(sz + cap);
+    uint8_t (*bytes)[16] = (uint8_t (*)[16])(pay + cap);
+    size_t k = 0;
+    for (NSString *ks in fc) {
+        NSArray *a = fc[ks];
+        if (![ks isKindOfClass:[NSString class]] || ![a isKindOfClass:[NSArray class]] || !a.count || a.count > 16) return NO;
+        idx[k] = (uint32_t)ks.integerValue; sz[k] = (uint32_t)a.count;
+        for (NSUInteger j = 0; j < a.count; j++) {
+            if (![a[j] isKindOfClass:[NSNumber class]]) return NO;
+            bytes[k][j] = (uint8_t)[a[j] unsignedCharValue];
+        }
+        pay[k] = bytes[k]; k++;
+    }
+    *stage = st; *packed = m; *n = k;
+    return YES;
+}
+static dispatch_queue_t nvmtl_fcwarm_queue(void) {
+    static dispatch_queue_t q; static dispatch_once_t once;
+    dispatch_once(&once, ^{ q = dispatch_queue_create("nvmtl.fc-warm", dispatch_queue_attr_make_with_qos_class(DISPATCH_QUEUE_CONCURRENT, QOS_CLASS_UTILITY, 0)); });
+    return q;
+}
+// The lock protects admission and the queued -> running transition. Dispatch only workers, never one blocked block per
+// recorded variant. The caller holds gFcWarmLock; each worker owns its job through completion, including cancellation.
+static void nvmtl_fcwarm_start_locked(void) {
+    while (gFcWarmPending.count && gFcWarmWorkers < NVMTL_FCWARM_WORKERS) {
+        gFcWarmWorkers++;
+        dispatch_async(nvmtl_fcwarm_queue(), ^{
+            for (;;) { @autoreleasepool {
+                os_unfair_lock_lock(&gFcWarmLock);
+                NVMTLFcWarmJob *j = gFcWarmPending.firstObject;
+                if (!j) { gFcWarmWorkers--; os_unfair_lock_unlock(&gFcWarmLock); return; }
+                [gFcWarmPending removeObjectAtIndex:0]; j->started = YES;
+                os_unfair_lock_unlock(&gFcWarmLock);
+                const uint32_t *idx = j->packed.bytes, *sz = idx + j->n;
+                const uint8_t *const *pay = (const uint8_t *const *)(sz + j->n);
+                NSString *err = nil;
+                NSData *spv = [[NSFileManager defaultManager] fileExistsAtPath:j->path] ? nil
+                            : nvmtl_translate_with_fc(j->ll, j->stage, idx, sz, pay, j->n, &err);
+                if (spv && nvmtl_is_spirv(spv) && nvmtl_cache_write(j->path, spv) == 0) gFcStored++;
+                else if (!spv && err) nvlog("fc warm-up: a recorded set no longer translates: %s", err.UTF8String);
+                os_unfair_lock_lock(&gFcWarmLock);
+                if (gFcWarmInFlight[j->path] == j) [gFcWarmInFlight removeObjectForKey:j->path];
+                dispatch_group_leave(j->group);
+                os_unfair_lock_unlock(&gFcWarmLock);
+            } }
+        });
+    }
+}
+// The caller's own set stays on its foreground path. Retain at most eight pending jobs and two running workers across
+// all AIR modules. The existing record-file bound also bounds the set of modules considered in one process.
+static void nvmtl_fcwarm_kick(NSString *ll, NVMTLAirDigest *ad, NSString *mine) {
+    NSString *file = nvmtl_fcwarm_records_path();
+    if (!file || !ad || !nvmtl_fcwarm_on()) return;
+    NSString *hex = nvmtl_fcwarm_air_hex(ad);
+    NSMutableArray<NSData *> *keys = [NSMutableArray array];
+    os_unfair_lock_lock(&gFcWarmLock);
+    nvmtl_fcwarm_load_locked(file);
+    const BOOL first = ![gFcWarmKicked containsObject:hex];
+    if (first) {
+        if (gFcWarmKicked.count < NVMTL_FCWARM_MAX_RECORDS) [gFcWarmKicked addObject:hex];
+        for (NSString *line in gFcWarmRecorded) {
+            if (![line hasPrefix:hex]) continue;
+            NSData *key = [[NSData alloc] initWithBase64EncodedString:[line substringFromIndex:65] options:0];
+            if (key && key.length <= (64u << 10)) [keys addObject:key];
+        }
+    }
+    os_unfair_lock_unlock(&gFcWarmLock);
+    unsigned queued = 0;
+    for (NSData *key in keys) {
+        NSString *path = nvmtl_spvcache_path_air(ad, key, @"fc1");
+        if (!path || [path isEqualToString:mine] || [[NSFileManager defaultManager] fileExistsAtPath:path]) continue;
+        NSString *stage = nil; NSMutableData *packed = nil; size_t n = 0;
+        if (!nvmtl_fcwarm_unpack(key, &stage, &packed, &n)) continue;
+        os_unfair_lock_lock(&gFcWarmLock);
+        if (gFcWarmPending.count >= NVMTL_FCWARM_MAX_QUEUED) { os_unfair_lock_unlock(&gFcWarmLock); break; }
+        if (!gFcWarmInFlight[path]) {
+            NVMTLFcWarmJob *j = [NVMTLFcWarmJob new];
+            j->path = path; j->ll = ll; j->stage = stage; j->packed = packed; j->n = n;
+            j->group = dispatch_group_create(); dispatch_group_enter(j->group);
+            gFcWarmInFlight[path] = j; [gFcWarmPending addObject:j]; queued++;
+            nvmtl_fcwarm_start_locked();
+        }
+        os_unfair_lock_unlock(&gFcWarmLock);
+    }
+    if (queued) nvlog("fc warm-up: %u recorded variant(s) admitted to the bounded background queue", queued);
+}
+// Queued work is withdrawn atomically so the foreground caller compiles immediately. A running job gets only a two-ms
+// chance to finish; a slower one may finish independently while the foreground compiles. Cache publication is atomic
+// and uses the same exact key/input, so latency never depends on draining the speculative queue.
+static BOOL nvmtl_fcwarm_join(NSString *path) {
+    if (!path || !nvmtl_fcwarm_on()) return NO;
+    os_unfair_lock_lock(&gFcWarmLock);
+    NVMTLFcWarmJob *j = gFcWarmInFlight[path];
+    if (j && !j->started) {
+        [gFcWarmPending removeObjectIdenticalTo:j]; [gFcWarmInFlight removeObjectForKey:path];
+        dispatch_group_leave(j->group);
+        os_unfair_lock_unlock(&gFcWarmLock);
+        return NO;
+    }
+    os_unfair_lock_unlock(&gFcWarmLock);
+    if (!j) return NO;
+    return dispatch_group_wait(j->group, dispatch_time(DISPATCH_TIME_NOW, (int64_t)NVMTL_FCWARM_JOIN_MS * NSEC_PER_MSEC)) == 0;
 }
 
 NSData *nvmtl_translate_with_fc_cached(NSString *ll, NSString *stage, NSString *name, NSDictionary *constants,
@@ -1482,7 +1970,8 @@ NSData *nvmtl_translate_with_fc_cached(NSString *ll, NSString *stage, NSString *
     const BOOL fcCacheOn = !getenv("NVMTL_FCCACHE_OFF");
     NSData *hit = fcCacheOn ? [nvmtl_memo() objectForKey:memoKey] : nil;
     if (hit) { gFcHit++; gFcMemoHit++; nvmtl_cache_touch(path); nvmtl_fc_note_lookup(); return hit; }   // keep the trimmer's age order (off the caller)
-    if (fcCacheOn && path) hit = [NSData dataWithContentsOfFile:path];
+    if (fcCacheOn && path) hit = nvmtl_cache_read(path);
+    if (fcCacheOn && path && !hit && nvmtl_fcwarm_join(path)) hit = nvmtl_cache_read(path);
     uint32_t magic = 0;
     if (hit.length >= 20 && hit.length % 4 == 0) {
         memcpy(&magic, hit.bytes, 4);
@@ -1496,12 +1985,16 @@ NSData *nvmtl_translate_with_fc_cached(NSString *ll, NSString *stage, NSString *
             return hit;
         }
     }
+    if (fcCacheOn) nvmtl_fcwarm_kick(ll, airDigest, path);
     gFcMiss++;
     NSData *result = nvmtl_translate_with_fc(ll, stage, idx, sizes, payloads, n, err);
+    if (result && fcCacheOn && path && nvmtl_fcwarm_on() &&
+        clock_gettime_nsec_np(CLOCK_MONOTONIC_RAW) - t0 >= (uint64_t)NVMTL_FCWARM_RECORD_MS * 1000000ull)
+        nvmtl_fcwarm_record(airDigest, json);
     if (result) {
         if (path) {
             NSData *stored = [result copy]; NSString *file = [path copy];
-            nvmtl_cache_io(^{ if ([stored writeToFile:file atomically:YES]) gFcStored++; });
+            nvmtl_cache_io(^{ if (nvmtl_cache_write(file, stored) == 0) gFcStored++; });
         }
         if (fcCacheOn && nvmtl_is_spirv(result)) [nvmtl_memo() setObject:result forKey:memoKey cost:result.length];
         nvlog("fc cache: miss %s %lu B %.1f ms [%lu hit, %lu miss, %lu stored]", name.UTF8String,
@@ -1562,7 +2055,7 @@ static NSData *nvmtl_reflect_air_cached(NVMTLFunction *function, NSString *ll, N
     if (useCache) {
         NSData *mem = [nvmtl_memo() objectForKey:memoKey];
         if (mem) { ++gRfHit; nvmtl_cache_touch(path); return mem; }
-        NSData *hit = path ? [NSData dataWithContentsOfFile:path] : nil;
+        NSData *hit = nvmtl_cache_read(path);
         id obj = hit.length ? [NSJSONSerialization JSONObjectWithData:hit options:0 error:NULL] : nil;
         if ([obj isKindOfClass:[NSDictionary class]] && [(NSDictionary *)obj count]) {
             unsigned long hn = ++gRfHit; nvmtl_cache_touch(path);
@@ -1580,7 +2073,7 @@ static NSData *nvmtl_reflect_air_cached(NVMTLFunction *function, NSString *ll, N
     id obj = d.length ? [NSJSONSerialization JSONObjectWithData:d options:0 error:NULL] : nil;
     if (path && [obj isKindOfClass:[NSDictionary class]] && [(NSDictionary *)obj count]) {
         NSData *stored = [d copy]; NSString *file = [path copy];
-        nvmtl_cache_io(^{ if ([stored writeToFile:file atomically:YES]) gRfStored++; });
+        nvmtl_cache_io(^{ if (nvmtl_cache_write(file, stored) == 0) gRfStored++; });
     }
     if (useCache && [obj isKindOfClass:[NSDictionary class]] && [(NSDictionary *)obj count]) [nvmtl_memo() setObject:d forKey:memoKey cost:d.length];
     if (!(mn & (mn - 1))) nvlog("refl cache: miss %s %zu B %.2f ms [%lu hit, %lu miss, %lu stored]", function ? function->_fname.UTF8String : "?",
@@ -1607,7 +2100,7 @@ static NSData *nvmtl_translate_link_cached(NSString *ll, NSString *stage, const 
     free(ord);
     NSString *path = nvmtl_spvcache_path(key, @"lk1");
     const uint64_t t0 = clock_gettime_nsec_np(CLOCK_MONOTONIC_RAW);
-    NSData *hit = (getenv("NVMTL_LINKCACHE_OFF") || getenv("NVMTL_FCCACHE_OFF")) ? nil : [NSData dataWithContentsOfFile:path];
+    NSData *hit = (getenv("NVMTL_LINKCACHE_OFF") || getenv("NVMTL_FCCACHE_OFF")) ? nil : nvmtl_cache_read(path);
     uint32_t magic = 0;
     if (hit.length >= 20 && hit.length % 4 == 0) {
         memcpy(&magic, hit.bytes, 4);
@@ -1622,7 +2115,7 @@ static NSData *nvmtl_translate_link_cached(NSString *ll, NSString *stage, const 
     NSData *result = nvmtl_translate_with_fc(ll, stage, idx, sizes, payloads, n, err);
     if (result && path) {
         NSData *stored = [result copy]; NSString *file = [path copy];
-        nvmtl_cache_io(^{ if ([stored writeToFile:file atomically:YES]) gLkStored++; });
+        nvmtl_cache_io(^{ if (nvmtl_cache_write(file, stored) == 0) gLkStored++; });
     }
     if (!(mn & (mn - 1))) nvlog("link cache: miss %lu B %.2f ms [%lu hit, %lu miss, %lu stored]", (unsigned long)result.length,
                                 (clock_gettime_nsec_np(CLOCK_MONOTONIC_RAW) - t0) / 1e6, (unsigned long)gLkHit, mn, (unsigned long)gLkStored);
@@ -1969,9 +2462,23 @@ static void nvmtl_air_argbuf_walk(NSDictionary *nodes, NSString *node, NSUIntege
             NSString *kind = [leaf rangeOfString:@"!\"air.indirect_constant\""].location != NSNotFound ? @"constant"
                            : [leaf rangeOfString:@"!\"air.texture\""].location != NSNotFound ? @"texture"
                            : [leaf rangeOfString:@"!\"air.sampler\""].location != NSNotFound ? @"sampler" : @"other";
-            if (rel >= 0)
-                [out addObject:@{ @"buffer_index": @(bufferIndex), @"argument_index": @(baseId + (NSUInteger)rel), @"field_offset": @(baseOff + off),
-                                  @"size": @(size), @"kind": kind, @"name": name }];
+            if (rel >= 0) {
+                NSMutableDictionary *fld = [@{ @"buffer_index": @(bufferIndex), @"argument_index": @(baseId + (NSUInteger)rel), @"field_offset": @(baseOff + off),
+                                               @"size": @(size), @"kind": kind, @"name": name } mutableCopy];
+                // a pointer to another argument buffer (`constant Inner *p [[id(n)]]`): its own struct's members, so that
+                // -newArgumentEncoderForBufferAtIndex: can encode the buffer it points at
+                if (leaf && [leaf rangeOfString:@"!\"air.indirect_buffer\""].location != NSNotFound) {
+                    NSString *inner = nvmtl_air_node_after(leaf, @"air.struct_type_info", 0, NULL);
+                    if (inner) {
+                        NSMutableArray *nested = [NSMutableArray array];
+                        nvmtl_air_argbuf_walk(nodes, inner, 0, 0, depth + 1, bufferIndex, nested);
+                        fld[@"nested_fields"] = nested;
+                        fld[@"nested_size"] = @(MAX(0, nvmtl_air_i32_after(leaf, @"air.arg_type_size")));
+                        fld[@"nested_align"] = @(MAX(0, nvmtl_air_i32_after(leaf, @"air.arg_type_align_size")));
+                    }
+                }
+                [out addObject:fld];
+            }
         }
         i = j + 7;
     }
@@ -2058,7 +2565,7 @@ NSArray<NSDictionary *> *nvmtl_embedded_bindings(NVMTLFunction *function)
 }
 
 NSData *nvmtl_translate_variant_uncached(NVMTLFunction *fn, NSDictionary *states, NSDictionary *tgLen, NSString **err) {
-    if (!states.count && !tgLen.count) return fn->_spirv;
+    if (!states.count && !tgLen.count && !g_translate_variant_forced) return fn->_spirv;
     if (!fn->_air || !nvmtl_xlate_ready()) { if(err)*err=@"specialization has no AIR or translator";return nil; }
     if (states.count && !xlate_sampler) { if(err)*err=@"sampler specialization has no translator";return nil; }
     if (tgLen.count && !xlate_tglen) { if(err)*err=@"this translator cannot size threadgroup memory";return nil; }
@@ -2127,20 +2634,36 @@ NSData *nvmtl_translate_variant(NVMTLFunction *fn, NSDictionary *states, NSDicti
     NSString *memoKey=path ?: nvmtl_spvcache_memo_key_air(airDigest,json,@"variant1");   // no cache folder: the memo still serves this process
     NSData *mem=[nvmtl_memo() objectForKey:memoKey];
     if(mem){nvmtl_cache_touch(path);return mem;}
-    NSData *hit=path?[NSData dataWithContentsOfFile:path]:nil;uint32_t magic=0;
+    NSData *hit=nvmtl_cache_read(path);uint32_t magic=0;
     if(hit.length>=20 && hit.length%4==0){memcpy(&magic,hit.bytes,4);if(magic==0x07230203){[nvmtl_memo() setObject:hit forKey:memoKey cost:hit.length];nvlog("variant cache: hit %s",fn->_fname.UTF8String);return hit;}}
     NSData *result=nvmtl_translate_variant_uncached(fn,states,tgLen,err);
     if(result){if(nvmtl_is_spirv(result))[nvmtl_memo() setObject:result forKey:memoKey cost:result.length];NSData *keep=[result copy];NSString *file=[path copy],*entry=[fn->_fname copy];
-        nvmtl_cache_io(^{BOOL stored=file&&[keep writeToFile:file atomically:YES];nvlog("variant cache: miss %s stored=%d",entry.UTF8String,stored);});}
+        nvmtl_cache_io(^{BOOL stored=file&&nvmtl_cache_write(file,keep)==0;nvlog("variant cache: miss %s stored=%d",entry.UTF8String,stored);});}
     return result;
 }
 
+// A tile function's AIR rewritten into a compute kernel over the colour attachments (tile_rewrite in the translator).
+NSString *nvmtl_tile_rewrite(NSString *ll, uint32_t tw, uint32_t th, uint32_t samples, NSString **err) {
+    if (!nvmtl_xlate_ready() || !xlate_tile_rewrite) { if (err) *err = @"this translator cannot rewrite tile functions"; return nil; }
+    uint8_t *out = NULL; size_t len = 0; char e[512] = {0};
+    if (xlate_tile_rewrite(ll.UTF8String, tw, th, samples, &out, &len, e, sizeof e)) { if (err) *err = @(e); return nil; }
+    NSString *text = [[NSString alloc] initWithBytes:out length:len encoding:NSUTF8StringEncoding]; xlate_free(out, len);
+    return text;
+}
 // a8: Metal A8Unorm colour attachments (bit per location); the variant writes the output's alpha into the R8 lane.
+NSData *nvmtl_translate_samplers_amp(NVMTLFunction *fn, NSDictionary *states, uint32_t a8, uint32_t amp, NSString **err);
 NSData *nvmtl_translate_samplers(NVMTLFunction *fn, NSDictionary *states, uint32_t a8, NSString **err) {
-    if (!states.count && !a8) return fn->_spirv;
-    if (!fn->_air && !states.count) return fn->_spirv;   // already a specialised variant (no AIR kept): nothing more to apply
+    return nvmtl_translate_samplers_amp(fn, states, a8, 0, err);
+}
+// amp: the vertex amplification count of the pipeline (2 or more makes a multiview variant; 0 and 1 are the ordinary shader).
+NSData *nvmtl_translate_samplers_amp(NVMTLFunction *fn, NSDictionary *states, uint32_t a8, uint32_t amp, NSString **err) {
+    if (amp < 2) amp = 0;
+    if (!states.count && !a8 && !amp) return fn->_spirv;
+    if (!fn->_air && !states.count && !amp) return fn->_spirv;   // already a specialised variant (no AIR kept): nothing more to apply
     if (!fn->_air || !nvmtl_xlate_ready() || !xlate_sampler) { if(err)*err=@"sampler specialization has no AIR or translator";return nil; }
-    NSData *json=[NSJSONSerialization dataWithJSONObject:@{@"samplers":states ?: @{},@"constants":fn->_fc ?: @{},@"a8_targets":@(a8)} options:NSJSONWritingSortedKeys error:NULL];
+    NSMutableDictionary *jd=[@{@"samplers":states ?: @{},@"constants":fn->_fc ?: @{},@"a8_targets":@(a8)} mutableCopy];
+    if (amp) jd[@"vertex_amplification"]=@(amp);   // part of the key text below, so a variant never shares a cache entry with the plain shader
+    NSData *json=[NSJSONSerialization dataWithJSONObject:jd options:NSJSONWritingSortedKeys error:NULL];
     NSString *s=[[NSString alloc] initWithData:json encoding:NSUTF8StringEncoding];
     // The same variant is asked for whenever a pipeline state is made again with these shaders and samplers (RenderBox
     // makes one for each icon it draws, in a fresh process per app). Kept like the compute variants.
@@ -2151,13 +2674,13 @@ NSData *nvmtl_translate_samplers(NVMTLFunction *fn, NSDictionary *states, uint32
     if(memoKey){
         NSData *mem=[nvmtl_memo() objectForKey:memoKey];
         if(mem){nvmtl_cache_touch(path);return mem;}
-        NSData *hit=path?[NSData dataWithContentsOfFile:path]:nil;
+        NSData *hit=nvmtl_cache_read(path);
         if(nvmtl_is_spirv(hit)){[nvmtl_memo() setObject:hit forKey:memoKey cost:hit.length];return hit;}
     }
     uint8_t *out=NULL;size_t len=0;char e[1024]={0};
     if(xlate_sampler(fn->_air.UTF8String,fn->_stage.UTF8String,s.UTF8String,&out,&len,e,sizeof e)) {if(err)*err=@(e);return nil;}
     NSData *data=[NSData dataWithBytes:out length:len];xlate_free(out,len);
-    if(memoKey && nvmtl_is_spirv(data)){[nvmtl_memo() setObject:data forKey:memoKey cost:data.length];if(path){NSData *keep=[data copy];NSString *file=[path copy];nvmtl_cache_io(^{[keep writeToFile:file atomically:YES];});}}
+    if(memoKey && nvmtl_is_spirv(data)){[nvmtl_memo() setObject:data forKey:memoKey cost:data.length];if(path){NSData *keep=[data copy];NSString *file=[path copy];nvmtl_cache_io(^{(void)nvmtl_cache_write(file,keep);});}}
     return data;
 }
 
@@ -2245,6 +2768,77 @@ static NSString *nvmtl_link_candidate_air(NVMTLFunction *cf, NSString **nameOut)
     if (nameOut) *nameOut = name;
     return air;
 }
+// A compute pipeline with a stage-input descriptor reads its [[stage_in]] attributes from the application's buffer by that
+// descriptor's strides, offsets and formats, so its kernel is translated again with the layout (the kernel's own SPIR-V reads
+// each member as an array of its own type at its natural size). A kernel with no stage-in attribute, or a descriptor that
+// names none, keeps the function it has. NVMTL_NO_KERNEL_STAGE_IN=1 turns this off. A layout the translator cannot carry
+// (a format or step function outside its table, an unaligned stride) fails the pipeline with the reason instead of
+// running it with the wrong strides.
+static NSError *nvmtl_stagein_err(NSString *m) {
+    nvlog("%s", m.UTF8String);
+    return [NSError errorWithDomain:MTLLibraryErrorDomain code:MTLLibraryErrorCompileFailure userInfo:@{NSLocalizedDescriptionKey: m}];
+}
+static NSString *nvmtl_stage_in_words(MTLStageInputOutputDescriptor *sd, NSMutableData *words) {
+    uint32_t a[1 + 16 * 4 + 1 + 31 * 4]; uint32_t n = 1, na = 0; uint32_t bufs[31]; uint32_t nb = 0;
+    for (NSUInteger i = 0; i < 16; i++) {
+        MTLAttributeDescriptor *at = [sd.attributes objectAtIndexedSubscript:i];
+        if (at.format == MTLAttributeFormatInvalid) continue;
+        if (at.bufferIndex >= 31) return [NSString stringWithFormat:@"stage-in attribute %lu uses buffer %lu", (unsigned long)i, (unsigned long)at.bufferIndex];
+        a[n++] = (uint32_t)i; a[n++] = (uint32_t)at.bufferIndex; a[n++] = (uint32_t)at.offset; a[n++] = (uint32_t)at.format; na++;
+        BOOL seen = NO; for (uint32_t k = 0; k < nb; k++) if (bufs[k] == at.bufferIndex) seen = YES;
+        if (!seen) bufs[nb++] = (uint32_t)at.bufferIndex;
+    }
+    if (!na) return nil;
+    a[0] = na;
+    a[n++] = nb;
+    for (uint32_t k = 0; k < nb; k++) {
+        MTLBufferLayoutDescriptor *ly = [sd.layouts objectAtIndexedSubscript:bufs[k]];
+        a[n++] = bufs[k]; a[n++] = (uint32_t)ly.stride; a[n++] = (uint32_t)ly.stepFunction; a[n++] = (uint32_t)ly.stepRate;
+    }
+    [words appendBytes:a length:n * sizeof a[0]];
+    return nil;
+}
+
+NVMTLFunction *nvmtl_kernel_with_stage_in(NVMTLFunction *fn, MTLStageInputOutputDescriptor *sd, NSError **err)
+{
+    if (err) *err = nil;
+    if (!sd || !fn || getenv("NVMTL_NO_KERNEL_STAGE_IN")) return fn;
+    if (!fn->_air.length || fn->_needsLink) return fn;     // linked kernels were translated by the linker; not carried here
+    NSMutableData *words = [NSMutableData new];
+    NSString *bad = nvmtl_stage_in_words(sd, words);
+    if (bad) { if (err) *err = nvmtl_stagein_err([NSString stringWithFormat:@"compute stage-in: %@", bad]); return nil; }
+    if (!words.length) return fn;
+    if (!nvmtl_xlate_ready() || !xlate_stagein) {
+        if (err) *err = nvmtl_stagein_err(@"compute stage-in: this translator has no nvmtl_translate_set_kernel_stage_in - rebuild nvmtl_translate");
+        return nil;
+    }
+    NSString *key = [NSString stringWithFormat:@"stagein:%lu:%@:%@:%@", (unsigned long)fn->_air.hash, fn->_fname, [words base64EncodedStringWithOptions:0], fn->_fc ?: @""];
+    static NSMutableDictionary *memo; static dispatch_once_t once; dispatch_once(&once, ^{ memo = [NSMutableDictionary new]; });
+    NSData *spirv;
+    @synchronized (memo) { spirv = memo[key]; }
+    if (!spirv) {
+        if (!xlate_stagein(words.bytes, (uint32_t)(words.length / 4))) {
+            if (err) *err = nvmtl_stagein_err(@"compute stage-in: the translator refused the stage-input layout (a format, step function or count it does not carry)");
+            return nil;
+        }
+        NSString *why = nil;
+        g_translate_variant_forced = YES;
+        spirv = nvmtl_translate_variant_uncached(fn, @{}, @{}, &why);
+        g_translate_variant_forced = NO;
+        xlate_stagein(NULL, 0);
+        if (!spirv) {
+            if (err) *err = nvmtl_stagein_err([NSString stringWithFormat:@"compute stage-in: translating \"%@\" with the layout failed: %@", fn->_fname, why ?: @"unknown"]);
+            return nil;
+        }
+        @synchronized (memo) { memo[key] = spirv; }
+        nvlog("compute stage-in: \"%s\" translated with %lu word(s) of layout -> %lu B", fn->_fname.UTF8String, (unsigned long)(words.length / 4), (unsigned long)spirv.length);
+    }
+    NVMTLFunction *sf = [NVMTLFunction new];
+    sf->_spirv = spirv; sf->_fname = fn->_fname; sf->_stage = fn->_stage; sf->_air = fn->_air; sf->_fc = fn->_fc;
+    sf->_lib = fn->_lib; sf->_fcv = fn->_fcv; sf->_specName = fn->_specName; sf->_needsLink = NO;
+    return sf;
+}
+
 id<MTLFunction> nvmtl_link_kernel(MTLComputePipelineDescriptor *d, NSError **err)
 {
     return nvmtl_link_stage(d.computeFunction, d.linkedFunctions, d.preloadedLibraries, err);
@@ -2255,7 +2849,6 @@ id<MTLFunction> nvmtl_link_kernel(MTLComputePipelineDescriptor *d, NSError **err
 - (dispatch_data_t)airData NS_RETURNS_RETAINED;
 @end
 static char kNVMTLCompileDylibs;
-static char kNVMTLRenderVert, kNVMTLRenderFrag;
 
 static BOOL nvmtl_mtlb_dynamic(NSData *raw, NSString **nameOut, NSArray<NSString *> **importsOut)
 {
@@ -2695,14 +3288,12 @@ id<MTLFunction> nvmtl_link_stage(id<MTLFunction> kIn, MTLLinkedFunctions *lfIn, 
 }
 
 #pragma mark - batch 39: function pointers (compute)
-@interface NVMTLFunctionHandle : NSObject <MTLFunctionHandle> { @public uint64_t _id; id<MTLFunction> _fn; } @end
 @implementation NVMTLFunctionHandle
 - (MTLFunctionType)functionType { return _fn.functionType; }
 - (NSString *)name { return _fn.name; }
 - (id<MTLDevice>)device { return (id<MTLDevice>)gNVMTLMainDevice; }
 - (MTLResourceID)gpuResourceID { MTLResourceID r; r._impl = _id; return r; }
 @end
-@interface NVMTLVisibleFunctionTable : NSObject <MTLVisibleFunctionTable> { @public id<MTLBuffer> _buf; NSUInteger _n; } @end
 @implementation NVMTLVisibleFunctionTable
 - (void)setFunction:(id<MTLFunctionHandle>)f atIndex:(NSUInteger)i {
     { static _Atomic unsigned n; if (atomic_fetch_add(&n, 1) < 8) { FILE *lg = fopen(nvmtl_log_path(), "a"); if (lg) { fprintf(lg, "pid %d NVMTL: RTBIND visible table setFunction slot %lu <- %s id %llu\n", getpid(), (unsigned long)i, f ? [[f name] UTF8String] : "nil", f && [(id)f isKindOfClass:[NVMTLFunctionHandle class]] ? (unsigned long long)((NVMTLFunctionHandle *)f)->_id : 0ull); fclose(lg); } } }
@@ -2710,7 +3301,7 @@ id<MTLFunction> nvmtl_link_stage(id<MTLFunction> kIn, MTLLinkedFunctions *lfIn, 
     if (f && ![(id)f isKindOfClass:[NVMTLFunctionHandle class]]) { nvlog("visible function table: foreign handle %s - slot %lu set NULL", NSStringFromClass([(id)f class]).UTF8String, (unsigned long)i); f = nil; }
     ((uint64_t *)_buf.contents)[i] = f ? ((NVMTLFunctionHandle *)f)->_id : 0;
 }
-- (void)setFunctions:(const id<MTLFunctionHandle> __nullable [])fs withRange:(NSRange)r {
+- (void)setFunctions:(const id<MTLFunctionHandle> [])fs withRange:(NSRange)r {
     for (NSUInteger k = 0; k < r.length; k++) [self setFunction:fs[k] atIndex:r.location + k];
 }
 - (MTLResourceID)gpuResourceID { MTLResourceID r; r._impl = _buf.gpuAddress; return r; }
@@ -2731,9 +3322,6 @@ id<MTLFunction> nvmtl_link_stage(id<MTLFunction> kIn, MTLLinkedFunctions *lfIn, 
 - (id)forwardingTargetForSelector:(SEL)s { return _buf; }
 @end
 
-#define NVMTL_IFT_BUFFERS 31
-#define NVMTL_IFT_OPAQUE 0x8000000000000001ull
-@interface NVMTLIntersectionFunctionTable : NSObject <MTLIntersectionFunctionTable> { @public id<MTLBuffer> _buf; NSUInteger _n; } @end
 @implementation NVMTLIntersectionFunctionTable
 - (uint64_t *)nvmtlWords { return (uint64_t *)_buf.contents; }
 - (void)setFunction:(id<MTLFunctionHandle>)f atIndex:(NSUInteger)i {
@@ -2741,7 +3329,7 @@ id<MTLFunction> nvmtl_link_stage(id<MTLFunction> kIn, MTLLinkedFunctions *lfIn, 
     if (f && ![(id)f isKindOfClass:[NVMTLFunctionHandle class]]) { nvlog("intersection function table: foreign handle %s - slot %lu set NULL", NSStringFromClass([(id)f class]).UTF8String, (unsigned long)i); f = nil; }
     [self nvmtlWords][NVMTL_IFT_BUFFERS + i] = f ? ((NVMTLFunctionHandle *)f)->_id : 0;
 }
-- (void)setFunctions:(const id<MTLFunctionHandle> __nullable [])fs withRange:(NSRange)r {
+- (void)setFunctions:(const id<MTLFunctionHandle> [])fs withRange:(NSRange)r {
     for (NSUInteger k = 0; k < r.length; k++) [self setFunction:fs[k] atIndex:r.location + k];
 }
 - (void)setOpaqueTriangleIntersectionFunctionWithSignature:(MTLIntersectionFunctionSignature)s atIndex:(NSUInteger)i {
@@ -2761,14 +3349,14 @@ id<MTLFunction> nvmtl_link_stage(id<MTLFunction> kIn, MTLLinkedFunctions *lfIn, 
     if (i >= NVMTL_IFT_BUFFERS) { nvlog("intersection function table: setBuffer atIndex:%lu beyond Metal's 31 - IGNORED", (unsigned long)i); return; }
     [self nvmtlWords][i] = b ? b.gpuAddress + off : 0;
 }
-- (void)setBuffers:(const id<MTLBuffer> __nullable [])bs offsets:(const NSUInteger [])offs withRange:(NSRange)r {
+- (void)setBuffers:(const id<MTLBuffer> [])bs offsets:(const NSUInteger [])offs withRange:(NSRange)r {
     for (NSUInteger k = 0; k < r.length; k++) [self setBuffer:bs[k] offset:offs[k] atIndex:r.location + k];
 }
 - (void)setVisibleFunctionTable:(id<MTLVisibleFunctionTable>)t atBufferIndex:(NSUInteger)i {
     if (t && ![(id)t isKindOfClass:[NVMTLVisibleFunctionTable class]]) { nvlog("intersection function table: foreign visible table %s - REFUSED", NSStringFromClass([(id)t class]).UTF8String); return; }
     [self setBuffer:t ? ((NVMTLVisibleFunctionTable *)t)->_buf : nil offset:0 atIndex:i];
 }
-- (void)setVisibleFunctionTables:(const id<MTLVisibleFunctionTable> __nullable [])ts withBufferRange:(NSRange)r {
+- (void)setVisibleFunctionTables:(const id<MTLVisibleFunctionTable> [])ts withBufferRange:(NSRange)r {
     for (NSUInteger k = 0; k < r.length; k++) [self setVisibleFunctionTable:ts[k] atBufferIndex:r.location + k];
 }
 - (MTLResourceID)gpuResourceID { MTLResourceID r; r._impl = _buf.gpuAddress; return r; }
@@ -2797,77 +3385,6 @@ static id<MTLIntersectionFunctionTable> nvmtl_ift_new(MTLIntersectionFunctionTab
     nvlog("%s: intersection function table, %lu slot(s) -> %p", what, (unsigned long)n, t);
     return t;
 }
-@implementation NVMTLComputePipelineState (RT3IntersectionTables)
-- (id<MTLIntersectionFunctionTable>)newIntersectionFunctionTableWithDescriptor:(MTLIntersectionFunctionTableDescriptor *)d {
-    return nvmtl_ift_new(d, "newIntersectionFunctionTableWithDescriptor");
-}
-@end
-@implementation NVMTLComputeCommandEncoder (RT3IntersectionTables)
-- (void)setIntersectionFunctionTable:(id<MTLIntersectionFunctionTable>)t atBufferIndex:(NSUInteger)i {
-    if (t && ![(id)t isKindOfClass:[NVMTLIntersectionFunctionTable class]]) { nvlog("setIntersectionFunctionTable: foreign %s - REFUSED", NSStringFromClass([(id)t class]).UTF8String); return; }
-    [self setBuffer:t ? ((NVMTLIntersectionFunctionTable *)t)->_buf : nil offset:0 atIndex:i];
-}
-- (void)setIntersectionFunctionTables:(const id<MTLIntersectionFunctionTable> __nullable [])ts withBufferRange:(NSRange)r {
-    for (NSUInteger k = 0; k < r.length; k++) [self setIntersectionFunctionTable:ts[k] atBufferIndex:r.location + k];
-}
-@end
-@implementation NVMTLComputePipelineState (B39FunctionPointers)
-- (id<MTLFunctionHandle>)functionHandleWithFunction:(id<MTLFunction>)f {
-    NSArray *c = _function ? objc_getAssociatedObject(_function, &kNVMTLTableFns) : nil;
-    for (NSUInteger k = 0; k < c.count; k++) {
-        NVMTLFunction *cf = c[k];
-        if (cf == (id)f || [cf.name isEqualToString:f.name]) {
-            NVMTLFunctionHandle *h = [NVMTLFunctionHandle new]; h->_id = k + 1; h->_fn = f; return h;
-        }
-    }
-    // THE PIPELINE'S OWN FUNCTION IS PART OF THE PIPELINE, so a handle for it is a legitimate
-    //    request and nil is what stopped ray tracing. MEASURED on the game: it asks only for the ray
-    //    generation shader's own handle (rgs_diffuse_main / rgs_importance_main), and on nil it goes no
-    //    further - setVisibleFunctionTable, setIntersectionFunctionTable and setAccelerationStructure are
-    //    called ZERO times in a whole run, so without a handle it cannot fill the table it just built and
-    //    abandons RT entirely.
-    // The id handed back is the table's RESERVED UNBOUND INDEX 0, not a dispatch slot: the linkage
-    //    sizes the table as entries+1 with candidates at 1..N, so 0 is "no entry here" and the shader's
-    //    own null test is what reads it. That is the truthful answer - the entry is not one of the table's
-    //    candidates and the dispatcher has no case for it - and it lets the game proceed instead of
-    //    giving up. If a frame shows the ray generation shader needed to be CALLED through this slot, the
-    //    fix is to add the entry to the dispatcher, not to invent a slot number here.
-    if (_function && (f == (id)_function
-                      || [f.name isEqualToString:((NVMTLFunction *)_function)->_fname])) {
-        NVMTLFunctionHandle *h = [NVMTLFunctionHandle new];
-        h->_id = 0;
-        h->_fn = f;
-        nvlog("functionHandleWithFunction: \"%s\" IS this pipeline's own function - handle with the reserved unbound index 0 (%lu table candidate(s), none of them the entry)",
-              f.name.UTF8String, (unsigned long)c.count);
-        return h;
-    }
-    // "(0 linked)" alone cannot distinguish "the candidate list was never attached" from "this pipeline
-    // was built from a different function object than the one it was attached to", so name both.
-    nvlog("functionHandleWithFunction: \"%s\" is not a linked function of this pipeline (%lu linked, pipeline function \"%s\") -> nil",
-          f.name.UTF8String, (unsigned long)c.count,
-          _function ? ((NVMTLFunction *)_function)->_fname.UTF8String : "(none)");
-    return nil;
-}
-- (id<MTLVisibleFunctionTable>)newVisibleFunctionTableWithDescriptor:(MTLVisibleFunctionTableDescriptor *)d {
-    NSUInteger n = d.functionCount ? d.functionCount : 1;
-    id<MTLBuffer> b = [(id<MTLDevice>)gNVMTLMainDevice newBufferWithLength:n * sizeof(uint64_t) options:MTLResourceStorageModeShared];
-    if (!b) { nvlog("newVisibleFunctionTableWithDescriptor: %lu slots - buffer allocation FAILED -> nil", (unsigned long)n); return nil; }
-    memset(b.contents, 0, n * sizeof(uint64_t));
-    NVMTLVisibleFunctionTable *t = [NVMTLVisibleFunctionTable new]; t->_buf = b; t->_n = n;
-    nvlog("newVisibleFunctionTableWithDescriptor: %lu slot(s) -> %p", (unsigned long)n, t);
-    return t;
-}
-@end
-@implementation NVMTLComputeCommandEncoder (B39FunctionPointers)
-- (void)setVisibleFunctionTable:(id<MTLVisibleFunctionTable>)t atBufferIndex:(NSUInteger)i {
-    if (t && ![(id)t isKindOfClass:[NVMTLVisibleFunctionTable class]]) { nvlog("setVisibleFunctionTable: foreign %s - REFUSED", NSStringFromClass([(id)t class]).UTF8String); return; }
-    { static _Atomic unsigned n; if (atomic_fetch_add(&n, 1) < 4) { FILE *lg = fopen(nvmtl_log_path(), "a"); if (lg) { fprintf(lg, "pid %d NVMTL: RTBIND setVisibleFunctionTable index %lu %s\n", getpid(), (unsigned long)i, t ? "table" : "nil"); fclose(lg); } } }
-    [self setBuffer:t ? ((NVMTLVisibleFunctionTable *)t)->_buf : nil offset:0 atIndex:i];
-}
-- (void)setVisibleFunctionTables:(const id<MTLVisibleFunctionTable> __nullable [])ts withBufferRange:(NSRange)r {
-    for (NSUInteger k = 0; k < r.length; k++) [self setVisibleFunctionTable:ts[k] atBufferIndex:r.location + k];
-}
-@end
 
 #pragma mark - batch 41: dynamic libraries (objects), render-stage function tables, binary archives
 @implementation NVMTLDynamicLibrary
@@ -2926,63 +3443,7 @@ static id<MTLVisibleFunctionTable> nvmtl_vft_new(MTLVisibleFunctionTableDescript
     nvlog("%s newVisibleFunctionTableWithDescriptor: %lu slot(s) -> %p", what, (unsigned long)n, t);
     return t;
 }
-@implementation NVMTLRenderPipelineState (B41FunctionPointers)
-- (id<MTLFunctionHandle>)functionHandleWithFunction:(id<MTLFunction>)f stage:(MTLRenderStages)st {
-    const void *key = (st & MTLRenderStageFragment) ? &kNVMTLRenderFrag : (st & MTLRenderStageVertex) ? &kNVMTLRenderVert : NULL;
-    id lf = key ? objc_getAssociatedObject(self, key) : nil;
-    NSArray *c = lf ? objc_getAssociatedObject(lf, &kNVMTLTableFns) : nil;
-    for (NSUInteger k = 0; k < c.count; k++) {
-        NVMTLFunction *cf = c[k];
-        if (cf == (id)f || [cf.name isEqualToString:f.name]) {
-            NVMTLFunctionHandle *h = [NVMTLFunctionHandle new]; h->_id = k + 1; h->_fn = f; return h;
-        }
-    }
-    nvlog("render functionHandleWithFunction: \"%s\" stage %lu is not a linked function of this pipeline (%lu linked) -> nil",
-          f.name.UTF8String, (unsigned long)st, (unsigned long)c.count);
-    return nil;
-}
-- (id<MTLVisibleFunctionTable>)newVisibleFunctionTableWithDescriptor:(MTLVisibleFunctionTableDescriptor *)d stage:(MTLRenderStages)st {
-    return nvmtl_vft_new(d, (st & MTLRenderStageFragment) ? "fragment" : "vertex");
-}
-@end
-@implementation NVMTLRenderCommandEncoder (B41FunctionPointers)
-- (void)setFragmentVisibleFunctionTable:(id<MTLVisibleFunctionTable>)t atBufferIndex:(NSUInteger)i {
-    if (t && ![(id)t isKindOfClass:[NVMTLVisibleFunctionTable class]]) { nvlog("setFragmentVisibleFunctionTable: foreign %s - REFUSED", NSStringFromClass([(id)t class]).UTF8String); return; }
-    [self setFragmentBuffer:t ? ((NVMTLVisibleFunctionTable *)t)->_buf : nil offset:0 atIndex:i];
-}
-- (void)setFragmentVisibleFunctionTables:(const id<MTLVisibleFunctionTable> __nullable [])ts withBufferRange:(NSRange)r {
-    for (NSUInteger k = 0; k < r.length; k++) [self setFragmentVisibleFunctionTable:ts[k] atBufferIndex:r.location + k];
-}
-- (void)setVertexVisibleFunctionTable:(id<MTLVisibleFunctionTable>)t atBufferIndex:(NSUInteger)i {
-    if (t && ![(id)t isKindOfClass:[NVMTLVisibleFunctionTable class]]) { nvlog("setVertexVisibleFunctionTable: foreign %s - REFUSED", NSStringFromClass([(id)t class]).UTF8String); return; }
-    [self setVertexBuffer:t ? ((NVMTLVisibleFunctionTable *)t)->_buf : nil offset:0 atIndex:i];
-}
-- (void)setVertexVisibleFunctionTables:(const id<MTLVisibleFunctionTable> __nullable [])ts withBufferRange:(NSRange)r {
-    for (NSUInteger k = 0; k < r.length; k++) [self setVertexVisibleFunctionTable:ts[k] atBufferIndex:r.location + k];
-}
-@end
 
-@implementation NVMTLRenderPipelineState (RT3IntersectionTables)
-- (id<MTLIntersectionFunctionTable>)newIntersectionFunctionTableWithDescriptor:(MTLIntersectionFunctionTableDescriptor *)d stage:(MTLRenderStages)st {
-    return nvmtl_ift_new(d, "render newIntersectionFunctionTableWithDescriptor");
-}
-@end
-@implementation NVMTLRenderCommandEncoder (RT3IntersectionTables)
-- (void)setVertexIntersectionFunctionTable:(id<MTLIntersectionFunctionTable>)t atBufferIndex:(NSUInteger)i {
-    if (t && ![(id)t isKindOfClass:[NVMTLIntersectionFunctionTable class]]) { nvlog("setVertexIntersectionFunctionTable: foreign %s - REFUSED", NSStringFromClass([(id)t class]).UTF8String); return; }
-    [self setVertexBuffer:t ? ((NVMTLIntersectionFunctionTable *)t)->_buf : nil offset:0 atIndex:i];
-}
-- (void)setFragmentIntersectionFunctionTable:(id<MTLIntersectionFunctionTable>)t atBufferIndex:(NSUInteger)i {
-    if (t && ![(id)t isKindOfClass:[NVMTLIntersectionFunctionTable class]]) { nvlog("setFragmentIntersectionFunctionTable: foreign %s - REFUSED", NSStringFromClass([(id)t class]).UTF8String); return; }
-    [self setFragmentBuffer:t ? ((NVMTLIntersectionFunctionTable *)t)->_buf : nil offset:0 atIndex:i];
-}
-- (void)setVertexIntersectionFunctionTables:(const id<MTLIntersectionFunctionTable> __nullable [])ts withBufferRange:(NSRange)r {
-    for (NSUInteger k = 0; k < r.length; k++) [self setVertexIntersectionFunctionTable:ts[k] atBufferIndex:r.location + k];
-}
-- (void)setFragmentIntersectionFunctionTables:(const id<MTLIntersectionFunctionTable> __nullable [])ts withBufferRange:(NSRange)r {
-    for (NSUInteger k = 0; k < r.length; k++) [self setFragmentIntersectionFunctionTable:ts[k] atBufferIndex:r.location + k];
-}
-@end
 @interface NVMTLBinaryArchive : NSObject <MTLBinaryArchive> { @public NSMutableSet<NSString *> *_keys; NSString *_label; } @end
 static uint64_t nvmtl_fnv64(const char *s) {
     uint64_t h = 1469598103934665603ull;
@@ -3079,20 +3540,15 @@ static NSArray *nvmtl_lowered_stage_arguments(NVMTLComputePipelineState *kp, NVM
     NSDictionary *names = nvmtl_air_names(stageFn);
     NSMutableArray *out = [NSMutableArray new];
     for (NVMTLArgument *a in nvmtl_arguments_for_function(kp->_function)) {
-        if (a->_type == MTLArgumentTypeBuffer && (a->_index == 29 || a->_index == 30)) continue;
-        NSString *k = [NSString stringWithFormat:@"%@:%lu", a->_type == MTLArgumentTypeBuffer ? @"buffer" : a->_type == MTLArgumentTypeTexture ? @"texture" : @"sampler", (unsigned long)a->_index];
+        if (a->_type == MTLBindingTypeBuffer && (a->_index == 29 || a->_index == 30)) continue;
+        NSString *k = [NSString stringWithFormat:@"%@:%lu", a->_type == MTLBindingTypeBuffer ? @"buffer" : a->_type == MTLBindingTypeTexture ? @"texture" : @"sampler", (unsigned long)a->_index];
         NSString *n = names[@"args"][k]; if ([n isKindOfClass:[NSString class]]) a->_name = n;
         [out addObject:a];
     }
     return out;
 }
-@interface NVMTLMeshInfo : NSObject { @public NVMTLComputePipelineState *_k, *_o, *_ki; NVMTLRenderPipelineState *_psi;
-    uint32_t _lay[9], _layi[9], _cap, _capi; NSString *_name, *_indWhy;
-    NSUInteger _tgMesh, _tgObj, _gridAsk;
-} @end
 @implementation NVMTLMeshInfo @end
-static char kNVMTLMeshInfo;
-static NSUInteger nvmtl_mesh_stage_max(NVMTLMeshInfo *_Nonnull mi, NVMTLComputePipelineState *_Nullable k, NSUInteger rec, const char *_Nonnull stage) {
+static NSUInteger nvmtl_mesh_stage_max(NVMTLMeshInfo *mi, NVMTLComputePipelineState *k, NSUInteger rec, const char *stage) {
     if (rec) return rec;
     if (k) return [k maxTotalThreadsPerThreadgroup];
     uint32_t inv = 0; nvmtl_vk_limits(NULL, NULL, NULL, &inv, NULL);
@@ -3112,9 +3568,7 @@ static NSUInteger nvmtl_mesh_stage_max(NVMTLMeshInfo *_Nonnull mi, NVMTLComputeP
 - (NSUInteger)maxTotalThreadgroupsPerMeshGrid { NVMTLMeshInfo *mi = objc_getAssociatedObject(self, &kNVMTLMeshInfo);
     return !mi ? 0 : mi->_o ? mi->_cap : (mi->_gridAsk ?: 1024); }
 @end
-@interface NVMTLMeshBinds : NSObject { @public NSMutableDictionary *_obj, *_mesh; } @end
 @implementation NVMTLMeshBinds @end
-static char kNVMTLMeshBinds;
 
 static id nvmtl_mesh_fail(NSError **err, NSString *why) {
     nvlog("mesh pipeline: %s", why.UTF8String);
@@ -3153,307 +3607,4 @@ static NSString *nvmtl_mesh_text(uint8_t *p, size_t n) {
     return s;
 }
 
-@implementation NVMTLDevice (B42Mesh)
-- (NVMTLRenderPipelineState *)nvmtlMeshVariant:(NVMTLFunction *)mf object:(NVMTLFunction *)of fragment:(id)ffn desc:(MTLMeshRenderPipelineDescriptor *)md
-    mode:(uint32_t)mode cap:(uint32_t)cap layout:(uint32_t *)lay kernel:(NVMTLComputePipelineState **)kout object:(NVMTLComputePipelineState **)oout why:(NSString **)why {
-    uint8_t *oo = NULL, *ko = NULL, *vo = NULL; size_t on = 0, kn = 0, vn = 0; char e[1024] = {0};
-    if (xlate_lower_mesh2(of ? of->_air.UTF8String : NULL, of ? of->_fname.UTF8String : NULL, mf->_air.UTF8String, mf->_fname.UTF8String,
-                          mode, cap, &oo, &on, &ko, &kn, &vo, &vn, lay, e, sizeof e) != 0 || !ko || !vo || (mode == 1 && !oo)) {
-        if (oo) xlate_free(oo, on); if (ko) xlate_free(ko, kn); if (vo) xlate_free(vo, vn);
-        *why = [NSString stringWithFormat:@"\"%@\"%@ did not lower (mode %u): %s", mf->_fname, of ? [NSString stringWithFormat:@" behind \"%@\"", of->_fname] : @"", mode, e[0] ? e : "no reason given"];
-        return nil;
-    }
-    NSString *oll = nvmtl_mesh_text(oo, on), *kll = nvmtl_mesh_text(ko, kn), *vll = nvmtl_mesh_text(vo, vn);
-    if (!kll || !vll || (mode == 1 && !oll)) { *why = @"lowered AIR is not UTF-8"; return nil; }
-    if (getenv("NVMTL_MESH_DUMP")) {
-        NSString *dir = @(getenv("NVMTL_MESH_DUMP"));
-        [[NSFileManager defaultManager] createDirectoryAtPath:dir withIntermediateDirectories:YES attributes:nil error:NULL];
-        [kll writeToFile:[dir stringByAppendingFormat:@"/%@.m%u.kernel.ll", mf->_fname, mode] atomically:YES encoding:NSUTF8StringEncoding error:NULL];
-        [vll writeToFile:[dir stringByAppendingFormat:@"/%@.m%u.vertex.ll", mf->_fname, mode] atomically:YES encoding:NSUTF8StringEncoding error:NULL];
-        if (oll) [oll writeToFile:[dir stringByAppendingFormat:@"/%@.object.ll", of->_fname] atomically:YES encoding:NSUTF8StringEncoding error:NULL];
-    }
-    NSString *w = nil; NSError *pe = nil;
-    if (mode == 1) {
-        NSData *ospv = nvmtl_mesh_translate_fc(oll, @"kernel", of->_fc, &w);
-        if (!ospv) { *why = [NSString stringWithFormat:@"object \"%@\" lowered kernel did not translate: %@", of->_fname, w]; return nil; }
-        NVMTLFunction *okf = [NVMTLFunction new];
-        okf->_spirv = ospv; okf->_fname = of->_fname; okf->_stage = @"kernel"; okf->_air = oll; okf->_lib = of->_lib;
-        NVMTLComputePipelineState *op = (NVMTLComputePipelineState *)[self newComputePipelineStateWithFunction:okf error:&pe];
-        if (!op) { *why = [NSString stringWithFormat:@"object \"%@\": no compute pipeline (%@)", of->_fname, pe.localizedDescription ?: @"?"]; return nil; }
-        *oout = op;
-    }
-    NSData *kspv = nvmtl_mesh_translate_fc(kll, @"kernel", mf->_fc, &w);
-    if (!kspv) { *why = [NSString stringWithFormat:@"\"%@\" lowered kernel (mode %u) did not translate: %@", mf->_fname, mode, w]; return nil; }
-    NSData *vspv = nvmtl_mesh_translate(vll, @"vertex", &w);
-    if (!vspv) { *why = [NSString stringWithFormat:@"\"%@\" generated vertex (mode %u) did not translate: %@", mf->_fname, mode, w]; return nil; }
-    NVMTLFunction *kf = [NVMTLFunction new];
-    kf->_spirv = kspv; kf->_fname = mf->_fname; kf->_stage = @"kernel"; kf->_air = kll; kf->_lib = mf->_lib;
-    NVMTLComputePipelineState *kp = (NVMTLComputePipelineState *)[self newComputePipelineStateWithFunction:kf error:&pe];
-    if (!kp) { *why = [NSString stringWithFormat:@"\"%@\" lowered kernel: no compute pipeline (%@)", mf->_fname, pe.localizedDescription ?: @"?"]; return nil; }
-    NVMTLFunction *vf = [NVMTLFunction new];
-    vf->_spirv = vspv; vf->_fname = @"m2v_mesh_vs"; vf->_stage = @"vertex"; vf->_air = vll; vf->_lib = mf->_lib;
-    MTLRenderPipelineDescriptor *d = [MTLRenderPipelineDescriptor new];
-    if (md.label) d.label = md.label;
-    d.vertexFunction = vf; d.fragmentFunction = ffn;
-    for (NSUInteger i = 0; i < 8; i++) {
-        MTLRenderPipelineColorAttachmentDescriptor *a = md.colorAttachments[i], *b = d.colorAttachments[i];
-        b.pixelFormat = a.pixelFormat; b.blendingEnabled = a.blendingEnabled; b.writeMask = a.writeMask;
-        b.sourceRGBBlendFactor = a.sourceRGBBlendFactor; b.destinationRGBBlendFactor = a.destinationRGBBlendFactor; b.rgbBlendOperation = a.rgbBlendOperation;
-        b.sourceAlphaBlendFactor = a.sourceAlphaBlendFactor; b.destinationAlphaBlendFactor = a.destinationAlphaBlendFactor; b.alphaBlendOperation = a.alphaBlendOperation;
-    }
-    d.depthAttachmentPixelFormat = md.depthAttachmentPixelFormat; d.stencilAttachmentPixelFormat = md.stencilAttachmentPixelFormat;
-    d.rasterSampleCount = md.rasterSampleCount ?: 1; d.alphaToCoverageEnabled = md.alphaToCoverageEnabled;
-    d.fragmentLinkedFunctions = md.fragmentLinkedFunctions;
-    d.supportIndirectCommandBuffers = md.supportIndirectCommandBuffers;
-    NVMTLRenderPipelineState *ps = (NVMTLRenderPipelineState *)[self newRenderPipelineStateWithDescriptor:d error:&pe];
-    if (!ps) { *why = [NSString stringWithFormat:@"\"%@\" + \"%@\": no render pipeline (%@)", mf->_fname, [ffn name], pe.localizedDescription ?: @"?"]; return nil; }
-    *kout = kp;
-    nvlog("mesh pipeline: \"%s\" mode %u -> %s%lu B kernel + %lu B vertex SPIR-V, block %u B (NV %u NP %u k %u) tr %u rs %u cap %u",
-          mf->_fname.UTF8String, mode, of ? "object + " : "", (unsigned long)kspv.length, (unsigned long)vspv.length,
-          lay[6], lay[0], lay[1], lay[2], lay[7], lay[8], cap);
-    return ps;
-}
-- (id<MTLRenderPipelineState>)newRenderPipelineStateWithMeshDescriptor:(MTLMeshRenderPipelineDescriptor *)md options:(MTLPipelineOption)o
-    reflection:(MTLAutoreleasedRenderPipelineReflection *)r error:(NSError **)err {
-    if (err) *err = nil;
-    if (r) *r = nil;
-    id ofn = md.objectFunction, mfn = md.meshFunction, ffn = md.fragmentFunction;
-    if (![mfn isKindOfClass:[NVMTLFunction class]] || ![ffn isKindOfClass:[NVMTLFunction class]] || (ofn && ![ofn isKindOfClass:[NVMTLFunction class]]))
-        return nvmtl_mesh_fail(err, [NSString stringWithFormat:@"REFUSED - these functions are not ours: object %s, mesh %s, fragment %s",
-                                     ofn ? object_getClassName(ofn) : "-", object_getClassName(mfn), object_getClassName(ffn)]);
-    NVMTLFunction *mf = (NVMTLFunction *)mfn, *of = (NVMTLFunction *)ofn;
-    if (![mf->_stage isEqualToString:@"mesh"] || !mf->_air.length)
-        return nvmtl_mesh_fail(err, [NSString stringWithFormat:@"REFUSED - \"%@\" is a %@ function with %lu B of AIR, not a [[mesh]] function",
-                                     mf->_fname, mf->_stage, (unsigned long)mf->_air.length]);
-    if (of && (![of->_stage isEqualToString:@"object"] || !of->_air.length))
-        return nvmtl_mesh_fail(err, [NSString stringWithFormat:@"REFUSED - \"%@\" is a %@ function with %lu B of AIR, not an [[object]] function",
-                                     of->_fname, of->_stage, (unsigned long)of->_air.length]);
-    { NSString *tw = nvmtl_tg_mismatch(mf, md.maxTotalThreadsPerMeshThreadgroup, "mesh pipeline");
-      if (!tw && of) tw = nvmtl_tg_mismatch(of, md.maxTotalThreadsPerObjectThreadgroup, "object pipeline");
-      if (tw) return nvmtl_fail(err, tw); }
-    if (!nvmtl_xlate_ready() || !xlate_lower_mesh2)
-        return nvmtl_mesh_fail(err, @"REFUSED - this translator has no nvmtl_lower_mesh2 (rebuild nvmtl_translate-merge with patch_xl_mesh2.py)");
-    uint32_t cap = of ? (uint32_t)(md.maxTotalThreadgroupsPerMeshGrid ?: 1024) : 0;
-    NVMTLMeshInfo *mi = [NVMTLMeshInfo new]; mi->_name = mf->_fname; mi->_cap = cap;
-    NSString *why = nil; NVMTLComputePipelineState *kp = nil, *op = nil;
-    NVMTLRenderPipelineState *ps = [self nvmtlMeshVariant:mf object:of fragment:ffn desc:md mode:(of ? 1 : 0) cap:cap layout:mi->_lay kernel:&kp object:&op why:&why];
-    if (!ps) return nvmtl_mesh_fail(err, why);
-    mi->_k = kp; mi->_o = op;
-    mi->_tgMesh = nvmtl_air_max_tg(mf) ?: md.maxTotalThreadsPerMeshThreadgroup;
-    mi->_tgObj = of ? (nvmtl_air_max_tg(of) ?: md.maxTotalThreadsPerObjectThreadgroup) : 0;
-    mi->_gridAsk = md.maxTotalThreadgroupsPerMeshGrid;
-    ps->_reqMesh = nvmtl_desc_size(md, @selector(requiredThreadsPerMeshThreadgroup));
-    ps->_reqObj = of ? nvmtl_desc_size(md, @selector(requiredThreadsPerObjectThreadgroup)) : MTLSizeMake(0, 0, 0);
-    if (!of) {
-        mi->_capi = 16384;
-        NVMTLComputePipelineState *ki = nil, *unused = nil; NSString *w2 = nil;
-        NVMTLRenderPipelineState *psi = [self nvmtlMeshVariant:mf object:nil fragment:ffn desc:md mode:2 cap:mi->_capi layout:mi->_layi kernel:&ki object:&unused why:&w2];
-        if (psi) { mi->_psi = psi; mi->_ki = ki; }
-        else { mi->_indWhy = w2; nvlog("mesh pipeline: \"%s\" has NO indirect variant (%s) - drawMeshThreadgroupsWithIndirectBuffer: will be refused; direct draws are unaffected",
-                                       mf->_fname.UTF8String, w2.UTF8String); }
-    }
-    objc_setAssociatedObject(ps, &kNVMTLMeshInfo, mi, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-    nvlog("mesh pipeline: \"%s\"%s%s / fragment %s -> %p (indirect variant %s, %lu+%lu constant(s))", mf->_fname.UTF8String, of ? " behind " : "",
-          of ? of->_fname.UTF8String : "", [[ffn name] UTF8String], (__bridge void *)ps, of ? "n/a" : (mi->_psi ? "yes" : "NO"),
-          (unsigned long)(of ? of->_fc.count : 0), (unsigned long)mf->_fc.count);
-    if (r && ps) {
-        NVMTLRenderPipelineReflection *rr = [NVMTLRenderPipelineReflection new];
-        rr->_o = of ? nvmtl_lowered_stage_arguments(mi->_o, of) : @[];
-        rr->_m = nvmtl_lowered_stage_arguments(mi->_k, mf);
-        rr->_f = nvmtl_arguments_for_function((NVMTLFunction *)ffn);
-        *r = (MTLRenderPipelineReflection *)rr;
-    }
-    return ps;
-}
-- (void)newRenderPipelineStateWithMeshDescriptor:(MTLMeshRenderPipelineDescriptor *)md options:(MTLPipelineOption)o
-    completionHandler:(MTLNewRenderPipelineStateWithReflectionCompletionHandler)h {
-    NSError *e = nil; MTLRenderPipelineReflection *rf = nil;
-    id<MTLRenderPipelineState> ps = [self newRenderPipelineStateWithMeshDescriptor:md options:o reflection:&rf error:&e];
-    if (h) dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{ h(ps, rf, e); });
-}
-@end
 
-@implementation NVMTLRenderCommandEncoder (B42Mesh)
-static NSMutableDictionary *nvmtl_mesh_table(NVMTLRenderCommandEncoder *e, BOOL object) {
-    NVMTLMeshBinds *mb = objc_getAssociatedObject(e, &kNVMTLMeshBinds);
-    if (!mb) { mb = [NVMTLMeshBinds new]; mb->_obj = [NSMutableDictionary new]; mb->_mesh = [NSMutableDictionary new];
-               objc_setAssociatedObject(e, &kNVMTLMeshBinds, mb, OBJC_ASSOCIATION_RETAIN_NONATOMIC); }
-    return object ? mb->_obj : mb->_mesh;
-}
-static void nvmtl_mesh_note(NVMTLRenderCommandEncoder *e, BOOL object, char kind, NSUInteger i, NSArray *v) {
-    NSString *k = [NSString stringWithFormat:@"%c%lu", kind, (unsigned long)i];
-    NSMutableDictionary *t = nvmtl_mesh_table(e, object);
-    if (v) t[k] = v; else [t removeObjectForKey:k];
-}
-static void nvmtl_mesh_note_offset(NVMTLRenderCommandEncoder *e, BOOL object, NSUInteger i, NSUInteger off) {
-    NSMutableDictionary *t = nvmtl_mesh_table(e, object); NSString *k = [NSString stringWithFormat:@"b%lu", (unsigned long)i];
-    NSArray *v = t[k];
-    if (v.count == 2) t[k] = @[v[0], @(off)];
-    else nvlog("mesh: set%sBufferOffset at %lu with no buffer bound there - ignored", object ? "Object" : "Mesh", (unsigned long)i);
-}
-static void nvmtl_mesh_replay(NVMTLRenderCommandEncoder *e, NSDictionary *t) {
-    for (NSString *k in t) {
-        NSArray *v = t[k]; unichar c = [k characterAtIndex:0]; NSUInteger i = (NSUInteger)[[k substringFromIndex:1] integerValue];
-        if (c == 'b') {
-            if ([v[0] isKindOfClass:[NSData class]]) [e setVertexBytes:[v[0] bytes] length:[v[0] length] atIndex:i];
-            else [e setVertexBuffer:v[0] offset:[v[1] unsignedIntegerValue] atIndex:i];
-        } else if (c == 't') [e setVertexTexture:v[0] atIndex:i];
-        else if (c == 's') {
-            if (v.count == 3) [e setVertexSamplerState:v[0] lodMinClamp:[v[1] floatValue] lodMaxClamp:[v[2] floatValue] atIndex:i];
-            else [e setVertexSamplerState:v[0] atIndex:i];
-        }
-    }
-}
-#define NVMTL_MESH_BINDERS(Stage, OBJ, FWD) \
-- (void)set##Stage##Buffer:(id<MTLBuffer>)b offset:(NSUInteger)off atIndex:(NSUInteger)i { nvmtl_mesh_note(self, OBJ, 'b', i, b ? @[b, @(off)] : nil); if (FWD) [self setVertexBuffer:b offset:off atIndex:i]; } \
-- (void)set##Stage##BufferOffset:(NSUInteger)off atIndex:(NSUInteger)i { nvmtl_mesh_note_offset(self, OBJ, i, off); if (FWD) [self setVertexBufferOffset:off atIndex:i]; } \
-- (void)set##Stage##Buffers:(const id<MTLBuffer> __unsafe_unretained [])b offsets:(const NSUInteger *)o withRange:(NSRange)r { \
-    for (NSUInteger k = 0; k < r.length; k++) [self set##Stage##Buffer:b[k] offset:o[k] atIndex:r.location + k]; } \
-- (void)set##Stage##Bytes:(const void *)b length:(NSUInteger)l atIndex:(NSUInteger)i { \
-    nvmtl_mesh_note(self, OBJ, 'b', i, b ? @[[NSData dataWithBytes:b length:l]] : nil); if (FWD) [self setVertexBytes:b length:l atIndex:i]; } \
-- (void)set##Stage##Texture:(id<MTLTexture>)t atIndex:(NSUInteger)i { nvmtl_mesh_note(self, OBJ, 't', i, t ? @[t] : nil); if (FWD) [self setVertexTexture:t atIndex:i]; } \
-- (void)set##Stage##Textures:(const id<MTLTexture> __unsafe_unretained [])t withRange:(NSRange)r { \
-    for (NSUInteger k = 0; k < r.length; k++) [self set##Stage##Texture:t[k] atIndex:r.location + k]; } \
-- (void)set##Stage##SamplerState:(id<MTLSamplerState>)s atIndex:(NSUInteger)i { nvmtl_mesh_note(self, OBJ, 's', i, s ? @[s] : nil); if (FWD) [self setVertexSamplerState:s atIndex:i]; } \
-- (void)set##Stage##SamplerState:(id<MTLSamplerState>)s lodMinClamp:(float)lo lodMaxClamp:(float)hi atIndex:(NSUInteger)i { \
-    nvmtl_mesh_note(self, OBJ, 's', i, s ? @[s, @(lo), @(hi)] : nil); if (FWD) [self setVertexSamplerState:s lodMinClamp:lo lodMaxClamp:hi atIndex:i]; } \
-- (void)set##Stage##SamplerStates:(const id<MTLSamplerState> __unsafe_unretained [])s withRange:(NSRange)r { \
-    for (NSUInteger k = 0; k < r.length; k++) [self set##Stage##SamplerState:s[k] atIndex:r.location + k]; } \
-- (void)set##Stage##SamplerStates:(const id<MTLSamplerState> __unsafe_unretained [])s lodMinClamps:(const float *)lo lodMaxClamps:(const float *)hi withRange:(NSRange)r { \
-    for (NSUInteger k = 0; k < r.length; k++) [self set##Stage##SamplerState:s[k] lodMinClamp:lo[k] lodMaxClamp:hi[k] atIndex:r.location + k]; }
-NVMTL_MESH_BINDERS(Mesh, NO, YES)
-NVMTL_MESH_BINDERS(Object, YES, NO)
-- (void)setObjectThreadgroupMemoryLength:(NSUInteger)l atIndex:(NSUInteger)i {
-    static int told; if (told++ < 4) nvlog("mesh: setObjectThreadgroupMemoryLength:%lu atIndex:%lu is NOT carried - an object reading that threadgroup memory reads its static size", (unsigned long)l, (unsigned long)i);
-}
-- (NVMTLBuffer *)nvmtlMeshScratch:(uint64_t)bytes header:(const uint32_t *)h {
-    NVMTLBuffer *sb = (NVMTLBuffer *)[(id<MTLDevice>)gNVMTLMainDevice newBufferWithLength:(NSUInteger)bytes options:MTLResourceStorageModePrivate];
-    if (!sb) { nvlog("mesh: %llu B scratch buffer allocation FAILED - NOT drawn", bytes); return nil; }
-    NVMTLBuffer *hb = [NVMTLBuffer new];
-    if (nvmtl_vk_buffer_create(32, 1, &hb->_b) || !hb->_b.map) { nvlog("mesh: header staging buffer FAILED - NOT drawn"); return nil; }
-    memcpy(hb->_b.map, h, 32);
-    if (!_cb->_resources) _cb->_resources = [NVMTLResSet new];
-    if (!_cb->_scratch) _cb->_scratch = [NSMutableArray new];
-    [_cb->_resources addObject:sb]; [_cb->_scratch addObject:hb];
-    nvmtl_vk_cmd_end_render(&_cb->_c);
-    nvmtl_vk_cmd_barrier(&_cb->_c);
-    if (nvmtl_vk_cmd_fill_buffer(&_cb->_c, &sb->_b, 0, (size_t)bytes, 0)) nvlog("mesh: scratch clear FAILED - counts may be stale");
-    nvmtl_vk_cmd_barrier(&_cb->_c);
-    if (nvmtl_vk_cmd_copy_buffer(&_cb->_c, &hb->_b, 0, &sb->_b, 0, 32)) nvlog("mesh: header copy FAILED - the draw reads zero args");
-    nvmtl_vk_cmd_barrier(&_cb->_c);
-    return sb;
-}
-- (BOOL)nvmtlMeshResume {
-    if (![self nvmtlBeginPassLoad:NVMTL_LOAD_ALL]) {
-        _begun = NO; nvlog("mesh: render pass could not RESUME after the mesh stage - the rest of this encoder is not drawn"); return NO; }
-    nvmtl_vk_cmd_set_cull(&_cb->_c, _cull);
-    if (_hasVP) nvmtl_vk_cmd_set_viewport(&_cb->_c, _vp[0], _vp[1], _vp[2], _vp[3], _vp[4], _vp[5]);
-    if (_hasSC) nvmtl_vk_cmd_set_scissor(&_cb->_c, (int32_t)_sc[0], (int32_t)_sc[1], _sc[2], _sc[3]);
-    [self nvmtlApplyDepthStencil];
-    return YES;
-}
-- (void)nvmtlMeshObjectDraw:(MTLSize)g object:(MTLSize)ot mesh:(MTLSize)mt info:(NVMTLMeshInfo *)mi {
-    uint64_t nobj = (uint64_t)g.width * g.height * g.depth;
-    if (!nobj || !ot.width || !ot.height || !ot.depth || !mt.width || !mt.height || !mt.depth) return;
-    uint32_t tr = mi->_lay[7], rs = mi->_lay[8], block = mi->_lay[6];
-    uint64_t bytes = tr + nobj * rs + nobj * (uint64_t)mi->_cap * block;
-    if (bytes > 0x7fffffffull) { nvlog("mesh: %llu objects x (%u rec + %u x %u B) = %llu B scratch does not fit - NOT drawn", nobj, rs, mi->_cap, block, bytes); return; }
-    uint32_t h[8] = { 0, (uint32_t)nobj, 1, 0,   0, (uint32_t)nobj, 0, 0 };
-    NVMTLBuffer *sb = [self nvmtlMeshScratch:bytes header:h];
-    if (!sb) return;
-    [_cb->_resources addObject:mi->_k]; [_cb->_resources addObject:mi->_o]; [_cb->_resources addObject:_ps];
-    NVMTLMeshBinds *mb = objc_getAssociatedObject(self, &kNVMTLMeshBinds);
-    nvmtl_mesh_replay(self, mb ? mb->_obj : nil);
-    nvmtl_vk_bind_buffer(&_cb->_c, NVMTL_SET_VERTEX, 29, &sb->_b, 0);
-    nvmtl_vk_bind_buffer(&_cb->_c, NVMTL_SET_VERTEX, 30, &sb->_b, 0);
-    nvmtl_bind_embedded(_cb, NVMTL_SET_VERTEX, mi->_o->_function, _vbufAt, _vbufOff);
-    uint32_t ol[3] = { (uint32_t)ot.width, (uint32_t)ot.height, (uint32_t)ot.depth };
-    uint32_t tt[3] = { (uint32_t)(g.width * ot.width), (uint32_t)(g.height * ot.height), (uint32_t)(g.depth * ot.depth) };
-    nvmtl_vk_cmd_dispatch_threads(&_cb->_c, &mi->_o->_p, tt, ol);
-    nvmtl_vk_cmd_barrier(&_cb->_c);
-    nvmtl_mesh_replay(self, mb ? mb->_mesh : nil);
-    nvmtl_vk_bind_buffer(&_cb->_c, NVMTL_SET_VERTEX, 29, &sb->_b, 0);
-    nvmtl_vk_bind_buffer(&_cb->_c, NVMTL_SET_VERTEX, 30, &sb->_b, 0);
-    nvmtl_bind_embedded(_cb, NVMTL_SET_VERTEX, mi->_k->_function, _vbufAt, _vbufOff);
-    uint32_t ml[3] = { (uint32_t)mt.width, (uint32_t)mt.height, (uint32_t)mt.depth };
-    nvmtl_vk_cmd_dispatch_indirect_tg(&_cb->_c, &mi->_k->_p, &sb->_b, 0, ml);
-    nvmtl_vk_cmd_barrier(&_cb->_c);
-    if (![self nvmtlMeshResume]) return;
-    MTLPrimitiveType pt = mi->_lay[2] == 3 ? MTLPrimitiveTypeTriangle : mi->_lay[2] == 2 ? MTLPrimitiveTypeLine : MTLPrimitiveTypePoint;
-    static int told; if (told++ < 4) nvlog("mesh: \"%s\" %llu object threadgroup(s) x %ux%ux%u, mesh %ux%ux%u, cap %u -> %llu B scratch", mi->_name.UTF8String,
-                                             nobj, ol[0], ol[1], ol[2], ml[0], ml[1], ml[2], mi->_cap, bytes);
-    [self drawPrimitives:pt indirectBuffer:(id<MTLBuffer>)sb indirectBufferOffset:16];
-}
-- (void)drawMeshThreadgroups:(MTLSize)g threadsPerObjectThreadgroup:(MTLSize)ot threadsPerMeshThreadgroup:(MTLSize)mt {
-    if (!_begun || !_ps) { nvlog("mesh: draw with no pipeline set"); return; }
-    NVMTLMeshInfo *mi = objc_getAssociatedObject(_ps, &kNVMTLMeshInfo);
-    if (!mi) { nvlog("mesh: drawMeshThreadgroups with a pipeline that has no mesh stage (%s) - NOT drawn", _ps->_fname.UTF8String); return; }
-    if (mi->_o) { [self nvmtlMeshObjectDraw:g object:ot mesh:mt info:mi]; return; }
-    uint64_t T = (uint64_t)g.width * g.height * g.depth, bytes = T * mi->_lay[6], verts = T * mi->_lay[1] * mi->_lay[2];
-    if (!T || !mt.width || !mt.height || !mt.depth) return;
-    if (bytes > 0x7fffffffull || verts > 0xffffffffull) { nvlog("mesh: %llu threadgroups x %u B does not fit - NOT drawn", T, mi->_lay[6]); return; }
-    NVMTLBuffer *sb = (NVMTLBuffer *)[(id<MTLDevice>)gNVMTLMainDevice newBufferWithLength:(NSUInteger)bytes options:MTLResourceStorageModePrivate];
-    if (!sb) { nvlog("mesh: %llu B scratch buffer allocation FAILED - NOT drawn", bytes); return; }
-    if (!_cb->_resources) _cb->_resources = [NVMTLResSet new];
-    [_cb->_resources addObject:sb]; [_cb->_resources addObject:mi->_k]; [_cb->_resources addObject:_ps];
-    nvmtl_vk_cmd_end_render(&_cb->_c);
-    nvmtl_vk_cmd_barrier(&_cb->_c);
-    if (nvmtl_vk_cmd_fill_buffer(&_cb->_c, &sb->_b, 0, (size_t)bytes, 0)) nvlog("mesh: scratch clear FAILED - counts may be stale");
-    nvmtl_vk_cmd_barrier(&_cb->_c);
-    nvmtl_vk_bind_buffer(&_cb->_c, NVMTL_SET_VERTEX, 30, &sb->_b, 0);
-    nvmtl_bind_embedded(_cb, NVMTL_SET_VERTEX, mi->_k->_function, _vbufAt, _vbufOff);
-    uint32_t l[3] = { (uint32_t)mt.width, (uint32_t)mt.height, (uint32_t)mt.depth };
-    uint32_t t[3] = { (uint32_t)(g.width * mt.width), (uint32_t)(g.height * mt.height), (uint32_t)(g.depth * mt.depth) };
-    nvmtl_vk_cmd_dispatch_threads(&_cb->_c, &mi->_k->_p, t, l);
-    nvmtl_vk_cmd_barrier(&_cb->_c);
-    if (![self nvmtlBeginPassLoad:NVMTL_LOAD_ALL]) {
-        _begun = NO; nvlog("mesh: render pass could not RESUME after the mesh stage - the rest of this encoder is not drawn"); return; }
-    nvmtl_vk_cmd_set_cull(&_cb->_c, _cull);
-    if (_hasVP) nvmtl_vk_cmd_set_viewport(&_cb->_c, _vp[0], _vp[1], _vp[2], _vp[3], _vp[4], _vp[5]);
-    if (_hasSC) nvmtl_vk_cmd_set_scissor(&_cb->_c, (int32_t)_sc[0], (int32_t)_sc[1], _sc[2], _sc[3]);
-    [self nvmtlApplyDepthStencil];
-    MTLPrimitiveType pt = mi->_lay[2] == 3 ? MTLPrimitiveTypeTriangle : mi->_lay[2] == 2 ? MTLPrimitiveTypeLine : MTLPrimitiveTypePoint;
-    static int told; if (told++ < 4) nvlog("mesh: \"%s\" %llu threadgroup(s) x %ux%ux%u -> %llu B scratch, %llu vertices", mi->_name.UTF8String,
-                                             T, l[0], l[1], l[2], bytes, verts);
-    [self drawPrimitives:pt vertexStart:0 vertexCount:(NSUInteger)verts instanceCount:1 baseInstance:0];
-}
-- (void)drawMeshThreads:(MTLSize)n threadsPerObjectThreadgroup:(MTLSize)ot threadsPerMeshThreadgroup:(MTLSize)mt {
-    if (!mt.width || !mt.height || !mt.depth) return;
-    MTLSize g = MTLSizeMake((n.width + mt.width - 1) / mt.width, (n.height + mt.height - 1) / mt.height, (n.depth + mt.depth - 1) / mt.depth);
-    [self drawMeshThreadgroups:g threadsPerObjectThreadgroup:ot threadsPerMeshThreadgroup:mt];
-}
-- (void)drawMeshThreadgroupsWithIndirectBuffer:(id<MTLBuffer>)b indirectBufferOffset:(NSUInteger)off
-    threadsPerObjectThreadgroup:(MTLSize)ot threadsPerMeshThreadgroup:(MTLSize)mt {
-    if (!_begun || !_ps) { nvlog("mesh: indirect draw with no pipeline set"); return; }
-    NVMTLMeshInfo *mi = objc_getAssociatedObject(_ps, &kNVMTLMeshInfo);
-    if (!mi) { nvlog("mesh: drawMeshThreadgroupsWithIndirectBuffer: with a pipeline that has no mesh stage (%s) - NOT drawn", _ps->_fname.UTF8String); return; }
-    static int told42c;
-    if (mi->_o) { if (told42c++ < 4) nvlog("mesh: \"%s\" object stage + INDIRECT draw is batch 42c - NOT drawn", mi->_name.UTF8String); return; }
-    if (!mi->_psi) { if (told42c++ < 4) nvlog("mesh: \"%s\" has no indirect variant (%s) - NOT drawn", mi->_name.UTF8String, mi->_indWhy.UTF8String ?: "?"); return; }
-    NVMTLBuffer *ab = (NVMTLBuffer *)b;
-    if (!ab || off + 12 > ab->_b.size) { nvlog("mesh: indirect buffer %p offset %lu does not hold 12 bytes - NOT drawn", (__bridge void *)b, (unsigned long)off); return; }
-    if (!mt.width || !mt.height || !mt.depth) return;
-    uint32_t tr = mi->_layi[7], block = mi->_layi[6];
-    uint64_t bytes = tr + 16 + (uint64_t)mi->_capi * block;
-    uint32_t h[8] = { 0, 1, 1, 0,   0, 1, 0, 0 };
-    nvmtl_buffer_sync_in(ab);
-    nvmtl_retain_resource(_cb, ab);
-    NVMTLBuffer *sb = [self nvmtlMeshScratch:bytes header:h];
-    if (!sb) return;
-    if (nvmtl_vk_cmd_copy_buffer(&_cb->_c, &ab->_b, off, &sb->_b, tr, 12)) nvlog("mesh: indirect grid copy FAILED - the kernel reads a zero grid");
-    nvmtl_vk_cmd_barrier(&_cb->_c);
-    [_cb->_resources addObject:mi->_ki]; [_cb->_resources addObject:mi->_psi];
-    nvmtl_vk_bind_buffer(&_cb->_c, NVMTL_SET_VERTEX, 30, &sb->_b, 0);
-    nvmtl_bind_embedded(_cb, NVMTL_SET_VERTEX, mi->_ki->_function, _vbufAt, _vbufOff);
-    uint32_t ml[3] = { (uint32_t)mt.width, (uint32_t)mt.height, (uint32_t)mt.depth };
-    nvmtl_vk_cmd_dispatch_indirect_tg(&_cb->_c, &mi->_ki->_p, &ab->_b, off, ml);
-    nvmtl_vk_cmd_barrier(&_cb->_c);
-    if (![self nvmtlMeshResume]) return;
-    MTLPrimitiveType pt = mi->_layi[2] == 3 ? MTLPrimitiveTypeTriangle : mi->_layi[2] == 2 ? MTLPrimitiveTypeLine : MTLPrimitiveTypePoint;
-    static int told; if (told++ < 4) nvlog("mesh: \"%s\" INDIRECT from %p+%lu, mesh %ux%ux%u, cap %u -> %llu B scratch", mi->_name.UTF8String,
-                                             (__bridge void *)b, (unsigned long)off, ml[0], ml[1], ml[2], mi->_capi, bytes);
-    NVMTLRenderPipelineState *keep = _ps; _ps = mi->_psi;
-    [self drawPrimitives:pt indirectBuffer:(id<MTLBuffer>)sb indirectBufferOffset:16];
-    _ps = keep;
-}
-@end

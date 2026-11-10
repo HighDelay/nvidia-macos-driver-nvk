@@ -13,7 +13,7 @@ ROOT = pathlib.Path(__file__).resolve().parents[1]
 source = (ROOT / "plugin/NVMTLDevice.m").read_text()
 
 start = source.index("__attribute__((constructor)) static void nvmtl_angle_allow_nvidia(void)")
-end = source.index("static bool nvmtl_process_is_allowed(void)", start)
+end = source.index('\n}\n', start) + 3
 region = source[start:end].replace("__attribute__((constructor)) ", "")
 
 fixture = r"""

@@ -49,6 +49,7 @@ static int nvmtl_vram_keep_get(int host,IOSurfaceRef s,NSUInteger p,size_t n,nvk
 static int nvmtl_vk_image_create_buffer_alias(uint32_t w,uint32_t h,uint32_t f,uint32_t bpp,int a8,int storage,int render,nvk_buffer *b,size_t offset,size_t row,nvk_image *out) { alias_requests++;out->img=(void*)2;out->storage=storage&&!drop_storage;out->usage=render&&!drop_render?VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT:0;return alias_failure; }
 static void nvmtl_vk_image_destroy(nvk_image *i) { image_drops++;memset(i,0,sizeof *i); }
 static void nvmtl_vk_buffer_destroy(nvk_buffer *b) { assert(b->allocated);buffer_drops++;b->allocated=0; }
+static void nvmtl_vram_keep_put(int host,IOSurfaceRef surf,NSUInteger plane,nvk_buffer *b,uint64_t born) { nvmtl_vk_buffer_destroy(b); }
 static int nvmtl_vk_image_create_typed(uint32_t w,uint32_t h,uint32_t f,uint32_t bpp,int a8,unsigned mips,int storage,unsigned type,unsigned layers,nvk_image *out) { private_requests++;if(private_failure)return -1;out->img=(void*)3;out->storage=storage;return 0; }
 @@IMAGE@@
 static void reset(void) { image_drops=buffer_drops=private_requests=alias_requests=0;drop_storage=drop_render=alias_failure=private_failure=tag_current=0; }

@@ -431,6 +431,16 @@ pub(super) fn add_needed_capabilities(ctx: &mut Ctx, variable_pointer_requiremen
         .all_inst_iter()
         .filter_map(|i| Some((i.result_id?, i.result_type?)))
         .collect();
+    // a multisampled storage image (MS = 1, Sampled = 2) needs its own capability
+    if ctx.module.types_global_values.iter().any(|i| {
+        i.class.opcode == Op::TypeImage
+            && i.operands.get(4) == Some(&Operand::LiteralBit32(1))
+            && i.operands.get(5) == Some(&Operand::LiteralBit32(2))
+            && i.operands.get(1) != Some(&Operand::Dim(spirv::Dim::DimSubpassData))
+    }) && !want.contains(&Capability::StorageImageMultisample)
+    {
+        want.push(Capability::StorageImageMultisample);
+    }
     for instruction in ctx
         .module
         .functions
@@ -594,6 +604,21 @@ pub(super) fn add_needed_capabilities(ctx: &mut Ctx, variable_pointer_requiremen
     });
     if has_sample_id || has_sample_interpolation {
         want.push(Capability::SampleRateShading);
+    }
+    // GLSL.std.450 InterpolateAtCentroid / AtSample / AtOffset are 76, 77 and 78
+    let has_pull_interpolation = ctx.module.functions.iter().any(|function| {
+        function.blocks.iter().any(|block| {
+            block.instructions.iter().any(|instruction| {
+                instruction.class.opcode == Op::ExtInst
+                    && matches!(
+                        instruction.operands.get(1),
+                        Some(Operand::LiteralExtInstInteger(76..=78))
+                    )
+            })
+        })
+    });
+    if has_pull_interpolation {
+        want.push(Capability::InterpolationFunction);
     }
     let has_barycentric = ctx.module.annotations.iter().any(|instruction| {
         instruction.class.opcode == Op::Decorate

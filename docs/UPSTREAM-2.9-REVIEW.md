@@ -1,5 +1,10 @@
 # Selective upstream 2.9 backports
 
+This records the initial narrow review. The subsequent user-approved
+[2.9 integration candidate](UPSTREAM-2.9-INTEGRATION.md) repairs selected deferred
+paths while retaining the fork's hardware and desktop behavior. Its local test
+packages remain unpublished pending user validation.
+
 The review compares fork `2e62ecc72379b0ad8d164e9edd0d1a12fa56eaac`
 with upstream `7412cdde81447f78da0ebb64216dc258d8beaedb`, from the
 shared 2.8 ancestor `60fb7255e18c31fe0747091fd9a961f30c1cd82a`.

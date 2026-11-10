@@ -1,5 +1,15 @@
 # Retained fork changes for upstream merges
 
+## Repaired upstream 2.9 integration, 2026-11-10
+
+After the selective backports below, the user approved the broader integration
+and local test packages. Follow the [integration decisions](UPSTREAM-2.9-INTEGRATION.md)
+when reconciling future changes. This supersedes the earlier hold on merging
+`7412cdd`; it does not authorize replacing protected fork behavior or publishing
+before local testing. Keep the matched kernel/Mesa interface and existing
+shutdown/backlight paths while integrating repaired 2.9 loader/translator work.
+Preserve the exact validated local archives for a later release.
+
 ## Selective upstream 2.9 backports, 2026-11-10
 
 The user approved the narrow scope in [the 2.9 review](UPSTREAM-2.9-REVIEW.md):

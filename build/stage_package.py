@@ -398,6 +398,17 @@ def stage(args):
     with plist.open("rb") as stream:
         require(plistlib.load(stream).get("CFBundleExecutable") == "NVRMFB", "not an NVRMFB Info.plist")
     replacements = [(plugin, PLUGIN / "Contents/MacOS/NVMTLDriver"), (translator, TRANSLATOR)]
+    # The 2.9 loader's fallback is an open-source helper beside the executable.
+    # Refuse an incomplete package instead of silently keeping the old air-opt.
+    air_dis = getattr(args, "air_dis", None)
+    needs_air_dis = b"nvmtl-air-dis" in plugin.read_bytes()
+    if air_dis is None and needs_air_dis:
+        air_dis = base / PLUGIN / "Contents/MacOS/nvmtl-air-dis"
+    if air_dis is not None:
+        regular(air_dis)
+        run("lipo", air_dis, "-verify_arch", "x86_64")
+        run("codesign", "--verify", "--strict", air_dis)
+        replacements.append((air_dis, PLUGIN / "Contents/MacOS/nvmtl-air-dis"))
     accelerators = {major: getattr(args, "accel_" + major, None) for major in ACCEL}
     for accelerator in accelerators.values():
         if accelerator:
@@ -447,6 +458,8 @@ def stage(args):
                 preserve_kext_release_metadata(work / relative, base / relative)
         for source, relative in replacements:
             replace_file(source, work / relative)
+        if air_dis is not None:
+            (work / RUNTIME / "air-opt").unlink(missing_ok=True)
         if minecraft:
             destination = work / MINECRAFT
             if destination.is_symlink() or destination.is_file():
@@ -483,6 +496,9 @@ def stage(args):
             replace_file(work / TRANSLATOR, bundled)
         if video:
             stage_video_runtime(work, video, video_files)
+        if air_dis is not None:
+            run("codesign", "--force", "--sign", "-", "--timestamp=none", work / PLUGIN)
+            run("codesign", "--verify", "--strict", work / PLUGIN)
         # install.sh chooses the OS variant. Refresh only replaced variants.
         for major, accelerator in accelerators.items():
             if accelerator:
@@ -512,6 +528,7 @@ def main():
     parser.add_argument("output", type=Path, help="new package directory outside the input")
     parser.add_argument("--plugin", type=Path, help="NVMTLDriver executable (default: current-commit release output)")
     parser.add_argument("--translator", type=Path, help="libnvmtl_translate.dylib (default: out/translator Intel release)")
+    parser.add_argument("--air-dis", type=Path, help="matched signed nvmtl-air-dis fallback; required by the 2.9 loader unless already in the base")
     parser.add_argument("--framebuffer-plist", type=Path, help="NVRMFB Info.plist (default: this checkout's PR #131 plist)")
     parser.add_argument("--framebuffer", type=Path, help="optional complete rebuilt NVRMFB.kext; uses its plist unless overridden")
     parser.add_argument("--agdc", type=Path, help="optional complete rebuilt NVRMAGDC.kext")

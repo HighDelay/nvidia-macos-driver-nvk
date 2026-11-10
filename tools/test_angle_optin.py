@@ -9,7 +9,7 @@ root = pathlib.Path(__file__).resolve().parents[1]
 source = (root / 'plugin/NVMTLDevice.m').read_text()
 # Lift the production constructor. The fixture process also receives the fork's all-app default.
 start = source.index('__attribute__((constructor)) static void nvmtl_angle_allow_nvidia(void)')
-end = source.index('static bool nvmtl_process_is_allowed(void)', start)
+end = source.index('\n}\n', start) + 3
 constructor = source[start:end]
 with tempfile.TemporaryDirectory() as directory:
     file = pathlib.Path(directory) / 'policy.c'
