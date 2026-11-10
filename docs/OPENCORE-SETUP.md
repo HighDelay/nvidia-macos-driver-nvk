@@ -1,5 +1,10 @@
 # OpenCore configuration for the NVIDIA driver
 
+A laptop whose panel is not wired to the NVIDIA card must not copy the desktop BAR size,
+SMBIOS, or `IONDRVSupport` block below unchanged. For the MSI Pulse GL66 12UCK
+(RTX 3050 Laptop, 4 GB, panel on Intel UHD `8086:46A3`) use
+[docs/machines/msi-pulse-gl66-12uck.md](machines/msi-pulse-gl66-12uck.md).
+
 The kexts install into `/Library/Extensions` and load from the Auxiliary Kernel Collection — **do not** also inject
 them from `EFI/OC/Kexts`. OpenCore only needs to set SIP and boot-args.
 

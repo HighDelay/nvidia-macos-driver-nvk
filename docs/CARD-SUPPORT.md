@@ -8,6 +8,14 @@ and 3D-controller PCI classes, then asks NVIDIA's own supported-device gates to 
 A card being in the table doesn't mean a given laptop works: its display wiring, firmware and BAR
 setup still have to cooperate.
 
+## This fork's target
+
+MSI Pulse GL66 12UCK, read on Windows 2026-10-31 and not yet booted on macOS. RTX 3050 Laptop
+4 GB, `10de:25a2` rev A1, subsystem `1462:1331`, BAR1 4096 MiB, no display attached. The 1920×1080
+panel is Intel UHD `8086:46A3`. Details and the OpenCore deltas are in
+[machines/msi-pulse-gl66-12uck.md](machines/msi-pulse-gl66-12uck.md). `python3 tools/test_msi_gl66_profile.py`
+checks that those IDs and the 4 GB BAR rule are still in the tree.
+
 | Family | Examples covered by the device table | Physical validation in this release |
 | --- | --- | --- |
 | Turing | GTX 1650/1660, RTX 20, TITAN RTX, Quadro T1000/T2000/RTX, NVIDIA T400/T600/T1000, T500/T550/T600/T1200 laptop | Pending |
