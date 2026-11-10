@@ -111,11 +111,14 @@ def organize(payload, records, identity=None):
     compact['optional_intel_panel'] = {'bundled': panel.is_file(), 'default': 'No', 'existing_opt_ins_retained': True}
     audio = payload / 'Optional/NMXAudio.kext/Contents/MacOS/NMXAudio'
     compact['optional_audio'] = {'bundled': audio.is_file(), 'default': 'No', 'minimum_macos_major': 26, 'existing_opt_ins_retained': True}
+    webkit = payload/'Optional/NVWebKitFixup/NVWebKitFixup.kext/Contents/MacOS/NVWebKitFixup'
+    compact['optional_webkit_fixup'] = {'bundled': webkit.is_file(), 'default': 'Manual instructions',
+                                       'installation': 'OpenCore EFI only; automatic installation requires an explicit target'}
     # SHA256SUMS covers every file. These hashes identify the primary components.
     paths = [Path('Library/Extensions') / (name + '.kext/Contents/MacOS/' + name)
              for name in ('NVRM', 'NVRMFB', 'NVAccel', 'NVRMAGDC')]
     paths += [Path('Library/NullMoth/kexts') / major / 'NVAccel.kext/Contents/MacOS/NVAccel' for major in ('15', '26')]
-    paths += [Path('Library/GPUBundles/NVMTLDriver.bundle/Contents/MacOS/NVMTLDriver'), panel.relative_to(payload), audio.relative_to(payload)]
+    paths += [Path('Library/GPUBundles/NVMTLDriver.bundle/Contents/MacOS/NVMTLDriver'), panel.relative_to(payload), audio.relative_to(payload), webkit.relative_to(payload)]
     compact['components_sha256'] = {str(path): integrity.digest(payload / path) for path in paths if (payload / path).is_file()}
     current.write_text(json.dumps(compact, indent=2) + '\n')
     current.chmod(0o644)
@@ -125,6 +128,7 @@ def organize(payload, records, identity=None):
             readme = readme.replace(GITHUB_FILES + GUIDE_SOURCES[relative].as_posix(), 'Guides/' + name)
     readme = readme.replace(GITHUB_FILES + 'docs/INTEL-PANEL.md', 'Optional/README.md')
     readme = readme.replace(GITHUB_FILES + 'docs/OPTIONAL-AUDIO.md', 'Optional/Audio.md')
+    readme = readme.replace(GITHUB_FILES + 'docs/SAFARI-WEBGL.md', 'Optional/NVWebKitFixup/README.md')
     (payload / 'READ-ME.md').write_text(readme)
     (payload / 'READ-ME.md').chmod(0o644)
     integrity.validate_links(payload)

@@ -259,6 +259,50 @@ driver and kernel collection remain unchanged. Source/build records are under
 `/Volumes/Games/upstream-272-review-20261106/`. Package installation and boot
 testing are separate from these source-integration checks.
 
+## Experimental WebKit GPU loading helper (2026-11-10)
+
+`kexts/NVWebKitFixup` is a separate, opt-in Lilu plugin for the local Safari boot
+test. Keep its exact kernel/prologue gates, Apple platform/signature/identity
+checks, root-owned/restricted runtime checks, private X/RX bounds and read-only
+null-device check. It routes only Sandbox's open/mmap callbacks; do not turn it
+into a global sandbox/AMFI bypass or raise prior maximum mapping protections.
+The 0.2.0 candidate admits Darwin 24 (Sequoia) and 25 (Tahoe) only, then checks
+the required symbols, exact frame-setup/register-save layouts, bounded variable
+stack-frame sizes and Lilu's decoded instruction lengths. It no longer pins one
+kernel version string. Retain the range/complete-instruction checks; never accept
+arbitrary instructions merely because they can be decoded. Unknown layouts stay
+inactive. The OpenCore entry must also span `24.0.0` through `25.99.99`.
+Preserve its disable argument and diagnostics.
+
+The matched `nvmtl_sysconf` repair handles denied page-size and physical-page
+queries using the cached Mach page size, `hw.memsize` or host information. It
+preserves normal results/errors, bounds the result and releases acquired host
+ports. Do not restore the old `getpagesize()` fallback, which WebKit also denies.
+
+`nvmtl_icd_open` also handles WebKit denying both a null-device open and `pipe()`
+by duplicating its inherited read-only null stdin. Validate the owned duplicate
+against the root-owned null device, preserve close-on-exec and never consume or
+close the original stdin. Do not substitute an unverified inherited descriptor
+or change ordinary open/error behavior.
+
+Policy/callback ASan/UBSan tests, page/memory tests, GPU texture regressions and
+the isolated kernel link check pass. Version 0.1.0 subsequently booted with Lilu
+1.7.3 on RTX 2060 SUPER / Tahoe 26.7.1. A real WebKit GPU process created a context,
+compiled shaders and returned the expected pixels without a GL error; normal
+Safari rendered Aquarium with 500 fish at a page-reported approximately 73–75 FPS
+on a 75 Hz display. The user confirmed visible, moving fish. Safari retained its
+normal private message-filter mode. The 0.2.0 compatibility extension has matching
+MAC/signing-query declarations across 13 published Apple XNU tags, OS/initialization
+gate tests and an isolated Tahoe link check; it has not yet booted on either OS.
+No Sequoia runtime or kernel-link test has been performed. Other kernels/GPUs and
+extended use remain untested. Keep helper activation optional and retain the
+release approval requirement and existing Safari video, icon, codec
+and Zink behavior. Future packaging bundles it under `Optional/NVWebKitFixup/`,
+with Manual (default), Automatic and Skip choices. Automatic installation changes
+only its Kernel/Add entry and kext on an explicitly selected EFI, checks Lilu and
+vault state, and retains a guarded recovery backup. Never add this Lilu plugin
+to the normal system extension repository or kernel collection.
+
 ## Safari filtered-icon compatibility trial (2026-11-09)
 
 `NVMTLWebKit.m` also selects WebKit's software CSS/SVG filter implementation

@@ -24,6 +24,11 @@ Native MetalFX DLSS has its own installer prompt, default **No**. It downloads
 NVIDIA files and compiles kernels on the target Mac. Wine/CrossOver DLSS uses
 the separate Wine/NVK setup and the game's `nvngx_dlss.dll`.
 
+The optional Safari WebGL helper offers **Manual**, **Automatic**, or **Skip**.
+Manual is the default and prints the bundled kext's location and OpenCore setup
+steps. Automatic uses the EFI target you select and backs up its config first.
+See [Safari WebGL setup and recovery](https://github.com/HighDelay/nvidia-macos-driver-nvk/blob/main/docs/SAFARI-WEBGL.md).
+
 With a compatible NVIDIA driver already running, `Verify.command` checks
 the package and runs GPU/OpenGL probes. Diagnostic windows briefly appear.
 These checks do not establish that a new package boots successfully.
@@ -44,6 +49,7 @@ records are retained with the build output, outside the installable archive.
 
 Reinstall the previous complete driver package and reboot.
 `Uninstall.command` removes the entire NVIDIA driver.
+Disable/remove the optional OpenCore WebGL helper from EFI separately.
 
 ## Recovery removal
 

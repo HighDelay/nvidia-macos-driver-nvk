@@ -324,6 +324,7 @@ Arbitrary overlays of installed `/Library` contents are rejected.
 ```sh
 python3 build/package_zink.py --base /path/to/verified/pkgroot \
   --zink /path/to/zink-out --stage /path/to/new/pkgroot \
+  --webkit-fixup-build /path/to/verified/webkit-fixup-build \
   --archive /path/to/new/nvidia-macos-driver-2.6.6-nvk.tar.gz \
   --build-records /path/to/new/build-records --native-gld
 ```
@@ -332,6 +333,10 @@ The archive has one top-level `pkgroot/`. It preserves existing runtimes and
 version metadata, adds Zink in its own subdirectory and selects `NVKZinkGLDriver`
 for both Sequoia and Tahoe accelerators. `--native-gld` is the default. `--explicit-cgl-only` is a developer option
 for attachment tests without system OpenGL selection.
+
+The WebKit helper build must include `BUILD.json` from
+`kexts/NVWebKitFixup/build.sh`; packaging verifies its source and bundle hashes.
+It is bundled under `Optional/NVWebKitFixup/` with a separate installer choice.
 
 The package has a short `READ-ME.md`, one current `PACKAGE-IDENTITY.json` and
 setup guides in `Guides/`. Detailed build identities, validation reports and

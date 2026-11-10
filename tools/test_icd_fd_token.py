@@ -26,7 +26,7 @@ static int test_open(const char *path, int flags, ...) {
 }
 static int pipe_failure;
 static int test_pipe(int p[2]) {
-    if (pipe_failure) { errno = EMFILE; return -1; }
+    if (pipe_failure) { errno = pipe_failure; return -1; }
     return pipe(p);
 }
 #define open test_open
@@ -55,10 +55,31 @@ int main(void) {
     assert(nvmtl_icd_open("/dev/null",O_RDWR)==-1 && errno==EPERM);
     assert(nvmtl_icd_open("/dev/null",O_RDONLY|O_NONBLOCK)==-1 && errno==EPERM);
     assert(nvmtl_icd_open("/dev/null",O_CREAT|O_RDWR,0600)==-1 && permission==0600);
-    pipe_failure=1;
+    pipe_failure=EMFILE;
     assert(nvmtl_icd_open("/dev/null",O_RDONLY|O_CLOEXEC)==-1 && errno==EMFILE);
     assert(descriptors()==before);
+    int original=dup(STDIN_FILENO), original_flags=fcntl(STDIN_FILENO,F_GETFD);
+    assert(original>=0);
+    int null=open("/dev/null",O_RDONLY);assert(null>=0);assert(dup2(null,STDIN_FILENO)>=0);close(null);
+    int stdin_flags=fcntl(STDIN_FILENO,F_GETFD);
+    pipe_failure=EPERM;
+    for(int n=0;n<200;n++) {
+        int fd=nvmtl_icd_open("/dev/null",O_RDONLY|O_CLOEXEC);assert(fd>=0&&fd!=STDIN_FILENO);
+        char c;assert(read(fd,&c,1)==0);assert(write(fd,"x",1)==-1&&errno==EBADF);
+        assert(fcntl(fd,F_GETFD)&FD_CLOEXEC);close(fd);
+        assert(fcntl(STDIN_FILENO,F_GETFD)==stdin_flags);
+    }
+    int secret[2];assert(pipe(secret)==0);assert(write(secret[1],"Z",1)==1);
+    assert(dup2(secret[0],STDIN_FILENO)>=0);close(secret[0]);
+    assert(nvmtl_icd_open("/dev/null",O_RDONLY|O_CLOEXEC)==-1&&errno==EPERM);
+    char c;assert(read(STDIN_FILENO,&c,1)==1&&c=='Z');close(secret[1]);
+    null=open("/dev/null",O_RDWR);assert(null>=0);assert(dup2(null,STDIN_FILENO)>=0);close(null);
+    assert(nvmtl_icd_open("/dev/null",O_RDONLY|O_CLOEXEC)==-1&&errno==EPERM);
+    assert(dup2(original,STDIN_FILENO)>=0);close(original);
+    assert(fcntl(STDIN_FILENO,F_SETFD,original_flags)==0);
+    assert(descriptors()==before);
     puts("Owned descriptors: 200 permission fallbacks, EOF, close-on-exec, no leaks; unrelated failures preserved.");
+    puts("WebKit: 200 verified null duplicates; stdin flags/data preserved; pipe and writable stdin refused; no leaks.");
 }
 '''
 with tempfile.TemporaryDirectory() as directory:

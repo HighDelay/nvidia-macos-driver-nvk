@@ -6,6 +6,8 @@ HERE=$(cd "$(dirname "$0")" && pwd)
 INTEL_PANEL_CHOICE=ask
 AUDIO_CHOICE=ask
 DLSS_CHOICE=ask
+WEBKIT_CHOICE=ask
+EFI_TARGET=""
 [ "${NULLMOTH_DLSS:-0}" != 1 ] || DLSS_CHOICE=yes
 while [ "$#" != 0 ]; do
   case "$1" in
@@ -18,10 +20,15 @@ while [ "$#" != 0 ]; do
     --audio=no) AUDIO_CHOICE=no; shift;;
     --intel-panel=yes) INTEL_PANEL_CHOICE=yes; shift;;
     --intel-panel=no) INTEL_PANEL_CHOICE=no; shift;;
-    *) echo "STOP: expected --payload directory, --intel-panel=yes|no, --audio=yes|no or --dlss=yes|no" >&2; exit 2;;
+    --webkit-fixup=manual|--webkit-fixup=auto|--webkit-fixup=skip) WEBKIT_CHOICE=${1#*=}; shift;;
+    --efi-target)
+      [ "$#" -ge 2 ] && [ -n "$2" ] || { echo "STOP: --efi-target requires diskXsY or a mounted EFI/OC path" >&2; exit 2; }
+      EFI_TARGET=$2; shift 2;;
+    *) echo "STOP: expected --payload directory, --intel-panel=yes|no, --audio=yes|no, --dlss=yes|no, --webkit-fixup=manual|auto|skip or --efi-target target" >&2; exit 2;;
   esac
 done
 KEXTS="NVRM NVAccel NVRMFB NVRMAGDC"
+SOURCE_PACKAGE=$HERE
 REMOVED_KEXTS=""
 EXT=/Library/Extensions; GB=/Library/GPUBundles; FW=/Library/NullMoth/nvfw; FWOLD=/Users/Shared/nvfw
 AUDIO_MARKER=/Library/NullMoth/nvidia-audio.sha256
@@ -849,6 +856,63 @@ elif [ -f "$HERE/dlss_fetch.sh" ]; then
   else
     echo "   Native MetalFX DLSS download/update skipped; existing DLSS files are kept. Wine/CrossOver setup is unchanged."
   fi
+fi
+
+# Optional WebKit helper lives in OpenCore, never the system kext repositories.
+# This runs after the driver transaction. EFI failures retain the working driver.
+webkit_manual() {
+  echo "   Manual Safari WebGL helper setup:"
+  printf '   Kext: %s/Optional/NVWebKitFixup/NVWebKitFixup.kext\n' "$SOURCE_PACKAGE"
+  echo "   Mount your OpenCore EFI and copy that kext to EFI/OC/Kexts/. Keep your installed Lilu."
+  echo "   Add/enable NVWebKitFixup in Kernel > Add immediately after Lilu:"
+  echo "   Arch=x86_64; ExecutablePath=Contents/MacOS/NVWebKitFixup; PlistPath=Contents/Info.plist"
+  echo "   MinKernel=24.0.0; MaxKernel=25.99.99. Back up EFI first, validate config.plist, then reboot."
+  printf '   Entry template: %s/Optional/NVWebKitFixup/Kernel-Add.plist\n' "$SOURCE_PACKAGE"
+  printf '   Full guide and recovery steps: %s/Optional/NVWebKitFixup/README.md\n' "$SOURCE_PACKAGE"
+}
+choose_webkit_fixup() {
+  echo "   Optional Safari WebGL helper for Intel Sequoia/Tahoe (requires Lilu 1.7.2+)."
+  echo "   Manual gives copy/config instructions; automatic backs up and updates the OpenCore EFI you select."
+  if [ "$WEBKIT_CHOICE" = ask ]; then
+    WEBKIT_CHOICE=manual
+    if [ -t 0 ]; then
+      printf '   Safari WebGL helper: [M]anual / [a]utomatic / [s]kip [M]: '
+      answer=''; IFS= read -r answer || answer=''
+      case "$answer" in a|A|auto|automatic) WEBKIT_CHOICE=auto;; s|S|skip) WEBKIT_CHOICE=skip;; esac
+    fi
+  fi
+}
+webkit_step_covered() {
+  local entry
+  for entry in 'efi\.py' 'Kernel-Add\.plist' 'NVWebKitFixup\.kext/Contents/Info\.plist' \
+               'NVWebKitFixup\.kext/Contents/MacOS/NVWebKitFixup' 'NVWebKitFixup\.kext/Contents/_CodeSignature/CodeResources'; do
+    grep -qE "^[0-9a-fA-F]{64} [ *](\./)?Optional/NVWebKitFixup/${entry}$" "$HERE/SHA256SUMS" || return 1
+  done
+}
+if [ -d "$HERE/Optional/NVWebKitFixup/NVWebKitFixup.kext" ]; then
+  choose_webkit_fixup
+  case "$WEBKIT_CHOICE" in
+    manual) webkit_manual;;
+    auto)
+      if ! webkit_step_covered; then
+        echo "   NOTE: package checksums do not cover the EFI helper; automatic installation skipped."
+        webkit_manual
+      else
+        if [ -z "$EFI_TARGET" ] && [ -t 0 ]; then
+          echo "   Select the EFI you boot from. Partitions: diskutil list"
+          printf '   EFI partition (diskXsY) or mounted /Volumes/.../EFI/OC path: '
+          IFS= read -r EFI_TARGET || EFI_TARGET=''
+        fi
+        if [ -z "$EFI_TARGET" ]; then
+          echo "   NOTE: no EFI target selected; automatic installation skipped."
+          webkit_manual
+        elif ! /usr/bin/python3 "$HERE/Optional/NVWebKitFixup/efi.py" install --target "$EFI_TARGET"; then
+          echo "   NOTE: EFI helper installation did not complete; the NVIDIA driver is installed. Review the EFI backup/error above."
+          webkit_manual
+        fi
+      fi;;
+    skip) echo "   Safari WebGL helper skipped; existing EFI entries are kept.";;
+  esac
 fi
 
 echo; echo "Done. Reboot now: sudo shutdown -r now"

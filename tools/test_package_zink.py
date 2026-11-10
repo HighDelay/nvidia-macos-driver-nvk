@@ -55,6 +55,13 @@ class PackageZinkTests(unittest.TestCase):
             'overlay_sha256':pkg.base_tools.digest(ROOT/'zink/mesa-zink-nvk.patch')}))
         record(self.zink,'zink',mesa); record(self.zink,'cgl')
         pkg.base_tools.write_manifest(self.base)
+        self.webkit = self.root/'webkit-build'
+        self.bundle(self.webkit/'NVWebKitFixup.kext', 'NVWebKitFixup')
+        (self.webkit/'NVWebKitFixup.kext/Contents/Info.plist').write_bytes((ROOT/'kexts/NVWebKitFixup/Info.plist').read_bytes())
+        from package_webkit import SOURCES, files
+        self.put(self.webkit/'BUILD.json', json.dumps({
+            'version':'0.2.0', 'files':files(self.webkit/'NVWebKitFixup.kext'),
+            'source_sha256':{name:pkg.base_tools.digest(ROOT/name) for name in SOURCES}}).encode())
         self.original = self.snapshot(self.base)
         self.zink_original = self.snapshot(self.zink)
 
@@ -91,7 +98,7 @@ class PackageZinkTests(unittest.TestCase):
 
     def stage(self, native_gld=False):
         with patch.object(pkg, 'run', side_effect=self.fake_run):
-            return pkg.stage(self.base, self.zink, self.out, native_gld=native_gld)
+            return pkg.stage(self.base, self.zink, self.out, native_gld=native_gld, webkit_fixup_build=self.webkit)
 
     def unchanged(self):
         self.assertEqual(self.original, self.snapshot(self.base))
@@ -424,13 +431,57 @@ class PackageZinkTests(unittest.TestCase):
         self.native_bundle()
         archive = self.root/'local-test.tar.gz'
         argv = ['package_zink.py','--base',str(self.base),'--zink',str(self.zink),
-                '--stage',str(self.out),'--archive',str(archive)]
+                '--stage',str(self.out),'--archive',str(archive),'--webkit-fixup-build',str(self.webkit)]
         with patch.object(sys,'argv',argv),patch.object(pkg,'run',side_effect=self.fake_run):
             pkg.main()
         with tarfile.open(archive) as stream:
             for info in stream.getmembers():
                 self.assertTrue(info.name == 'pkgroot' or info.name.startswith('pkgroot/'))
                 self.assertEqual((info.uid,info.gid,info.uname,info.gname),(0,0,'root','root'))
+
+    def test_webkit_bundle_is_optional_and_fully_covered(self):
+        self.stage()
+        component=self.out/'Optional/NVWebKitFixup'
+        self.assertEqual(self.snapshot(component/'NVWebKitFixup.kext'),self.snapshot(self.webkit/'NVWebKitFixup.kext'))
+        self.assertFalse((component/'BUILD.json').exists())
+        self.assertFalse((self.out/'Library/Extensions/NVWebKitFixup.kext').exists())
+        self.assertEqual((component/'efi.py').read_bytes(),(ROOT/'package/webkit_fixup_efi.py').read_bytes())
+        self.assertIn('Optional/NVWebKitFixup/README.md',(self.out/'READ-ME.md').read_text())
+        identity=json.loads((self.out/'PACKAGE-IDENTITY.json').read_text())
+        self.assertTrue(identity['optional_webkit_fixup']['bundled'])
+        pkg.base_tools.verify_manifest(self.out)
+
+    def test_modified_helper_is_rejected_without_output(self):
+        (self.webkit/'NVWebKitFixup.kext/Contents/MacOS/NVWebKitFixup').write_bytes(b'changed')
+        with self.assertRaisesRegex(ValueError,'hashes do not match'):self.stage()
+        self.assertFalse(self.out.exists())
+
+    def test_stale_helper_sources_are_rejected_without_output(self):
+        record=json.loads((self.webkit/'BUILD.json').read_text());record['source_sha256']={}
+        (self.webkit/'BUILD.json').write_text(json.dumps(record))
+        with self.assertRaisesRegex(ValueError,'sources changed'):self.stage()
+        self.assertFalse(self.out.exists())
+
+    def test_helper_build_is_required_even_when_other_components_match(self):
+        with patch.object(pkg,'run',side_effect=self.fake_run):
+            with self.assertRaisesRegex(ValueError,'Supply --webkit-fixup-build'):
+                pkg.stage(self.base,self.zink,self.out)
+        self.assertFalse(self.out.exists())
+
+    def test_helper_build_record_binds_sources_and_sdk_inputs(self):
+        from package_webkit import record as record_helper, files
+        lilu=self.root/'Lilu.kext';sdk=self.root/'KernelSDK'
+        for relative in ('Contents/MacOS/Lilu','Contents/Resources/Headers/header.hpp','Contents/Resources/Library/plugin_start.cpp'):
+            self.put(lilu/relative,relative.encode())
+        for relative in ('Headers/sys/kernel.h','Library/x86_64/libkmod.a'):
+            self.put(sdk/relative,relative.encode())
+        with patch('package_webkit.subprocess.run'):
+            record_helper(self.webkit,lilu,sdk)
+        identity=json.loads((self.webkit/'BUILD.json').read_text())
+        self.assertEqual(identity['files'],files(self.webkit/'NVWebKitFixup.kext'))
+        self.assertIn('kexts/NVWebKitFixup/compatibility.hpp',identity['source_sha256'])
+        self.assertIn('Contents/Resources/Library/plugin_start.cpp',identity['lilu_sdk_sha256'])
+        self.assertIn('Library/x86_64/libkmod.a',identity['kernel_sdk_libraries_sha256'])
 
 
 if __name__ == '__main__':

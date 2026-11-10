@@ -15,6 +15,7 @@ import stage_package as base_tools
 from record_zink_runtime import COMPONENTS
 from prepare_zink import MESA_COMMIT
 from package_layout import organize
+from package_webkit import stage as stage_webkit
 
 ROOT = Path(__file__).resolve().parents[1]
 BASE_RUNTIME = Path('Library/GPUBundles/nvmtl')
@@ -78,7 +79,7 @@ def stage_optional_audio(payload):
             'provenance': 'unchanged audio payload from the checksum-verified base package'}
 
 
-def stage(base, zink, output, components=None, native_gld=False, records=None):
+def stage(base, zink, output, components=None, native_gld=False, records=None, webkit_fixup_build=None):
     if components is not None:
         raise ValueError("Stage matched driver components with build/stage_package.py first; arbitrary Library overlays are unsupported")
     base = base.resolve(strict=True)
@@ -141,6 +142,7 @@ def stage(base, zink, output, components=None, native_gld=False, records=None):
         payload = Path(temp) / 'pkgroot'
         copy_bundle(base, payload)
         audio_identity = stage_optional_audio(payload)
+        webkit_identity = stage_webkit(payload, webkit_fixup_build, run)
         # Always bundle the real framebuffer, outside Library/Extensions. Only
         # an explicit installer choice copies it into the system repositories.
         panel_build = Path(temp) / 'intel-panel'
@@ -313,6 +315,7 @@ def stage(base, zink, output, components=None, native_gld=False, records=None):
                     'component_replacements': replacements, 'firmware': sorted(firmware_paths),
                     'optional_intel_panel': panel_identity,
                     'optional_audio': audio_identity,
+                    'optional_webkit_fixup': webkit_identity,
                     'native_dlss_support': native_dlss,
                     'zink_sha256': base_tools.digest(runtime / 'libnvk_zink.dylib'),
                     'cgl_sha256': base_tools.digest(runtime / 'libnvk_cgl.dylib'),
@@ -358,11 +361,12 @@ def main():
     ap.add_argument('--stage', required=True, type=Path)
     ap.add_argument('--archive', required=True, type=Path)
     ap.add_argument('--build-records', type=Path, help='New external build-record directory (default: <stage>-build-records)')
+    ap.add_argument('--webkit-fixup-build', required=True, type=Path, help='Matched optional NVWebKitFixup build directory, including BUILD.json')
     ap.add_argument('--native-gld', action='store_true', default=True, help='Select native Zink OpenGL for applications (default; Intel Sequoia/Tahoe accelerators)')
     ap.add_argument('--explicit-cgl-only', action='store_false', dest='native_gld', help='Developer-only package: do not select a system GLD')
     args = ap.parse_args()
     if args.archive.exists(): raise SystemExit('Archive already exists')
-    payload = stage(args.base, args.zink, args.stage, args.components, args.native_gld, args.build_records)
+    payload = stage(args.base, args.zink, args.stage, args.components, args.native_gld, args.build_records, args.webkit_fixup_build)
     args.archive.parent.mkdir(parents=True, exist_ok=True)
     temporary = args.archive.with_name('.' + args.archive.name + '.tmp')
     try:

@@ -456,14 +456,27 @@ static PFN_vkGetInstanceProcAddr pvkGetInstanceProcAddr; static PFN_vkCreateInst
 #include "nvmtl_fd_token.h"
 static long nvmtl_sysconf(int name)
 {
+    const int saved = errno;
     long v = sysconf(name);
-    if (v > 0 || name != _SC_PHYS_PAGES) return v;
-    static mach_port_t host;
-    if (!host) host = mach_host_self();
-    host_basic_info_data_t hi; mach_msg_type_number_t n = HOST_BASIC_INFO_COUNT;
-    if (host_info(host, HOST_BASIC_INFO, (host_info_t)&hi, &n) != KERN_SUCCESS || !hi.max_mem) return v;
-    long page = getpagesize();
-    return page > 0 ? (long)(hi.max_mem / (uint64_t)page) : v;
+    if (v != -1 || (name != _SC_PAGESIZE && name != _SC_PHYS_PAGES)) return v;
+    const int failure = errno;
+    // WebKit denies hw.pagesize_compat. The VM page size is already supplied
+    // by Mach at process startup; querying libc's getpagesize() would fail too.
+    if (!vm_page_size) { errno = failure; return v; }
+    if (name == _SC_PAGESIZE) { errno = saved; return (long)vm_page_size; }
+    uint64_t bytes = 0; size_t length = sizeof(bytes);
+    if (sysctlbyname("hw.memsize", &bytes, &length, NULL, 0) || length != sizeof(bytes) || !bytes) {
+        host_basic_info_data_t hi = {0}; mach_msg_type_number_t n = HOST_BASIC_INFO_COUNT;
+        mach_port_t host = mach_host_self();
+        kern_return_t result = host_info(host, HOST_BASIC_INFO, (host_info_t)&hi, &n);
+        mach_port_deallocate(mach_task_self(), host);
+        if (result != KERN_SUCCESS || !hi.max_mem) { errno = failure; return v; }
+        bytes = hi.max_mem;
+    }
+    uint64_t pages = bytes / vm_page_size;
+    if (!pages || pages > (uint64_t)LONG_MAX) { errno = failure; return v; }
+    errno = saved;
+    return (long)pages;
 }
 #include "nvmtl_rebind_import.h"
 

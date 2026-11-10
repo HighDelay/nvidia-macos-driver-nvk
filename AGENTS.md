@@ -84,6 +84,14 @@ focused on installation and runtime files. The top level contains one short
 `READ-ME.md`, one current `PACKAGE-IDENTITY.json`, the installer/verification
 tools, `VERSION`, checksums and payload directories. Group useful setup guides
 under `Guides/`; keep optional-component instructions with that component.
+Bundle the matching NVWebKitFixup build under `Optional/NVWebKitFixup/`, including
+its entry template, EFI helper, guide and licenses. Its installer choice is
+Manual (default), Automatic or Skip. Manual must print the original extracted
+package path and OpenCore instructions, not a temporary private-copy path.
+Automatic requires an explicitly selected EFI target, verified compatible Lilu,
+an unvaulted config and guarded backup/rollback; never guess or silently edit EFI.
+Keep it out of `/Library/Extensions` and the driver's kernel collections. A
+packaging step must verify its source/build identity and complete checksums.
 Do not accumulate duplicate identities, `BASE-*` histories, repair/validation
 reports, review notes or temporary test instructions in `pkgroot`. Preserve
 those records beside the build output, outside the installable archive.
