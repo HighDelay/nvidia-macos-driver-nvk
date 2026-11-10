@@ -119,10 +119,11 @@ def decode_name(name):
     return re.sub(r"\\([\\nr])", lambda m: {"\\": "\\", "n": "\n", "r": "\r"}[m[1]], name)
 
 
-def verify_manifest(root):
+def verify_manifest(root, *, complete=True):
     manifest = root / "SHA256SUMS"
     regular(manifest)
     count = 0
+    covered = set()
     for row in manifest.read_text(encoding="utf-8").splitlines():
         if not row or row.startswith("#"):
             continue
@@ -135,8 +136,14 @@ def verify_manifest(root):
         target = root / relative
         require(inside(target.resolve(strict=True), root), "checksum target escapes package: " + name)
         require(digest(target) == match[1].lower(), "SHA256SUMS mismatch: " + name)
+        covered.add(target.relative_to(root).as_posix())
         count += 1
     require(count > 0, "empty checksum manifest: " + str(manifest))
+    if complete:
+        present = {path.relative_to(root).as_posix() for path in root.rglob("*")
+                   if path.is_file() and not path.is_symlink() and path != manifest}
+        missing = present - covered
+        require(not missing, "SHA256SUMS does not list package files: " + ", ".join(sorted(missing)[:20]))
 
 
 def write_manifest(root):
@@ -332,7 +339,10 @@ def validate_wine_runtime(root, checker):
     extra = {"nvk-wine-runtime.json", "README.md", "BUILD.json", "SHA256SUMS"}
     for name in extra:
         regular(root / name)
-    verify_manifest(root)
+    # A provider working directory may also contain Wine/cache files. Only the
+    # verified allowlist below is copied; never copy the directory wholesale.
+    # The installable package itself always requires complete manifest coverage.
+    verify_manifest(root, complete=False)
     return tuple(root / name for name in sorted(set(files) | extra))
 
 
@@ -477,6 +487,7 @@ def stage(args):
         for major, accelerator in accelerators.items():
             if accelerator:
                 write_manifest(work / ACCEL[major].parent)
+        replace_file(REPO / "package/sums_complete.sh", work / "sums_complete.sh")
         for name in ("install.sh", "uninstall.sh"):
             (work / name).chmod(0o755)
         validate_links(work)

@@ -268,7 +268,7 @@ def stage(base, zink, output, components=None, native_gld=False, records=None, w
         if test_dir.exists(): shutil.rmtree(test_dir)
         # Use this checkout's installer fixes, preserving its private payload,
         # preflight, backup, rollback and OS accelerator-selection behavior.
-        for name in ('install.sh', 'uninstall.sh'):
+        for name in ('install.sh', 'uninstall.sh', 'sums_complete.sh'):
             shutil.copy2(ROOT / 'package' / name, payload / name)
             (payload / name).chmod(0o755)
         native_dlss = None

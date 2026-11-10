@@ -243,6 +243,12 @@ HERE="$STAGE/pkgroot"
 VAR="$HERE/Library/NullMoth/kexts/$MAJ"
 # --strict: without it shasum skips a malformed line and still reports success
 (cd "$HERE" && shasum -a 256 --strict -c SHA256SUMS --quiet) || die "SHA256SUMS mismatch: re-download the package"
+# Hash verification alone ignores files absent from the manifest. Check the
+# complete private payload, using a checker whose own bytes were just verified.
+[ -f "$HERE/sums_complete.sh" ] && [ ! -L "$HERE/sums_complete.sh" ] && \
+  grep -qE '^[0-9a-fA-F]{64} [ *](\./)?sums_complete\.sh$' "$HERE/SHA256SUMS" \
+  || die "this package does not carry a verified sums_complete.sh: re-download the package"
+bash "$HERE/sums_complete.sh" "$HERE" || die "the package holds files SHA256SUMS does not list: re-download the package"
 for target in 15 26; do
   [ -f "$HERE/Library/NullMoth/kexts/$target/NVAccel.kext/Contents/MacOS/NVAccel" ] && \
     [ -f "$HERE/Library/NullMoth/kexts/$target/NVAccel.kext/Contents/Info.plist" ] || die "this package lacks the complete macOS $target accelerator"

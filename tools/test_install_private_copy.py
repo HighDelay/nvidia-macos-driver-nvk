@@ -32,6 +32,7 @@ def package(t, links=()):
     kext.parent.mkdir(parents=True); kext.write_bytes(b"checked-NVRM")
     lib = here / "Library/GPUBundles/nvmtl/libvulkan.1.dylib"
     lib.parent.mkdir(parents=True); lib.write_bytes(b"vulkan")
+    (here / "sums_complete.sh").write_bytes((ROOT / "package/sums_complete.sh").read_bytes())
     for name, target in links:
         (lib.parent / name).symlink_to(target)
     files = sorted(p for p in here.rglob("*") if p.is_file() and not p.is_symlink())
@@ -48,6 +49,11 @@ def run(t, here, after="", payload=False):
     where = t / "elsewhere" if payload else here
     where.mkdir(exist_ok=True)
     (where / "install.sh").write_text(script)
+    if where == here:
+        # The generated harness is itself payload. Cover it without resealing
+        # the other files, so the corrupted-kext negative control still fires.
+        with (here / "SHA256SUMS").open("a") as manifest:
+            manifest.write(hashlib.sha256(script.encode()).hexdigest() + "  install.sh\n")
     r = subprocess.run(["/bin/bash", str(where / "install.sh")], capture_output=True, text=True)
     return r.returncode, r.stdout + r.stderr
 

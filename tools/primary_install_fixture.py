@@ -84,6 +84,7 @@ class Install(unittest.TestCase):
             helper.write_bytes((REPO/'tools/primary_runtime_fixture.sh').read_bytes());helper.chmod(0o755)
 
         fw=self.payload/'Users/Shared/nvfw';fw.mkdir(parents=True);(fw/'fixture').write_text('new-firmware')
+        (self.payload/'sums_complete.sh').write_bytes((REPO/'package/sums_complete.sh').read_bytes())
         lines=[hashlib.sha256(p.read_bytes()).hexdigest()+'  '+str(p.relative_to(self.payload)) for p in self.payload.rglob('*') if p.is_file()]
         (self.payload/'SHA256SUMS').write_text('\n'.join(lines)+'\n')
         self.old={}
@@ -106,6 +107,9 @@ class Install(unittest.TestCase):
             source=source.replace('$HERE/__PAYLOAD_'+prefix.replace('/','_')+'__','$HERE/'+prefix)
         source=source.replace('require_install_directory /Library\n','require_install_directory '+str(self.root/'Library')+'\n')
         self.script=self.payload/'install.sh';self.script.write_text(source)
+        # The actual installer is part of the verified payload too.
+        with (self.payload/'SHA256SUMS').open('a') as manifest:
+            manifest.write(hashlib.sha256(self.script.read_bytes()).hexdigest()+'  install.sh\n')
         self.env=dict(os.environ,FIXTURE_ROOT=str(self.root),PATH=str(self.bin)+':/usr/bin:/bin:/usr/sbin:/sbin')
     def tearDown(self):self.temp.cleanup()
     def run_install(self,**faults):return subprocess.run(['/bin/bash',str(self.script)],env=dict(self.env,**faults),capture_output=True,text=True)
