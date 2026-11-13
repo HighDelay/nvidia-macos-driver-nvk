@@ -1,0 +1,189 @@
+{
+  "schema_version": 1,
+  "date": "2026-11-13",
+  "hardware": {
+    "gpu": "NVIDIA GeForce RTX 2060 SUPER",
+    "vram_gib": 8,
+    "macos": "26.7.1",
+    "build": "25G241",
+    "display": "1920x1080 at 75 Hz"
+  },
+  "behavior": {
+    "wine_reuse_default": true,
+    "disable": "WINE_NVK_PRESENT_REUSE=0",
+    "profiling_default": false,
+    "profiling_enable": "WINE_NVK_PRESENT_PROFILE=1",
+    "max_cache_entries_per_swapchain": 3,
+    "max_retained_iosurface_bytes_per_swapchain": 67108864,
+    "gpu_completion_wait_preserved": true,
+    "drawable_retained_in_cache": false,
+    "minecraft_frontend_policy_changed": false,
+    "yaagl_update_required": false
+  },
+  "game_comparison": {
+    "game": "ZZZ",
+    "api": "D3D11/DXVK",
+    "wine": "YAAGL Wine 11.0-1",
+    "graphics": "1080p High",
+    "msync_enabled_in_both_runs": true,
+    "profiling_enabled_in_both_runs": true,
+    "scene_control": "User positioned the character and camera; no scripted replay",
+    "baseline_reuse_environment": "0",
+    "trial_reuse_environment": "1",
+    "baseline": {
+      "seconds": 30.001029279999784,
+      "frames": 2220,
+      "fps": 73.99746119643852,
+      "bytes_per_frame": 8294400.0,
+      "import_failures": 0,
+      "created": 2220,
+      "cache_hits": 0,
+      "errors": 0,
+      "ms_per_frame": {
+        "present_ns": 13.183706357207207,
+        "profile_drawable_ns": 7.952502540990991,
+        "prepare_ns": 0.33579798018018014,
+        "record_ns": 0.019218816216216215,
+        "submit_ns": 0.005239634234234234,
+        "fence_ns": 4.700004528828829,
+        "publish_ns": 0.05637150900900901,
+        "cleanup_ns": 0.10557719414414414,
+        "lock_ns": 9.662342342342341e-05
+      }
+    },
+    "reuse": {
+      "seconds": 30.003041199999643,
+      "frames": 2246,
+      "fps": 74.85907795240526,
+      "bytes_per_frame": 8294400.0,
+      "import_failures": 0,
+      "created": 0,
+      "cache_hits": 2245,
+      "errors": 0,
+      "ms_per_frame": {
+        "present_ns": 13.170894704808548,
+        "profile_drawable_ns": 11.553305159394478,
+        "prepare_ns": 0.005229581478183437,
+        "record_ns": 0.01526780320569902,
+        "submit_ns": 0.0054687448797862874,
+        "fence_ns": 1.518944998664292,
+        "publish_ns": 0.06082655431878896,
+        "cleanup_ns": 0.0,
+        "lock_ns": 7.492787177203918e-05
+      }
+    },
+    "resource_cpu_reduction_percent": 98.81516184361998,
+    "user_observation": "It is pretty smooth",
+    "frontend_sha256": "d7f65eed73f8cf6bf133e67fa51ad0b0a07d815a526bc792f30c3ea58733ae29"
+  },
+  "final_default_on_validation": {
+    "wine_asan_ubsan_fixture": "PASS, including actual device-creation defaults, opt-out, independent profiling, ownership, reset failure and timeout quarantine",
+    "native_asan_ubsan_fixture": "PASS, including refusal to enable Wine options in native frontend",
+    "gpu_abi": "PASS, direct Metal export/proc identity and 1024-word fill/readback",
+    "pixel_checked_presentations": [
+      {
+        "name": "default-reuse-pixels",
+        "exit_code": 0,
+        "seconds": 3.025,
+        "frames": 120,
+        "reuse_environment": null,
+        "profile_environment": "1",
+        "present_stats": {
+          "frames": 120,
+          "total_ns": 982276552,
+          "drawable_ns": 663331534,
+          "prepare_ns": 1771880,
+          "record_ns": 11674316,
+          "submit_ns": 545201,
+          "fence_ns": 22217245,
+          "publish_ns": 6651911,
+          "cleanup_ns": 443356,
+          "created": 6,
+          "hits": 114,
+          "evicted": 0,
+          "errors": 0,
+          "bytes": 156672000,
+          "lock_ns": 8249
+        }
+      },
+      {
+        "name": "default-optout-pixels",
+        "exit_code": 0,
+        "seconds": 2.724,
+        "frames": 90,
+        "reuse_environment": "0",
+        "profile_environment": "1",
+        "present_stats": {
+          "frames": 90,
+          "total_ns": 729237288,
+          "drawable_ns": 466928719,
+          "prepare_ns": 17210785,
+          "record_ns": 2426471,
+          "submit_ns": 367341,
+          "fence_ns": 17171946,
+          "publish_ns": 4774052,
+          "cleanup_ns": 7154968,
+          "created": 90,
+          "hits": 0,
+          "evicted": 0,
+          "errors": 0,
+          "bytes": 117504000,
+          "lock_ns": 6315
+        }
+      },
+      {
+        "name": "default-profileoff-pixels",
+        "exit_code": 0,
+        "seconds": 2.638,
+        "frames": 60,
+        "reuse_environment": null,
+        "profile_environment": null,
+        "present_stats": {
+          "frames": 0,
+          "total_ns": 0,
+          "drawable_ns": 0,
+          "prepare_ns": 0,
+          "record_ns": 0,
+          "submit_ns": 0,
+          "fence_ns": 0,
+          "publish_ns": 0,
+          "cleanup_ns": 0,
+          "created": 0,
+          "hits": 0,
+          "evicted": 0,
+          "errors": 0,
+          "bytes": 0,
+          "lock_ns": 0
+        }
+      }
+    ],
+    "provider_setup_rollback_check_count": 19,
+    "provider_setup_rollback": "PASS",
+    "frontend_sha256": "7efe46563ada42c79845d05e1c207b9496d5baeb090979e0d1a3386014349bf4",
+    "source_files_sha256": {
+      "nvk/native-macos/bridge.mm": "20c7007cfebe1d922c0ac27896b0c4c109de65a709543c4ef62fb1137a65cebd",
+      "plugin/nvmtl_fd_token.h": "529facd38ce390e708a54c51922a805d5ae5c3ee62c08751743004f10a121aa0",
+      "plugin/nvmtl_rebind_import.h": "887f321a441fdd8feaeb452b705734f9a3905175519c64a2f73ade5aaa9fe120",
+      "nvk/native-macos/present_hud.h": "793b1304fd47ef4774297e065ab78ea5fab509e8aa14a85b37393bc70940b174",
+      "nvk/wine-macos/build.py": "c7d916171347a9cf4d7166fd93a160f379eb4495c62d63d49353a24c00d27dae"
+    },
+    "runtime_id": "nvk-wine-provider-88d5a58cb872",
+    "renderer_sha256": "106d3e14babcbc230389e3614571b9757b14042d6b216c48d444d3fb32bf4562",
+    "provider_changes": [
+      "FRONTEND-BUILD.json",
+      "lib/libnvk_wine.dylib"
+    ],
+    "installed_provider_modified": false,
+    "full_driver_built": false
+  },
+  "limits": [
+    "Short single-host comparison near the display refresh ceiling; no large uncapped FPS gain established.",
+    "No scripted scene replay, per-frame GPU timestamps or 1-percent-low claim.",
+    "Counters are read without pausing the target; fields can differ by one frame at sample boundaries.",
+    "Fence timing includes rendering dependencies and the copy; it is not copy-only GPU execution time.",
+    "The game trial used explicit reuse=1; the final unset-variable default was separately verified by the real-GPU pixel tests.",
+    "Native probes include separate diagnostic readback and are correctness tests, not gameplay FPS benchmarks.",
+    "Other games, GPUs, commercial CrossOver and sustained sessions remain unqualified.",
+    "Source update and private frontend/provider validation only; full driver build and release remain held."
+  ]
+}

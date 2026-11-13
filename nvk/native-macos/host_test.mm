@@ -83,6 +83,8 @@ static VkResult fake_semaphore(VkDevice,const VkSemaphoreCreateInfo *,const VkAl
    *out=(VkSemaphore)(uintptr_t)0x44;return VK_SUCCESS;
 }
 static void fake_destroy_semaphore(VkDevice,VkSemaphore,const VkAllocationCallbacks *) { destroyed_semaphores++; }
+static VkResult fake_device_idle(VkDevice) { return VK_SUCCESS; }
+static void fake_destroy_device(VkDevice,const VkAllocationCallbacks *) {}
 static PFN_vkVoidFunction fake_gdpa(VkDevice,const char *name) {
 #ifdef NVKBRIDGE_WINE
    if (auto fn=host_proc(name)) return fn;
@@ -91,7 +93,14 @@ static PFN_vkVoidFunction fake_gdpa(VkDevice,const char *name) {
    if (!strcmp(name,"vkQueueWaitIdle")) return (PFN_vkVoidFunction)fake_idle;
    if (!strcmp(name,"vkCreateSemaphore")) return (PFN_vkVoidFunction)fake_semaphore;
    if (!strcmp(name,"vkDestroySemaphore")) return (PFN_vkVoidFunction)fake_destroy_semaphore;
+   if (!strcmp(name,"vkDeviceWaitIdle")) return (PFN_vkVoidFunction)fake_device_idle;
+   if (!strcmp(name,"vkDestroyDevice")) return (PFN_vkVoidFunction)fake_destroy_device;
    return nullptr;
+}
+static void fake_properties(VkPhysicalDevice,VkPhysicalDeviceProperties *out) { *out={};strcpy(out->deviceName,"host fixture"); }
+static void fake_memory_properties(VkPhysicalDevice,VkPhysicalDeviceMemoryProperties *out) { *out={}; }
+static VkResult fake_create_device(VkPhysicalDevice,const VkDeviceCreateInfo *,const VkAllocationCallbacks *,VkDevice *out) {
+   *out=(VkDevice)(uintptr_t)0x100;return VK_SUCCESS;
 }
 static void fake_families(VkPhysicalDevice,uint32_t *count,VkQueueFamilyProperties *out) {
    if (out && *count) { *out={};out->queueCount=1;out->queueFlags=VK_QUEUE_GRAPHICS_BIT|VK_QUEUE_COMPUTE_BIT|VK_QUEUE_TRANSFER_BIT; }
@@ -104,6 +113,10 @@ static VkResult fake_device_extensions(VkPhysicalDevice,const char *,uint32_t *c
       extension("VK_KHR_swapchain",1)},count,out);
 }
 static PFN_vkVoidFunction fake_gipa(VkInstance,const char *name) {
+   if (!strcmp(name,"vkGetPhysicalDeviceProperties")) return (PFN_vkVoidFunction)fake_properties;
+   if (!strcmp(name,"vkGetPhysicalDeviceMemoryProperties")) return (PFN_vkVoidFunction)fake_memory_properties;
+   if (!strcmp(name,"vkCreateDevice")) return (PFN_vkVoidFunction)fake_create_device;
+   if (!strcmp(name,"vkGetDeviceProcAddr")) return (PFN_vkVoidFunction)fake_gdpa;
    if (!strcmp(name,"vkGetPhysicalDeviceQueueFamilyProperties")) return (PFN_vkVoidFunction)fake_families;
    if (!strcmp(name,"vkEnumerateDeviceExtensionProperties")) return (PFN_vkVoidFunction)fake_device_extensions;
    return (PFN_vkVoidFunction)fake_idle;
@@ -151,6 +164,32 @@ int main() { @autoreleasepool {
    auto s=std::make_shared<Surface>();
    VkSurfaceKHR surface=(VkSurfaceKHR)(uintptr_t)3;
    physicals[p]=i;surfaces[surface]=s;
+   {
+      float priority=1;
+      VkDeviceQueueCreateInfo queueInfo{VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO};
+      queueInfo.queueCount=1;queueInfo.pQueuePriorities=&priority;
+      VkDeviceCreateInfo deviceInfo{VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO};
+      deviceInfo.queueCreateInfoCount=1;deviceInfo.pQueueCreateInfos=&queueInfo;
+      auto check_options=[&](bool reuse,bool profile) {
+         VkDevice created{};assert(create_device(p,&deviceInfo,nullptr,&created)==VK_SUCCESS);
+         auto state=find(devices,created);assert(state);
+#ifdef NVKBRIDGE_WINE
+         assert(state->reuse_present_resources==reuse && state->profile_present==profile);
+#else
+         (void)reuse;(void)profile;
+         assert(!state->reuse_present_resources && !state->profile_present);
+#endif
+         destroy_device(created,nullptr);assert(!find(devices,created));
+      };
+      unsetenv("WINE_NVK_PRESENT_REUSE");unsetenv("WINE_NVK_PRESENT_PROFILE");
+      check_options(true,false);
+      setenv("WINE_NVK_PRESENT_REUSE","0",1);setenv("WINE_NVK_PRESENT_PROFILE","1",1);
+      check_options(false,true);
+      setenv("WINE_NVK_PRESENT_REUSE","1",1);setenv("WINE_NVK_PRESENT_PROFILE","0",1);
+      check_options(true,false);
+      unsetenv("WINE_NVK_PRESENT_REUSE");unsetenv("WINE_NVK_PRESENT_PROFILE");
+      puts("PASS device creation defaults, reuse opt-out and independent profiling stay Wine-only");
+   }
    VkPhysicalDeviceSurfaceInfo2KHR info{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SURFACE_INFO_2_KHR};info.surface=surface;
    VkSurfaceFormat2KHR format{VK_STRUCTURE_TYPE_SURFACE_FORMAT_2_KHR};format.surfaceFormat.format=VK_FORMAT_UNDEFINED;
    count=0;assert(surface_formats2(p,&info,&count,&format)==VK_INCOMPLETE && !count && format.surfaceFormat.format==VK_FORMAT_UNDEFINED);

@@ -406,9 +406,10 @@ VkResult VKAPI_CALL create_device(VkPhysicalDevice physical, const VkDeviceCreat
    auto instance = find(physicals,physical); if (!instance) return VK_ERROR_INITIALIZATION_FAILED;
    auto state = std::make_shared<Device>(); state->physical=physical; state->instance=instance;
 #ifdef NVKBRIDGE_WINE
-   // Experimental switches stay prefix/process-local and survive Wine children.
+   // Wine options stay process-local and survive Wine children. Reuse completed
+   // presentation resources by default; keep an explicit troubleshooting opt-out.
    const char *reuse=getenv("WINE_NVK_PRESENT_REUSE"),*profile=getenv("WINE_NVK_PRESENT_PROFILE");
-   state->reuse_present_resources=reuse && !strcmp(reuse,"1");
+   state->reuse_present_resources=!reuse || strcmp(reuse,"0")!=0;
    state->profile_present=profile && !strcmp(profile,"1");
 #endif
    IP(instance, GetPhysicalDeviceProperties)(physical,&state->properties);

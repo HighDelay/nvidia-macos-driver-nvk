@@ -1507,6 +1507,26 @@ and a NeoForge 26.3.0.99 game session confirmed by the user and its native NVK l
 Other GPUs, broad WSI conformance and a controlled performance
 comparison remain unqualified. See [Native Vulkan presentation](../nvk/native-macos/README.md).
 
+## Wine presentation resource reuse, 2026-11-13
+
+Retain default-on reuse of completed presentation resources in the Wine frontend,
+the `WINE_NVK_PRESENT_REUSE=0` troubleshooting opt-out and independent, default-off
+`WINE_NVK_PRESENT_PROFILE=1` counters. The native Minecraft frontend remains
+unchanged. Keep the exact retained IOSurface/layout match, three-entry and 64 MiB
+per-swapchain limits, drawable release after presentation, cache cleanup and
+acyclic ownership. Reuse is allowed only after successful GPU completion; preserve
+reset-failure handoff draining and uncertain-completion quarantine.
+
+The matched ZZZ D3D11/DXVK samples at 1080p High with MSync measured 74.0 versus
+74.9 FPS near the display's 75 Hz ceiling, while preparation/cleanup CPU overhead
+fell from 0.441 to 0.005 ms per frame. The user reported smooth rendering. This is
+a short single-host trial, not a large uncapped FPS or broad compatibility claim.
+Preserve the unchanged seven-word stats ABI and distinguish render+copy fence
+wait from GPU copy execution time. See the
+[results and validation limits](WINE-PRESENT-REUSE-20261113-RESULTS.json).
+Keep the existing driver-owned provider contract; no YAAGL runtime bundle or
+launcher setting is required.
+
 ## Native NVK runtime for Wine / DXVK
 
 Retain `nvk/wine-macos/`, `tools/wine-nvk/` and the shared frontend's

@@ -88,6 +88,22 @@ confirmed MSync was active. This is a user-reported comparison, not an automated
 benchmark or a guaranteed gain for every game. It does not qualify commercial
 CrossOver; check that its selected Wine build supports MSync.
 
+## Wine presentation resource reuse
+
+Wine/NVK frontends built from the current source reuse completed presentation
+resources by default. This takes effect with an updated driver/provider; updating
+YAAGL alone does not change an older provider. No launcher setting is required.
+
+For troubleshooting, set `export WINE_NVK_PRESENT_REUSE=0` in the launch shell
+before starting Wine or YAAGL, then restart the game. Unset the variable to restore
+the default. The bridge reads it when creating a Vulkan device. This option is
+specific to the Wine frontend; Minecraft's separate frontend is unchanged.
+
+Reuse retains up to three completed IOSurface imports and their command resources,
+with a 64 MiB allocation limit per swapchain. It releases the drawable after every
+present and keeps the GPU completion wait. See the
+[measurement and validation details](README.md#wine-presentation-resource-reuse).
+
 ## Standalone Wine
 
 Install a driver release that includes the Wine/NVK runtime, or extract a matching

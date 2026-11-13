@@ -48,6 +48,42 @@ no controlled comparison against MoltenVK has been made.
 Physical Sequoia testing of Wine, commercial CrossOver releases and other configurations
 remain unqualified.
 
+## Wine presentation resource reuse
+
+The Wine frontend now reuses completed IOSurface imports, buffers, command
+pools/buffers and fences by default. Each swapchain retains at most three entries
+and 64 MiB of IOSurface allocations. Entries match the exact retained surface
+and layout, never retain a drawable, and are cleared when releasing swapchain
+images. GPU completion waits, publication and timeout quarantine remain in place.
+The separate Minecraft frontend keeps its existing behavior.
+
+`WINE_NVK_PRESENT_REUSE=0` disables reuse for troubleshooting; an unset variable
+or `1` enables it. Restart the game after changing it. No YAAGL change is needed:
+the updated driver-owned provider supplies this behavior. Published providers
+built from older source retain their original behavior.
+
+Two 30-second ZZZ D3D11/DXVK samples at 1080p High, with MSync on in both runs,
+measured the following on RTX 2060 SUPER / Tahoe 26.7.1 / Wine 11.0-1:
+
+| Measurement | Reuse off | Reuse on |
+| --- | --- | --- |
+| Average presentation FPS | 74.0 | 74.9 |
+| Resource preparation + cleanup CPU time per frame | 0.441 ms | 0.005 ms |
+| New resource sets during the sample | 2,220 | 0 |
+| Import/presentation errors | 0 | 0 |
+
+The user reported smooth rendering. The display runs at 75 Hz, so these short
+samples establish lower presentation resource overhead, not a large uncapped FPS
+gain or a sustained stability result. Other games, GPUs and commercial CrossOver
+remain unqualified. See the [recorded results](../../docs/WINE-PRESENT-REUSE-20261113-RESULTS.json).
+
+Optional `WINE_NVK_PRESENT_PROFILE=1` enables the 16 counters returned by
+`nvkbridgeGetPresentStats`; profiling is off by default. The fence-wait counter
+includes rendering dependencies and the presentation copy, not copy-only GPU
+time. The existing seven-word `nvkbridgeGetStats` ABI is unchanged. Options are
+read per Vulkan device; counters are process-wide. Both variables use Wine's
+child-process environment forwarding.
+
 ## D3D12 and DLSS
 
 D3D12 uses `D3D12 → vkd3d-proton → Wine Vulkan → native NVK → NVIDIA GPU`,
