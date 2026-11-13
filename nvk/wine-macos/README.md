@@ -41,7 +41,10 @@ user-confirmed on an RTX 4060 Laptop GPU through native NVK/Mesa 26.3.0-devel,
 with **Steam Patch and Timeout fix enabled**. The supplied photo shows characters,
 scenery and UI. Its OS/Wine versions were not supplied. CN gameplay remains
 unqualified.
-No controlled FPS comparison has been made.
+The user reported ZZZ D3D11/DXVK at 1080p High improving from 41–50 to 60–74 FPS
+after enabling `WINEMSYNC=1` with Wine 11.0-1 on RTX 2060 SUPER / Tahoe 26.7.1.
+Logs and process samples confirmed MSync. This was not an automated benchmark;
+no controlled comparison against MoltenVK has been made.
 Physical Sequoia testing of Wine, commercial CrossOver releases and other configurations
 remain unqualified.
 
@@ -76,8 +79,8 @@ resize and restore. Minecraft's independent frontend is unchanged.
 The **2.6.4 Wine/NVK provider and newer** include these components.
 [Follow the D3D12/DLSS setup guide](INSTALL.md#d3d12-and-dlss) after installing a
 matching driver. YAAGL's separate D3D12 and DLSS settings default off; its HUD
-setting defaults on. Enable YAAGL's Steam Patch and Timeout fix for ZZZ and GI;
-keep both off for the verified HSR route.
+setting defaults on. YAAGL NVK 0.2.1 defaults Steam Patch and Timeout fix on for
+ZZZ and GI; keep both off for the verified HSR route.
 
 ## Setup with YAAGL
 
@@ -103,8 +106,11 @@ logs `Binding model: Legacy`. The descriptor-buffer path rendered ZZZ scenery
 but lost characters and HUD text; switching to descriptor sets restored both.
 The FPS/frame-time/device HUD is enabled by default. ZZZ and HSR Global gameplay
 and GI in-game rendering are user-confirmed; CN gameplay and sustained
-stability/performance remain unqualified. GI's packaged defaults still need both
-Steam Patch and Timeout fix enabled manually after applying recommended settings.
+stability/performance remain unqualified. Existing saved choices are retained;
+Apply Recommended Settings enables both workarounds for an older GI profile.
+YAAGL NVK 0.2.1 sets `WINEMSYNC=1` consistently for prefix setup, registry
+helpers and games across all launchers. See [Wine MSync](INSTALL.md#wine-msync)
+for standalone Wine and CrossOver shell setup.
 
 DXVK may report an AMD PCI vendor to D3D11 applications as its normal NVIDIA/NVAPI
 workaround. Check its Vulkan device/driver log and actual loaded libraries rather

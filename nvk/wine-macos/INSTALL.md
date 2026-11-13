@@ -52,16 +52,41 @@ the instructions below continue to use the verified D3D11 route.
 4. Settings → General → **DXVK / NVK HUD** controls the overlay on the next
    game launch. D3D11 uses DXVK's device/FPS/frame-time HUD; D3D12 uses the
    native presentation FPS/ms box.
-5. Enable **Steam Patch** and **Timeout fix** for ZZZ and GI; keep both off for
-   the verified HSR configuration. GI currently defaults to off, so enable both
-   manually after applying recommended settings. Launch through YAAGL's
-   full patch/preparation flow. A direct `wine steam.exe Game.exe` shortcut is
+5. YAAGL NVK 0.2.1 defaults **Steam Patch** and **Timeout fix** on for ZZZ and GI;
+   keep both off for the verified HSR configuration. Existing saved choices stay
+   in place; use **Apply Recommended Settings** to update an older GI profile.
+   Launch through YAAGL's full patch/preparation flow. A direct
+   `wine steam.exe Game.exe` shortcut is
    not equivalent and crashed during testing. GI/HSR retain their D3D11 routes.
 
 YAAGL takes NVK, DXVK, vkd3d and NGX/NVAPI from the installed driver provider.
 Its archives contain no graphics runtime or Wine. Wine downloads on first setup.
 Old driver providers continue to work for D3D11, but requested new features fail
 with an update message before prefix DLLs are changed.
+
+## Wine MSync
+
+Use **`WINEMSYNC=1`** with a macOS Wine build that supports Mach-based
+synchronization. The verified YAAGL Wine 11.0-1 build supports MSync and does
+not implement the older `WINEESYNC` setting. YAAGL NVK 0.2.1 enables MSync for
+all launchers, from prefix initialization and registry helpers through games
+and wineserver commands; its Start command needs no extra environment override.
+
+For standalone Wine or a compatible CrossOver build, set `export WINEMSYNC=1`
+in the dedicated launch shell **before the first Wine command**. Keep it set for
+prefix setup, DLL/NGX setup or restore helpers, prerequisites and game launches.
+The examples below use that shell setting. Do not start the same prefix with
+different synchronization modes at once. Before switching, close its applications
+and stop only that prefix's matching wineserver, for example
+`env WINEPREFIX="$nvk_prefix" /path/to/matching/wineserver -k`.
+For CrossOver, use its bottle's **Quit All Applications** command first.
+
+In the user's ZZZ D3D11/DXVK comparison on RTX 2060 SUPER / Tahoe 26.7.1 /
+Wine 11.0-1, enabling MSync and restarting the session changed the reported
+**1080p High** range from **41–50 FPS to 60–74 FPS**. Logs and process samples
+confirmed MSync was active. This is a user-reported comparison, not an automated
+benchmark or a guaranteed gain for every game. It does not qualify commercial
+CrossOver; check that its selected Wine build supports MSync.
 
 ## Standalone Wine
 
@@ -77,6 +102,7 @@ Choose a compatible Wine executable and create a dedicated 64-bit prefix:
 nvk_runtime=/Library/GPUBundles/nvmtl/wine
 nvk_wine=/absolute/path/to/wine
 nvk_prefix="$HOME/Library/Application Support/Wine/NVK"
+export WINEMSYNC=1
 "$nvk_runtime/bin/nvk-runtime" check "$nvk_runtime"
 env WINEPREFIX="$nvk_prefix" WINEARCH=win64 "$nvk_wine" wineboot.exe --init
 "$nvk_runtime/bin/nvk-runtime" install "$nvk_runtime" "$nvk_prefix"
@@ -129,6 +155,7 @@ nvk_runtime=/Library/GPUBundles/nvmtl/wine
 nvk_bottle='My Game NVK'
 nvk_prefix="$HOME/Library/Application Support/CrossOver/Bottles/$nvk_bottle"
 nvk_cx_wine='/Applications/CrossOver.app/Contents/SharedSupport/CrossOver/bin/wine'
+export WINEMSYNC=1
 "$nvk_runtime/bin/nvk-runtime" install "$nvk_runtime" "$nvk_prefix"
 cd "$nvk_prefix/drive_c/path/to/game"
 env WINEPREFIX="$nvk_prefix" \
@@ -150,6 +177,8 @@ First complete [Standalone Wine](#standalone-wine) or the
 [CrossOver setup](#crossover--opt-in-compatibility-test) above, including prefix
 initialization, the matched DXVK pair and the native-provider launch environment.
 This section adds optional D3D12/DLSS components; it does not replace that setup.
+Keep `WINEMSYNC=1` exported in the same launch shell for the setup/restore helpers
+and game commands below.
 
 These commands require a driver provider that reports `supports_d3d12: true`
 and, for DLSS, `supports_dlss: true` (2.6.4 Wine/NVK or newer). A launcher update

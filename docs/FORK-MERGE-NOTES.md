@@ -1541,11 +1541,18 @@ without replacing original DLL backups; a different pair still requires restore.
 ZZZ and Honkai: Star Rail Global D3D11 gameplay are user-confirmed on RTX 2060
 SUPER / Tahoe 26.7.1 with YAAGL Wine 11.0-1, including scenery, characters and UI.
 HSR uses its Jadeite route with the required `--` separator; Steam Patch and the
-timeout fix default off for HSR/GI and on for ZZZ. Preserve these game-specific
-defaults. A 2026-10-31 user report confirms GI startup and in-world rendering on
+timeout fix default off for HSR and on for ZZZ/GI in YAAGL NVK 0.2.1. Preserve
+these game-specific defaults. A 2026-10-31 user report confirms GI startup and in-world rendering on
 RTX 4060 Laptop / native NVK with both Steam Patch and Timeout fix enabled.
-Document that tested GI configuration separately from its current default-off
-settings; do not apply it to HSR. The report did not specify OS/Wine versions.
+GI's new defaults and Apply Recommended Settings match that configuration;
+saved explicit choices are preserved. Do not apply GI's defaults to HSR.
+The report did not specify OS/Wine versions.
+Retain YAAGL's shared `WINEMSYNC=1` environment for prefix bootstrap,
+configuration, registry setup/rollback, games and wineserver commands. The pinned
+macOS Wine 11.0-1 build supports MSync, not the old `WINEESYNC` setting. The user
+reported ZZZ 1080p High D3D11/DXVK improving from 41–50 to 60–74 FPS after
+the MSync session restart on RTX 2060 SUPER / Tahoe 26.7.1. Logs and samples
+confirmed MSync; this is not an automated benchmark or a universal speedup claim.
 CN gameplay, commercial CrossOver, other Wine builds and Sequoia Wine hardware
 remain unqualified.
 Native and Windows Vulkan/D3D11 probes verify correctness, not an FPS improvement.
