@@ -1,6 +1,6 @@
 # Retained fork changes for upstream merges
 
-## Mesa/NVK 26.3.0 private candidate, 2026-11-14
+## Mesa/NVK 26.3.0, 2026-11-14
 
 The [stable Mesa update](MESA-26.3.0-UPDATE.md) advances NVK to official
 `0a6fa60abb737d26ac8a316a4aad7c9ddf64f9e4` while retaining the 620.70.06
@@ -21,10 +21,26 @@ Minecraft 26.3 can select the existing bridge using the documented
 SDL's provider alignment. The companion selector mod is optional; an ICD
 manifest does not override LWJGL's bundled MoltenVK preference by itself.
 
-Only private renderers/runtimes are built and tested for this candidate. The
-user will test applications; the installed driver and full build/release remain
-held. Automated RTX 2060 SUPER/Tahoe checks do not qualify WindowServer, a new
-boot, Sequoia, Blackwell, or every application.
+The stable renderer is installed in the global/native/Zink/Wine paths and passed
+installed-path GPU probes. The separate async Wine trial passed automated tests
+and reached ZZZ gameplay. The user compared its synchronous fallback and final
+async repeat, preferred async and approved source promotion to main. The full
+driver build/release remains held. Automated RTX
+2060 SUPER/Tahoe checks do not qualify WindowServer, a new boot, Sequoia,
+Blackwell, or every application.
+
+## Bounded Wine presentation worker, 2026-11-14
+
+Preserve the separate lifecycle gate and bounded presentation worker described
+in [the async presentation record](WINE-ASYNC-PRESENTATION.md). Drawable acquisition
+and the rendering/copy fence wait must not hold the application submission lock
+in async mode. Keep the separately reserved copy-queue requirement, synchronous
+fallback/opt-out, copied caller arrays, source-image reservations, fenced rejected
+handoff drain, late-error reporting, idle/resize/teardown drains, process-exit join,
+HUD lifetime and timeout quarantine. Native Minecraft and Zink stay synchronous.
+Record the worker header in every frontend's source identity and the Zink
+packaging guard. User application qualification and the full-driver release hold
+remain separate from host fixtures and private GPU correctness checks.
 
 ## Safari WebGPU argument-buffer textures, 2026-11-13
 

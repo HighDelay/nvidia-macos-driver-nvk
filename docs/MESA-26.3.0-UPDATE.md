@@ -99,7 +99,29 @@ needed for this setup.
 
 Raw commands, signed MacPorts tool provenance, source/tool identities, GPU logs
 and exact private binaries are retained together on the external build volume.
-The user will perform actual application tests before promotion.
-The installed driver and runtimes are not replaced by this evaluation. A full
-driver build/release remains held; local GPU probes do not qualify a new boot,
-WindowServer, other GPUs, Sequoia, or every application.
+The user authorized direct installation of the tested userland candidate.
+Sixteen renderer/frontend/manifest files were replaced, preserving their owner,
+mode and restricted flags. Eighty-nine unrelated files and three symlinks were
+verified unchanged, including the kernel, translator, Zink/CGL frontend and
+matched DXVK/vkd3d/NGX/NVAPI dependencies. Original files and a guarded rollback
+helper are retained in the root-owned
+`/Library/NullMoth/mesa-26.3.0-trial-20261114` backup.
+
+Installed-path checks passed: 60 native exact-pixel frames with resize/restore,
+15 Metal sampler checks, system Zink/OpenGL core/mapping/sharing checks and 12
+native Zink presentations, Wine ABI fill/readback, 120 DXVK frames with five
+readbacks and resize, and D3D12 compute plus 60 presentations/three readbacks.
+Manifests, signatures, installed paths and protected-file metadata were rechecked.
+Zink still reports its independent Gallium frontend version; that string does
+not identify the updated NVK backend.
+
+ZZZ then loaded the stable renderer through the private
+[async Wine candidate](WINE-ASYNC-PRESENTATION.md), with MSync active and no bridge
+errors in the captured samples. The user compared its synchronous opt-out and
+final async repeat, preferred async and approved both source updates on main.
+Other application tests remain separate. Newly launched applications load the updated Mesa libraries; a reboot
+is optional to refresh existing system processes such as WindowServer.
+
+A full driver build/release remains held; these checks do not qualify a new
+boot, WindowServer, other GPUs, Sequoia, or every application. No reboot, kernel
+update or complete-driver installation was performed for this userland trial.

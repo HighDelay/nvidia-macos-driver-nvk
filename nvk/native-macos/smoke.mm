@@ -10,6 +10,8 @@
 #include <stdexcept>
 #include <string>
 #include <vector>
+#include <deque>
+#include <mutex>
 #include <unistd.h>
 
 static void check(VkResult r,const char *name) { if (r!=VK_SUCCESS) throw std::runtime_error(std::string(name)+" -> "+std::to_string(r)); }
@@ -18,10 +20,15 @@ static void require(bool value,const char *name) { if (!value) throw std::runtim
 #define D(name) auto name=(PFN_vk##name)gdpa(device,"vk" #name);require(name!=nullptr,"vk" #name)
 template<class T> T sym(void *lib,const char *name) { auto f=(T)dlsym(lib,name);require(f!=nullptr,name);return f; }
 static VkPhysicalDeviceMemoryProperties memory_properties;
-static unsigned current_frame;
+static std::mutex expected_mutex;
+static std::deque<unsigned> expected_frames;
 static uint64_t verified_frames{},verified_bytes{};
 using PresentObserver=void (*)(PFN_vkGetDeviceProcAddr,VkDevice,VkQueue,VkBuffer,uint32_t,uint32_t,uint32_t,uint32_t);
 static void verify_pixels(PFN_vkGetDeviceProcAddr gdpa,VkDevice device,VkQueue queue,VkBuffer source,uint32_t row,uint32_t width,uint32_t height,uint32_t family) {
+   unsigned current_frame;
+   { std::lock_guard<std::mutex> lock(expected_mutex);
+     require(!expected_frames.empty(),"unexpected presentation callback");
+     current_frame=expected_frames.front();expected_frames.pop_front(); }
    D(CreateBuffer);D(DestroyBuffer);D(GetBufferMemoryRequirements);D(AllocateMemory);D(FreeMemory);D(BindBufferMemory);
    D(CreateCommandPool);D(DestroyCommandPool);D(AllocateCommandBuffers);D(BeginCommandBuffer);D(EndCommandBuffer);
    D(CmdCopyBuffer);D(QueueSubmit);D(CreateFence);D(DestroyFence);D(WaitForFences);D(MapMemory);D(UnmapMemory);D(CmdPipelineBarrier);
@@ -202,10 +209,9 @@ int main(int argc,char **argv) { @autoreleasepool { try {
    }
    if (getenv("NVKBRIDGE_VERIFY_PIXELS")) sym<void(*)(PresentObserver)>(test_entry,"nvkbridgeSetPresentObserver")(&verify_pixels);
    for (unsigned frame=0;frame<frames;frame++) {
-      current_frame=frame;
       pump();
-      if (frame==frames/3) { require(SDL_SetWindowSize(window,800,450),SDL_GetError());usleep(150000);pump();recreate(); }
-      if (frame==frames*2/3) { SDL_MinimizeWindow(window);usleep(200000);pump();SDL_RestoreWindow(window);usleep(200000);pump();recreate(); }
+      if (frame==frames/3) { check(DeviceWaitIdle(device),"pre-resize idle");require(SDL_SetWindowSize(window,800,450),SDL_GetError());usleep(150000);pump();recreate(); }
+      if (frame==frames*2/3) { check(DeviceWaitIdle(device),"pre-minimize idle");SDL_MinimizeWindow(window);usleep(200000);pump();SDL_RestoreWindow(window);usleep(200000);pump();recreate(); }
       uint32_t image=0;check(AcquireNextImageKHR(device,chain,UINT64_MAX,acquired,VK_NULL_HANDLE,&image),"acquire");
       check(ResetCommandPool(device,pool,0),"reset pool");VkCommandBufferBeginInfo begin{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};check(BeginCommandBuffer(cb,&begin),"begin");
       VkImageMemoryBarrier barrier{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
@@ -223,6 +229,7 @@ int main(int argc,char **argv) { @autoreleasepool { try {
       sub.waitSemaphoreCount=1;sub.pWaitSemaphores=&acquired;sub.pWaitDstStageMask=&stage;sub.commandBufferCount=1;sub.pCommandBuffers=&cb;
       sub.signalSemaphoreCount=1;sub.pSignalSemaphores=&rendered;check(QueueSubmit(queue,1,&sub,fence),"render submit");
       VkPresentInfoKHR present{VK_STRUCTURE_TYPE_PRESENT_INFO_KHR};present.waitSemaphoreCount=1;present.pWaitSemaphores=&rendered;present.swapchainCount=1;present.pSwapchains=&chain;present.pImageIndices=&image;
+      if(getenv("NVKBRIDGE_VERIFY_PIXELS")) { std::lock_guard<std::mutex> lock(expected_mutex);expected_frames.push_back(frame); }
       check(QueuePresentKHR(queue,&present),"present");check(WaitForFences(device,1,&fence,VK_TRUE,5000000000ull),"render fence");check(ResetFences(device,1,&fence),"reset fence");
       initialized[image]=true;
    }
@@ -237,6 +244,7 @@ int main(int argc,char **argv) { @autoreleasepool { try {
    }
    printf("VERIFICATION frames=%llu separate_test_readback_bytes=%llu\n",verified_frames,verified_bytes);
    if (getenv("NVKBRIDGE_VERIFY_PIXELS")) require(verified_frames==frames,"verification frame count");
+   require(expected_frames.empty(),"all accepted presentations must complete before idle returns");
    DestroyFence(device,fence,nullptr);DestroySemaphore(device,acquired,nullptr);DestroySemaphore(device,rendered,nullptr);
    DestroyCommandPool(device,pool,nullptr);DestroySurfaceKHR(instance,surface,nullptr);DestroyDevice(device,nullptr);DestroyInstance(instance,nullptr);
    SDL_DestroyWindow(window);SDL_Quit();puts("PASS native SDL presentation/resize/restore");return 0;

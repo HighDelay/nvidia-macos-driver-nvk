@@ -1,5 +1,23 @@
 #include "bridge.mm"
 #include <cassert>
+#include <future>
+
+struct HostBlock {
+   std::mutex mutex;
+   std::condition_variable changed;
+   bool blocking{},entered{};
+   void enable() { std::lock_guard<std::mutex> lock(mutex);blocking=true;entered=false; }
+   void wait() {
+      std::unique_lock<std::mutex> lock(mutex);
+      if(blocking) { entered=true;changed.notify_all();changed.wait(lock,[&]{return !blocking;}); }
+   }
+   void await() {
+      std::unique_lock<std::mutex> lock(mutex);
+      assert(changed.wait_for(lock,std::chrono::seconds(5),[&]{return entered;}));
+   }
+   void release() { std::lock_guard<std::mutex> lock(mutex);blocking=false;changed.notify_all(); }
+};
+static HostBlock drawable_block,fence_block;
 
 #ifdef NVKBRIDGE_WINE
 // Objective-C presentation objects are stand-ins; the IOSurface is host memory.
@@ -19,9 +37,9 @@
 - (NSUInteger)iosurfacePlane { return 0; }
 - (MTLPixelFormat)pixelFormat { return MTLPixelFormatBGRA8Unorm; }
 @end
-static int drawable_presented,dirty_called,native_released;
-static int native_created,pool_resets,fence_resets;
-static VkResult host_wait_result=VK_TIMEOUT,host_reset_result=VK_SUCCESS;
+static std::atomic<int> drawable_presented{},dirty_called{},native_released{};
+static std::atomic<int> native_created{},pool_resets{},fence_resets{};
+static std::atomic<VkResult> host_wait_result{VK_TIMEOUT},host_reset_result{VK_SUCCESS};
 @interface HostDrawable : NSObject
 @property(strong) HostTexture *texture;
 @end
@@ -32,7 +50,7 @@ static VkResult host_wait_result=VK_TIMEOUT,host_reset_result=VK_SUCCESS;
 @property(strong) HostDrawable *drawable;
 @end
 @implementation HostLayer
-- (id)nextDrawable { return self.drawable; }
+- (id)nextDrawable { drawable_block.wait();return self.drawable; }
 @end
 static VkResult host_buffer(VkDevice,const VkBufferCreateInfo *,const VkAllocationCallbacks *,VkBuffer *out) { native_created++;*out=(VkBuffer)(uintptr_t)71;return VK_SUCCESS; }
 static void host_requirements(VkDevice,VkBuffer,VkMemoryRequirements *out) { *out={256,64,1}; }
@@ -47,7 +65,7 @@ static VkResult host_end(VkCommandBuffer) { return VK_SUCCESS; }
 static void host_barrier(VkCommandBuffer,VkPipelineStageFlags,VkPipelineStageFlags,VkDependencyFlags,uint32_t,const VkMemoryBarrier *,uint32_t,const VkBufferMemoryBarrier *,uint32_t,const VkImageMemoryBarrier *) {}
 static void host_copy(VkCommandBuffer,VkImage,VkImageLayout,VkBuffer,uint32_t,const VkBufferImageCopy *) {}
 static VkResult host_fence(VkDevice,const VkFenceCreateInfo *,const VkAllocationCallbacks *,VkFence *out) { native_created++;*out=(VkFence)(uintptr_t)75;return VK_SUCCESS; }
-static VkResult host_timeout(VkDevice,uint32_t,const VkFence *,VkBool32,uint64_t) { return host_wait_result; }
+static VkResult host_timeout(VkDevice,uint32_t,const VkFence *,VkBool32,uint64_t) { fence_block.wait();return host_wait_result; }
 static VkResult host_reset_pool(VkDevice,VkCommandPool,VkCommandPoolResetFlags) { pool_resets++;return host_reset_result; }
 static VkResult host_reset_fences(VkDevice,uint32_t n,const VkFence *fences) { assert(n==1&&fences&&*fences);fence_resets++;return VK_SUCCESS; }
 static void host_destroy_image(VkDevice,VkImage,const VkAllocationCallbacks *) {}
@@ -71,8 +89,8 @@ static void host_stage(const Share *) {}
 static uint32_t host_dirty(VkDevice,uint32_t,uint32_t) { dirty_called++;return 0; }
 #endif
 
-static int submits, waits, destroyed_semaphores;
-static VkResult injected=VK_SUCCESS;
+static std::atomic<int> submits{}, waits{}, destroyed_semaphores{};
+static std::atomic<VkResult> injected{VK_SUCCESS};
 static VkResult fake_submit(VkQueue,uint32_t count,const VkSubmitInfo *infos,VkFence) {
    assert(count==1);
    if (infos->waitSemaphoreCount) assert(infos->pWaitSemaphores && infos->pWaitDstStageMask);
@@ -125,6 +143,29 @@ static VkResult throw_oom() { throw std::bad_alloc(); }
 static VkResult throw_error() { throw std::runtime_error("injected"); }
 
 int main() { @autoreleasepool {
+   unsetenv("WINE_NVK_ASYNC_PRESENT");
+#ifdef NVKBRIDGE_WINE
+   assert(async_present_requested());
+#else
+   assert(!async_present_requested());
+#endif
+   setenv("WINE_NVK_ASYNC_PRESENT","0",1);assert(!async_present_requested());
+   setenv("WINE_NVK_ASYNC_PRESENT","1",1);
+#ifdef NVKBRIDGE_WINE
+   assert(async_present_requested());
+#else
+   assert(!async_present_requested());
+#endif
+   unsetenv("WINE_NVK_ASYNC_PRESENT");
+   puts("PASS asynchronous default and synchronous opt-out remain Wine-only");
+   {
+      std::atomic<unsigned> failures{},completed{};
+      nvkbridge::PresentWorker worker([&](std::exception_ptr){++failures;});
+      assert(worker.post([]{throw std::runtime_error("injected job failure");}));
+      assert(worker.post([&]{++completed;}));worker.drain();worker.stop();worker.stop();
+      assert(failures==1 && completed==1 && !worker.post([]{}));
+      puts("PASS worker exception containment, drain, repeated stop and post-after-stop refusal");
+   }
 #ifdef NVKBRIDGE_WINE
    {
       nvkbridge_hud::Timing timing;double fps=0,ms=0;
@@ -295,6 +336,54 @@ int main() { @autoreleasepool {
    host_reset_result=VK_SUCCESS;c->images[0].acquired=true;
    assert(queue_present(q->raw,&present)==VK_SUCCESS);
    puts("PASS cached-resource reset failure releases idle resources and preserves handoff/retry rules");
+   // The actual bridge worker must release submit during both kinds of wait.
+   d->presenter=std::make_unique<nvkbridge::PresentWorker>([device=d.get()](std::exception_ptr){fail_presenter(device);});
+   drawable_block.enable();c->images[0].acquired=true;c->images[1].acquired=true;
+   assert(queue_present(q->raw,&present)==VK_SUCCESS);drawable_block.await();
+   assert(d->submit.try_lock());d->submit.unlock();
+   assert(c->images[0].acquired && c->images[0].present_pending);
+   assert(acquire_image(d->raw,c->handle,0,semaphore,VK_NULL_HANDLE,&index)==VK_NOT_READY);
+   VkSubmitInfo empty{VK_STRUCTURE_TYPE_SUBMIT_INFO};
+   assert(queue_submit(q->raw,1,&empty,VK_NULL_HANDLE)==VK_SUCCESS);
+   auto idle=std::async(std::launch::async,[&]{return device_idle(d->raw);});
+   assert(idle.wait_for(std::chrono::milliseconds(50))==std::future_status::timeout);
+   drawable_block.release();assert(idle.get()==VK_SUCCESS);
+   assert(!c->images[0].acquired && !c->images[0].present_pending);c->images[1].acquired=false;
+   puts("PASS drawable wait is off submission thread; idle drains before releasing source image");
+   fence_block.enable();c->images[0].acquired=true;
+   const int published_before=drawable_presented;
+   assert(queue_present(q->raw,&present)==VK_SUCCESS);fence_block.await();
+   assert(d->submit.try_lock());d->submit.unlock();assert(drawable_presented==published_before);
+   assert(queue_submit(q->raw,1,&empty,VK_NULL_HANDLE)==VK_SUCCESS);
+   // Caller arrays/results go out of scope while the second job is queued.
+   { VkSwapchainKHR local_chain=c->handle;uint32_t local_index=1;VkResult local_result=VK_ERROR_UNKNOWN;
+     c->images[1].acquired=true;VkPresentInfoKHR local=present;
+     local.pSwapchains=&local_chain;local.pImageIndices=&local_index;local.pResults=&local_result;
+     assert(queue_present(q->raw,&local)==VK_SUCCESS && local_result==VK_SUCCESS);
+     local_chain=absent;local_index=99;local_result=VK_ERROR_UNKNOWN;
+   }
+   VkPresentInfoKHR rejected=present;rejected.pSwapchains=&absent;
+   auto blocked_post=std::async(std::launch::async,[&]{return queue_present(q->raw,&rejected);});
+   assert(blocked_post.wait_for(std::chrono::milliseconds(50))==std::future_status::timeout);
+   fence_block.release();assert(blocked_post.get()==VK_ERROR_OUT_OF_DATE_KHR);
+   assert(device_idle(d->raw)==VK_SUCCESS);
+   assert(drawable_presented==published_before+2 && !c->images[0].acquired && !c->images[1].acquired);
+   puts("PASS fence wait permits submissions; bounded backpressure, copied caller arrays and rejected handoff drain");
+   c->extent.width=8;c->images[0].acquired=true;
+   assert(queue_present(q->raw,&present)==VK_SUCCESS);drain_presenter(d);
+   assert(c->present_error==VK_ERROR_OUT_OF_DATE_KHR && !c->images[0].acquired);
+   assert(acquire_image(d->raw,c->handle,UINT64_MAX,semaphore,VK_NULL_HANDLE,&index)==VK_ERROR_OUT_OF_DATE_KHR);
+   c->present_error=VK_SUCCESS;c->extent.width=4;
+   fence_block.enable();c->images[0].acquired=true;
+   assert(queue_present(q->raw,&present)==VK_SUCCESS);fence_block.await();
+   const int before_destroy=native_released;
+   auto destruction=std::async(std::launch::async,[&]{destroy_swapchain(d->raw,c->handle,nullptr);});
+   assert(destruction.wait_for(std::chrono::milliseconds(50))==std::future_status::timeout);
+   assert(native_released==before_destroy);
+   fence_block.release();destruction.get();assert(!find(chains,c->handle));
+   chains[c->handle]=c;c->retired=false;c->images[0].raw=(VkImage)(uintptr_t)76;
+   d->presenter->stop();d->presenter.reset();
+   puts("PASS late resize latching and swapchain destruction drain pending work before freeing resources");
    // Timeout on the cached entry must retain every GPU-owned object unchanged.
    host_wait_result=VK_TIMEOUT;c->images[0].acquired=true;dirty_called=drawable_presented=0;
    const int before_release=native_released,before_semaphores=destroyed_semaphores;
@@ -305,8 +394,22 @@ int main() { @autoreleasepool {
    destroy_swapchain(d->raw,c->handle,nullptr);destroy_device(d->raw,nullptr);
    assert(find(chains,c->handle)==c && find(devices,d->raw)==d && native_released==before_release);
    // The mock now supplies proof of completion solely for fixture cleanup.
-   d->uncertain=false;quarantine.clear();assert(native_released==before_release+4);CFRelease(cpu);
+   d->uncertain=false;quarantine.clear();assert(native_released==before_release+4);
    puts("PASS uncertain GPU completion retains native resources, device, drawable and image reservations without publication");
+   c->retired=false;c->present_error=VK_SUCCESS;c->images[0].acquired=true;c->images[1].acquired=true;
+   d->presenter=std::make_unique<nvkbridge::PresentWorker>([device=d.get()](std::exception_ptr){fail_presenter(device);});
+   fence_block.enable();dirty_called=drawable_presented=0;
+   const int async_releases=native_released,async_semaphores=destroyed_semaphores;
+   assert(queue_present(q->raw,&present)==VK_SUCCESS);fence_block.await();
+   auto acquisition=std::async(std::launch::async,[&]{uint32_t image;return acquire_image(d->raw,c->handle,UINT64_MAX,semaphore,VK_NULL_HANDLE,&image);});
+   assert(acquisition.wait_for(std::chrono::milliseconds(50))==std::future_status::timeout);
+   fence_block.release();drain_presenter(d);
+   assert(acquisition.get()==VK_ERROR_DEVICE_LOST && d->uncertain && quarantine.size()==1);
+   assert(!dirty_called && !drawable_presented && native_released==async_releases && destroyed_semaphores==async_semaphores);
+   assert(c->images[0].acquired && c->images[0].present_pending);
+   destroy_device(d->raw,nullptr);assert(find(devices,d->raw)==d && !d->presenter->post([]{}));
+   d->presenter.reset();d->uncertain=false;quarantine.clear();CFRelease(cpu);
+   puts("PASS asynchronous timeout wakes acquisition, quarantines work and joins worker before retained-device teardown");
 #endif
    puts("HOST CHECKS PASSED; bridge submission functions were mocked");
 } }

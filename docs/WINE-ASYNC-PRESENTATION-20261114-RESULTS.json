@@ -1,0 +1,380 @@
+{
+  "schema_version": 1,
+  "date": "2026-11-14",
+  "hardware": {
+    "gpu": "NVIDIA GeForce RTX 2060 SUPER",
+    "bar1_gib": 8,
+    "os": "macOS Tahoe 26.7.1",
+    "build": "25G241",
+    "display_hz": 75
+  },
+  "scope": {
+    "wine_async_default": true,
+    "disable": "WINE_NVK_ASYNC_PRESENT=0",
+    "private_copy_queue_required": true,
+    "max_worker_jobs": 2,
+    "native_and_zink_async": false,
+    "gpu_completion_required": true,
+    "yaagl_update_required": false,
+    "full_driver_build": false,
+    "release_held": true
+  },
+  "candidate": {
+    "provider": "nvk-wine-provider-d94f132198de",
+    "renderer_sha256": "c85b5996d0301d31bde5c65f8f8446de7d234f673498ffc03fa59fb57cda91cf",
+    "frontend_sha256": "40ecaeef1bdbcafd4793b428bec74e1deee8c758c9901bf10b49bef603ba8607",
+    "source_files_sha256": {
+      "nvk/native-macos/bridge.mm": "142ef38f543be9122766b47358866d436db3833b27d95e3952f89cf8dd4839b1",
+      "nvk/native-macos/present_worker.h": "5799f612973826bf0ecfb33a795cef9b57db56d7875d24f5158de5e230210ba3",
+      "plugin/nvmtl_fd_token.h": "529facd38ce390e708a54c51922a805d5ae5c3ee62c08751743004f10a121aa0",
+      "plugin/nvmtl_rebind_import.h": "887f321a441fdd8feaeb452b705734f9a3905175519c64a2f73ade5aaa9fe120",
+      "nvk/native-macos/present_hud.h": "793b1304fd47ef4774297e065ab78ea5fab509e8aa14a85b37393bc70940b174",
+      "nvk/wine-macos/build.py": "b95625c374af9c1840acb29b181b3272f2e09cd7adbe2eced90bac36d3b7d2d1"
+    },
+    "unchanged_dependency_files": [
+      "dlss/x64/_nvngx.dll",
+      "dlss/x64/nvapi64.dll",
+      "dlss/x64/nvngx.dll",
+      "dxvk/source-changes.patch",
+      "dxvk/x64/d3d11.dll",
+      "dxvk/x64/dxgi.dll",
+      "vkd3d/x64/d3d12.dll",
+      "vkd3d/x64/d3d12core.dll"
+    ]
+  },
+  "validation": {
+    "wine_asan_ubsan": "PASS: worker exceptions, waits, submissions, backpressure, caller data, idle/teardown, late resize and timeout quarantine/wakeup",
+    "wine_tsan": "PASS: same scheduling fixtures without race reports",
+    "native_asan_ubsan": "PASS: Wine async option ignored",
+    "native_gpu": "90 exact-pixel frames, resize/restore and synchronous policy",
+    "old_mesa_prototype": "120 exact-pixel frames on previous renderer before stable renderer comparison",
+    "final_gpu_runs": [
+      {
+        "name": "stable-default-pixels",
+        "returncode": 0,
+        "seconds": 3.327,
+        "command": [
+          "/Volumes/Games/nvk-async-present-20261114/native-smoke",
+          "/Volumes/Games/nvk-async-present-20261114/provider-final/lib/libnvk_wine.dylib",
+          "/Volumes/Games/nvk-present-trial-20261113/SDL3.framework/Versions/A/SDL3",
+          "4",
+          "120"
+        ],
+        "async_default": true,
+        "synchronous": false,
+        "async_environment": null
+      },
+      {
+        "name": "stable-sync-fallback-pixels",
+        "returncode": 0,
+        "seconds": 3.32,
+        "command": [
+          "/Volumes/Games/nvk-async-present-20261114/native-smoke",
+          "/Volumes/Games/nvk-async-present-20261114/provider-final/lib/libnvk_wine.dylib",
+          "/Volumes/Games/nvk-present-trial-20261113/SDL3.framework/Versions/A/SDL3",
+          "4",
+          "120"
+        ],
+        "async_default": false,
+        "synchronous": true,
+        "async_environment": "0"
+      },
+      {
+        "name": "stable-reuse-off-pixels",
+        "returncode": 0,
+        "seconds": 3.328,
+        "command": [
+          "/Volumes/Games/nvk-async-present-20261114/native-smoke",
+          "/Volumes/Games/nvk-async-present-20261114/provider-final/lib/libnvk_wine.dylib",
+          "/Volumes/Games/nvk-present-trial-20261113/SDL3.framework/Versions/A/SDL3",
+          "4",
+          "120"
+        ],
+        "async_default": true,
+        "synchronous": false,
+        "async_environment": null
+      },
+      {
+        "name": "stable-default-hud-pixels",
+        "returncode": 0,
+        "seconds": 3.336,
+        "command": [
+          "/Volumes/Games/nvk-async-present-20261114/native-smoke",
+          "/Volumes/Games/nvk-async-present-20261114/provider-final/lib/libnvk_wine.dylib",
+          "/Volumes/Games/nvk-present-trial-20261113/SDL3.framework/Versions/A/SDL3",
+          "4",
+          "120"
+        ],
+        "async_default": true,
+        "synchronous": false,
+        "async_environment": null
+      },
+      {
+        "name": "stable-abi",
+        "returncode": 0,
+        "seconds": 0.243,
+        "command": [
+          "/Volumes/Games/nvk-present-trial-20261113/host-abi",
+          "/Volumes/Games/nvk-async-present-20261114/provider-final/lib/libnvk_wine.dylib"
+        ],
+        "async_default": false,
+        "synchronous": true,
+        "async_environment": null
+      },
+      {
+        "name": "stable-win32-vulkan-two-surfaces",
+        "returncode": 0,
+        "seconds": 5.523,
+        "command": [
+          "/Volumes/Games/YAAGL-NVK-0.2.1-Global/ZZZ/launcher-data/wine-nvk/bin/wine",
+          "/Volumes/Games/mesa-nvk-update-20261114/windows-probes/win32-vulkan-probe.exe",
+          "--window",
+          "--images",
+          "4",
+          "--frames",
+          "120",
+          "--two-surfaces"
+        ],
+        "async_default": true,
+        "synchronous": false,
+        "async_environment": null
+      },
+      {
+        "name": "stable-dxvk-d3d11",
+        "returncode": 0,
+        "seconds": 2.721,
+        "command": [
+          "/Volumes/Games/YAAGL-NVK-0.2.1-Global/ZZZ/launcher-data/wine-nvk/bin/wine",
+          "/Volumes/Games/mesa-nvk-update-20261114/windows-probes/d3d11-probe.exe",
+          "--frames",
+          "120"
+        ],
+        "async_default": true,
+        "synchronous": false,
+        "async_environment": null
+      },
+      {
+        "name": "stable-dxvk-indirect",
+        "returncode": 0,
+        "seconds": 1.651,
+        "command": [
+          "/Volumes/Games/YAAGL-NVK-0.2.1-Global/ZZZ/launcher-data/wine-nvk/bin/wine",
+          "/Volumes/Games/mesa-nvk-update-20261114/windows-probes/d3d11-probe.exe",
+          "--indirect",
+          "--frames",
+          "60"
+        ],
+        "async_default": true,
+        "synchronous": false,
+        "async_environment": null
+      },
+      {
+        "name": "stable-dxvk-indexed",
+        "returncode": 0,
+        "seconds": 1.711,
+        "command": [
+          "/Volumes/Games/YAAGL-NVK-0.2.1-Global/ZZZ/launcher-data/wine-nvk/bin/wine",
+          "/Volumes/Games/mesa-nvk-update-20261114/windows-probes/d3d11-probe.exe",
+          "--indexed-indirect",
+          "--frames",
+          "60"
+        ],
+        "async_default": true,
+        "synchronous": false,
+        "async_environment": null
+      },
+      {
+        "name": "stable-dxvk-shared",
+        "returncode": 0,
+        "seconds": 0.801,
+        "command": [
+          "/Volumes/Games/YAAGL-NVK-0.2.1-Global/ZZZ/launcher-data/wine-nvk/bin/wine",
+          "/Volumes/Games/mesa-nvk-update-20261114/windows-probes/d3d11-shared-probe.exe"
+        ],
+        "async_default": true,
+        "synchronous": false,
+        "async_environment": null
+      },
+      {
+        "name": "stable-vkd3d-d3d12",
+        "returncode": 0,
+        "seconds": 2.567,
+        "command": [
+          "/Volumes/Games/YAAGL-NVK-0.2.1-Global/ZZZ/launcher-data/wine-nvk/bin/wine",
+          "/Volumes/Games/mesa-nvk-update-20261114/windows-probes/d3d12-probe.exe",
+          "--shaders",
+          "Z:\\Volumes\\Games\\mesa-nvk-update-20261114\\windows-probes",
+          "--window",
+          "--frames",
+          "120"
+        ],
+        "async_default": false,
+        "synchronous": true,
+        "async_environment": null
+      }
+    ],
+    "provider_setup_rollback_checks": 19,
+    "zink_packaging_checks": 34
+  },
+  "zzz": {
+    "api": "D3D11/DXVK",
+    "graphics": "1080p High",
+    "wine": "YAAGL Wine 11.0-1",
+    "msync": true,
+    "async_active_in_game_log": true,
+    "private_provider_mapping_verified": true,
+    "sample": {
+      "seconds": 30.00325202899876,
+      "frames": 2206,
+      "fps": 73.52536311290042,
+      "bytes_per_frame": 8294400.0,
+      "import_failures": 0,
+      "created": 0,
+      "cache_hits": 2207,
+      "evictions": 0,
+      "errors": 0,
+      "ms_per_frame": {
+        "present_ns": 2.708954592928377,
+        "profile_drawable_ns": 4.70464165548504,
+        "prepare_ns": 0.005557555757026292,
+        "record_ns": 0.016553902538531277,
+        "submit_ns": 0.006156978241160471,
+        "fence_ns": 8.701339665457843,
+        "publish_ns": 0.083517222574796,
+        "cleanup_ns": 0.0,
+        "lock_ns": 0.0001086038077969175
+      },
+      "GPU Core Utilization %": {
+        "mean": 91,
+        "min": 0,
+        "max": 100
+      },
+      "Device Utilization %": {
+        "mean": 91,
+        "min": 0,
+        "max": 100
+      },
+      "Temperature(C)": {
+        "mean": 61.766666666666666,
+        "min": 58,
+        "max": 62
+      },
+      "game_cpu_percent": 474.8,
+      "wineserver_cpu_percent": 44.43333333333333,
+      "Pageouts_delta": 3,
+      "Swapouts_delta": 0,
+      "Swapins_delta": 1468
+    },
+    "user_observation": "I guess it is somewhat better",
+    "thread_sample": "Presenter worker waits for the copy fence; DXVK submission thread can submit or wait for bounded queue capacity.",
+    "synchronous_comparison": {
+      "sample": {
+        "seconds": 30.004591879000145,
+        "frames": 1971,
+        "fps": 65.68994532398487,
+        "bytes_per_frame": 8294400.0,
+        "import_failures": 0,
+        "created": 0,
+        "cache_hits": 1971,
+        "evictions": 0,
+        "errors": 0,
+        "ms_per_frame": {
+          "present_ns": 14.935116111111112,
+          "profile_drawable_ns": 1.639968410958904,
+          "prepare_ns": 0.0052242004058853375,
+          "record_ns": 0.015953646879756467,
+          "submit_ns": 0.005052134449518011,
+          "fence_ns": 13.193590651445966,
+          "publish_ns": 0.0614212135971588,
+          "cleanup_ns": 0.0,
+          "lock_ns": 0.00013587417554540844
+        },
+        "GPU Core Utilization %": {
+          "mean": 94.03333333333333,
+          "min": 0,
+          "max": 99
+        },
+        "Device Utilization %": {
+          "mean": 94.03333333333333,
+          "min": 0,
+          "max": 99
+        },
+        "Temperature(C)": {
+          "mean": 57.7,
+          "min": 53,
+          "max": 59
+        },
+        "game_cpu_percent": 382.69,
+        "wineserver_cpu_percent": 15.643333333333333,
+        "Pageouts_delta": 77,
+        "Swapouts_delta": 0,
+        "Swapins_delta": 64
+      },
+      "provider": "nvk-wine-provider-d94f132198de",
+      "async_enabled": false,
+      "same_stable_renderer_and_msync": true,
+      "user_observation": "About the same",
+      "scene_control": "User revisited the scene; no scripted replay or verified identical camera"
+    },
+    "final_async_repeat": {
+      "sample": {
+        "seconds": 30.0046080230004,
+        "frames": 1843,
+        "fps": 61.42389857541967,
+        "bytes_per_frame": 8294400.0,
+        "import_failures": 0,
+        "created": 0,
+        "cache_hits": 1843,
+        "evictions": 0,
+        "errors": 0,
+        "ms_per_frame": {
+          "present_ns": 7.005871503526858,
+          "profile_drawable_ns": 8.138443440043407,
+          "prepare_ns": 0.006161442756375474,
+          "record_ns": 0.015612319587628867,
+          "submit_ns": 0.005857932175800325,
+          "fence_ns": 4.951883186109605,
+          "publish_ns": 0.07016418665219751,
+          "cleanup_ns": 0.0,
+          "lock_ns": 0.00015966359196961476
+        },
+        "GPU Core Utilization %": {
+          "mean": 49.233333333333334,
+          "min": 0,
+          "max": 100
+        },
+        "Device Utilization %": {
+          "mean": 49.233333333333334,
+          "min": 0,
+          "max": 100
+        },
+        "Temperature(C)": {
+          "mean": 51.3,
+          "min": 49,
+          "max": 53
+        },
+        "game_cpu_percent": 284.56333333333333,
+        "wineserver_cpu_percent": 16.163333333333334,
+        "Pageouts_delta": 51,
+        "Swapouts_delta": 0,
+        "Swapins_delta": 0
+      },
+      "async_explicitly_enabled": true,
+      "same_provider": true,
+      "user_observation": "Async feels better; a few FPS higher",
+      "scene_control": "Capture timing and camera were not controlled; the user compared gameplay after relaunch."
+    },
+    "source_publication": "User explicitly approved pushing Mesa and asynchronous presentation to main after the final trial."
+  },
+  "limits": [
+    "Same-provider asynchronous and synchronous captures were made, but the scene/camera was not controlled by a replay; do not infer an uncapped FPS gain.",
+    "A two-second stack sample ran during the first async 30-second counter capture and may perturb timing; the synchronous capture did not include that sample.",
+    "Display is limited to 75 Hz; no input latency or one-percent-low measurement.",
+    "Fence time includes queued rendering dependencies, not just GPU-copy execution.",
+    "Async presentation CPU and worker timing overlap; do not add them as sequential time.",
+    "Counters can differ by one job at sample boundaries.",
+    "D3D12 GPU probe exercised synchronous fallback because every available queue was requested; asynchronous D3D12 was not qualified.",
+    "No commercial CrossOver, other GPU, Sequoia, long-session or new-boot qualification.",
+    "The stable renderer is installed; async Wine frontend remains in a private provider used by the trial launcher."
+  ]
+}

@@ -84,6 +84,29 @@ time. The existing seven-word `nvkbridgeGetStats` ABI is unchanged. Options are
 read per Vulkan device; counters are process-wide. Both variables use Wine's
 child-process environment forwarding.
 
+## Asynchronous Wine presentation
+
+The Wine frontend uses a presentation worker when it can reserve a copy queue
+separate from the application's queues. Drawable acquisition and the copy's
+completion wait run on that worker; application submissions can continue during
+both waits. It accepts at most two jobs, including the running job. Additional
+presents wait for capacity, bounding the queue rather than accumulating frames.
+
+GPU completion is still required before publishing the IOSurface or reusing its
+source image, import, command resources or HUD mapping. The worker processes jobs
+in order. Swapchain recreation, destruction and queue/device idle drain it without
+holding the backend submission lock. A late drawable error is reported by the
+next image acquisition/present; uncertain completion retains resources and wakes
+blocked acquisition with device loss.
+
+Set `WINE_NVK_ASYNC_PRESENT=0` and restart the game to use synchronous presentation.
+Without a separate copy queue, or if worker startup fails, the bridge uses that
+same fallback automatically. Minecraft and Zink retain synchronous presentation.
+No YAAGL update is required. This is independent of `WINEMSYNC` and completed
+resource reuse. The presentation CPU counter measures the call's queue/backpressure
+cost in asynchronous mode; worker drawable/fence counters are separate and must
+not be added to it as sequential application time. No general FPS gain is implied.
+
 ## D3D12 and DLSS
 
 D3D12 uses `D3D12 → vkd3d-proton → Wine Vulkan → native NVK → NVIDIA GPU`,
