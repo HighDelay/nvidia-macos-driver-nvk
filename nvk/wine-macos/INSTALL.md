@@ -104,6 +104,22 @@ with a 64 MiB allocation limit per swapchain. It releases the drawable after eve
 present and keeps the GPU completion wait. See the
 [measurement and validation details](README.md#wine-presentation-resource-reuse).
 
+## Asynchronous Wine presentation
+
+Updated Wine/NVK providers present through a bounded worker by default when a
+separate copy queue is available. The worker acquires drawables and waits for the
+GPU copy while application submissions continue. It retains at most two jobs;
+GPU completion, publication ordering and timeout quarantine remain required.
+Minecraft and Zink keep their existing synchronous policy.
+
+For troubleshooting, set `export WINE_NVK_ASYNC_PRESENT=0` before launching Wine
+or YAAGL, then restart the game. Unset it to restore the default. The synchronous
+fallback also applies when there is no separate copy queue or worker creation
+fails. No YAAGL update or per-game setting is required. This setting is independent
+of `WINEMSYNC=1` and `WINE_NVK_PRESENT_REUSE`.
+
+See the [behavior and measurement limits](README.md#asynchronous-wine-presentation).
+
 ## Standalone Wine
 
 Install a driver release that includes the Wine/NVK runtime, or extract a matching

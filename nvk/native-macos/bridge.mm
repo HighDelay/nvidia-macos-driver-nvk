@@ -22,6 +22,7 @@
 #include <chrono>
 #include <condition_variable>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <memory>
 #include <mutex>
@@ -29,6 +30,7 @@
 #include <type_traits>
 #include <unordered_map>
 #include <vector>
+#include "present_worker.h"
 #ifdef NVKBRIDGE_WINE
 #include "present_hud.h"
 #endif
@@ -86,7 +88,7 @@ struct Surface {
 #endif
 };
 struct Queue { VkQueue raw{}; uint32_t family{}; std::weak_ptr<Device> dev; };
-struct Image { VkImage raw{}; VkDeviceMemory memory{}; bool acquired{}; };
+struct Image { VkImage raw{}; VkDeviceMemory memory{}; bool acquired{},present_pending{}; };
 struct Frame;
 struct Chain {
    std::shared_ptr<Device> dev;
@@ -112,6 +114,7 @@ struct Chain {
    std::condition_variable available;
    uint32_t cursor{};
    bool retired{};
+   VkResult present_error{VK_SUCCESS};
    VkAllocationCallbacks allocator{};
    bool custom_allocator{};
    const VkAllocationCallbacks *alloc() const { return custom_allocator ? &allocator : nullptr; }
@@ -126,9 +129,15 @@ struct Device {
    uint32_t copy_family{}, copy_index{};
    VkQueue copy_queue{};
    bool swapchain{};
+   bool private_copy_queue{};
    bool reuse_present_resources{}, profile_present{};
    std::atomic<bool> uncertain{};
+   std::atomic<bool> closing{};
    std::recursive_mutex submit;
+   // Lifecycle and present acceptance are serialized separately from backend
+   // queue operations. The worker never takes this gate.
+   std::mutex present_call;
+   std::unique_ptr<nvkbridge::PresentWorker> presenter;
 };
 std::unordered_map<VkInstance, std::shared_ptr<Instance>> instances;
 std::unordered_map<VkPhysicalDevice, std::shared_ptr<Instance>> physicals;
@@ -147,6 +156,45 @@ template<class T> T iproc(VkInstance i, const char *name) { return reinterpret_c
 template<class T> T dproc(VkDevice d, const char *name) { return reinterpret_cast<T>(backend_gdpa(d, name)); }
 #define DP(dev, name) dproc<PFN_vk##name>((dev)->raw, "vk" #name)
 #define IP(inst, name) iproc<PFN_vk##name>((inst)->raw, "vk" #name)
+
+void fail_presenter(Device *d) {
+   d->uncertain=true;
+   std::lock_guard<std::mutex> guard(registry);
+   for(auto &entry:chains)if(entry.second->dev.get()==d) {
+      std::lock_guard<std::mutex> lock(entry.second->mutex);
+      entry.second->present_error=VK_ERROR_DEVICE_LOST;entry.second->available.notify_all();
+   }
+   fprintf(stderr,"NVK Bridge: asynchronous presentation failed; device/resources retained\n");
+}
+void drain_presenter(const std::shared_ptr<Device> &d) {
+   if(d->presenter)d->presenter->drain();
+}
+void shutdown_presenters() {
+   // Registered after loading the renderer, so workers stop before either its
+   // or this frontend's process-exit destructors. Never wait with registry held.
+   for(;;) {
+      std::shared_ptr<Device> d;
+      { std::lock_guard<std::mutex> lock(registry);
+        for(auto &entry:devices)if(entry.second->presenter && !entry.second->closing.exchange(true)) {d=entry.second;break;}
+      }
+      if(!d)break;
+      std::lock_guard<std::mutex> gate(d->present_call);d->presenter->stop();
+   }
+}
+bool register_presenter_shutdown() {
+   static std::once_flag once;
+   static bool registered=false;
+   std::call_once(once,[]{registered=std::atexit(shutdown_presenters)==0;});
+   return registered;
+}
+bool async_present_requested() {
+#ifdef NVKBRIDGE_WINE
+   const char *value=getenv("WINE_NVK_ASYNC_PRESENT");
+   return !value || strcmp(value,"0")!=0;
+#else
+   return false;
+#endif
+}
 
 // Browser GPU-process sandboxes (Firefox/Zen) deny reading /dev/null and the
 // hw.pagesize sysctl. The NVK RM bridge uses a read-only /dev/null descriptor
@@ -439,12 +487,14 @@ VkResult VKAPI_CALL create_device(VkPhysicalDevice physical, const VkDeviceCreat
          std::vector<VkQueueFamilyProperties> props(n); IP(instance,GetPhysicalDeviceQueueFamilyProperties)(physical,&n,props.data());
          state->copy_index=q.queueCount<props[family].queueCount?q.queueCount:0;
          if (state->copy_index) {
+            state->private_copy_queue=true;
             expanded_priorities.assign(q.pQueuePriorities,q.pQueuePriorities+q.queueCount);
             expanded_priorities.push_back(priority); q.queueCount++; q.pQueuePriorities=expanded_priorities.data();
          }
          present=true; break;
       }
       if (!present) {
+         state->private_copy_queue=true;
          VkDeviceQueueCreateInfo q{VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO};
          q.queueFamilyIndex=state->copy_family; q.queueCount=1; q.pQueuePriorities=&priority; queue_info.push_back(q);
       }
@@ -458,9 +508,18 @@ VkResult VKAPI_CALL create_device(VkPhysicalDevice physical, const VkDeviceCreat
    state->raw=*result;
    std::call_once(device_procs_once,[&] { backend_gdpa=IP(instance,GetDeviceProcAddr); });
    if (state->swapchain) DP(state,GetDeviceQueue)(*result,state->copy_family,state->copy_index,&state->copy_queue);
+   // Wine defaults to bounded asynchronous presentation with an explicit
+   // opt-out. A shared application/copy queue retains synchronous ordering.
+   if(state->swapchain && state->private_copy_queue && async_present_requested() && register_presenter_shutdown()) {
+      try { state->presenter=std::make_unique<nvkbridge::PresentWorker>(
+         [device=state.get()](std::exception_ptr){fail_presenter(device);}); }
+      catch(...) { fprintf(stderr,"NVK Bridge: presenter thread unavailable; using synchronous presentation\n"); }
+   }
    { std::lock_guard<std::mutex> lock(registry); devices[*result]=state; }
    fprintf(stderr,"NVK Bridge: native device=%s; copy family=%u; Metal registry=%llu\n",
       state->properties.deviceName,state->copy_family,(unsigned long long)state->metal.registryID);
+   fprintf(stderr,"NVK Bridge: presentation completion=%s; private copy queue=%s\n",
+      state->presenter?"asynchronous (bounded to 2 jobs)":"synchronous",state->private_copy_queue?"yes":"no");
    return VK_SUCCESS;
 }
 void VKAPI_CALL get_queue(VkDevice device,uint32_t family,uint32_t index,VkQueue *out) {
@@ -477,28 +536,33 @@ void VKAPI_CALL get_queue2(VkDevice device,const VkDeviceQueueInfo2 *info,VkQueu
 }
 VkResult VKAPI_CALL queue_submit(VkQueue queue,uint32_t count,const VkSubmitInfo *infos,VkFence fence) {
    auto q=find(queues,queue); auto d=q?q->dev.lock():nullptr; if (!d || d->uncertain) return VK_ERROR_DEVICE_LOST;
-   std::lock_guard<std::recursive_mutex> lock(d->submit); return DP(d,QueueSubmit)(queue,count,infos,fence);
+   std::lock_guard<std::recursive_mutex> lock(d->submit); return d->uncertain?VK_ERROR_DEVICE_LOST:DP(d,QueueSubmit)(queue,count,infos,fence);
 }
 VkResult VKAPI_CALL queue_submit2(VkQueue queue,uint32_t count,const VkSubmitInfo2 *infos,VkFence fence) {
    auto q=find(queues,queue); auto d=q?q->dev.lock():nullptr; if (!d || d->uncertain) return VK_ERROR_DEVICE_LOST;
    std::lock_guard<std::recursive_mutex> lock(d->submit);
+   if(d->uncertain)return VK_ERROR_DEVICE_LOST;
    auto fn=DP(d,QueueSubmit2); if (!fn) fn=dproc<PFN_vkQueueSubmit2>(d->raw,"vkQueueSubmit2KHR");
    return fn?fn(queue,count,infos,fence):VK_ERROR_EXTENSION_NOT_PRESENT;
 }
 VkResult VKAPI_CALL bind_sparse(VkQueue queue,uint32_t count,const VkBindSparseInfo *infos,VkFence fence) {
    auto q=find(queues,queue); auto d=q?q->dev.lock():nullptr; if (!d || d->uncertain) return VK_ERROR_DEVICE_LOST;
-   std::lock_guard<std::recursive_mutex> lock(d->submit); return DP(d,QueueBindSparse)(queue,count,infos,fence);
+   std::lock_guard<std::recursive_mutex> lock(d->submit); return d->uncertain?VK_ERROR_DEVICE_LOST:DP(d,QueueBindSparse)(queue,count,infos,fence);
 }
 VkResult VKAPI_CALL queue_idle(VkQueue queue) {
    auto q=find(queues,queue); auto d=q?q->dev.lock():nullptr; if (!d || d->uncertain) return VK_ERROR_DEVICE_LOST;
-   std::lock_guard<std::recursive_mutex> lock(d->submit); return DP(d,QueueWaitIdle)(queue);
+   std::lock_guard<std::mutex> gate(d->present_call);drain_presenter(d);
+   std::lock_guard<std::recursive_mutex> lock(d->submit); return d->uncertain?VK_ERROR_DEVICE_LOST:DP(d,QueueWaitIdle)(queue);
 }
 VkResult VKAPI_CALL device_idle(VkDevice device) {
    auto d=find(devices,device); if (!d || d->uncertain) return VK_ERROR_DEVICE_LOST;
-   std::lock_guard<std::recursive_mutex> lock(d->submit); return DP(d,DeviceWaitIdle)(device);
+   std::lock_guard<std::mutex> gate(d->present_call);drain_presenter(d);
+   std::lock_guard<std::recursive_mutex> lock(d->submit); return d->uncertain?VK_ERROR_DEVICE_LOST:DP(d,DeviceWaitIdle)(device);
 }
 void VKAPI_CALL destroy_device(VkDevice device,const VkAllocationCallbacks *alloc) {
    auto d=find(devices,device); if (!d) return;
+   std::lock_guard<std::mutex> gate(d->present_call);drain_presenter(d);
+   if(d->presenter)d->presenter->stop();
    std::lock_guard<std::recursive_mutex> lock(d->submit);
    if (d->uncertain) { fprintf(stderr,"NVK Bridge: uncertain GPU completion; retaining native device until process exit\n"); return; }
    DP(d,DeviceWaitIdle)(device);
@@ -607,6 +671,8 @@ VkResult VKAPI_CALL create_swapchain(VkDevice device,const VkSwapchainCreateInfo
        (info->presentMode!=VK_PRESENT_MODE_FIFO_KHR && info->presentMode!=VK_PRESENT_MODE_IMMEDIATE_KHR)) return VK_ERROR_INITIALIZATION_FAILED;
    VkSurfaceCapabilitiesKHR caps{}; surface_caps(d->physical,info->surface,&caps);
    if ((info->imageUsage&~caps.supportedUsageFlags) || !(info->compositeAlpha&caps.supportedCompositeAlpha)) return VK_ERROR_FEATURE_NOT_PRESENT;
+   std::lock_guard<std::mutex> gate(d->present_call);drain_presenter(d);
+   if(d->uncertain)return VK_ERROR_DEVICE_LOST;
    std::lock_guard<std::recursive_mutex> submit(d->submit);
    if (s->layer.device && s->layer.device.registryID!=d->metal.registryID) return VK_ERROR_SURFACE_LOST_KHR;
    s->layer.device=d->metal; s->layer.pixelFormat=info->imageFormat==VK_FORMAT_B8G8R8A8_SRGB?MTLPixelFormatBGRA8Unorm_sRGB:MTLPixelFormatBGRA8Unorm;
@@ -654,8 +720,10 @@ VkResult VKAPI_CALL create_swapchain(VkDevice device,const VkSwapchainCreateInfo
 }
 void VKAPI_CALL destroy_swapchain(VkDevice device,VkSwapchainKHR swapchain,const VkAllocationCallbacks *) {
    auto c=find(chains,swapchain);if (!c || c->dev->raw!=device) return;
-   std::lock_guard<std::recursive_mutex> submit(c->dev->submit);
+   std::lock_guard<std::mutex> gate(c->dev->present_call);
    { std::lock_guard<std::mutex> lock(c->mutex);c->retired=true;c->available.notify_all(); }
+   drain_presenter(c->dev);
+   std::lock_guard<std::recursive_mutex> submit(c->dev->submit);
    if (c->dev->uncertain) return;
    release_images(c);
    { std::lock_guard<std::mutex> lock(registry);chains.erase(swapchain); }
@@ -674,13 +742,15 @@ VkResult VKAPI_CALL acquire_image(VkDevice device,VkSwapchainKHR swapchain,uint6
    if (!semaphore && !fence) return VK_ERROR_INITIALIZATION_FAILED;
    auto d=c->dev;if (d->uncertain) return VK_ERROR_DEVICE_LOST;
    std::unique_lock<std::mutex> lock(c->mutex);
-   auto ready=[&] { return c->retired || std::any_of(c->images.begin(),c->images.end(),[](auto &im){return !im.acquired;}); };
+   auto ready=[&] { return c->retired || d->uncertain || c->present_error!=VK_SUCCESS || std::any_of(c->images.begin(),c->images.end(),[](auto &im){return !im.acquired;}); };
    if (!ready()) {
       if (!timeout) return VK_NOT_READY;
       if (timeout==UINT64_MAX) c->available.wait(lock,ready);
       else if (!c->available.wait_for(lock,std::chrono::nanoseconds(std::min(timeout,(uint64_t)INT64_MAX)),ready)) return VK_TIMEOUT;
    }
    if (c->retired) return VK_ERROR_OUT_OF_DATE_KHR;
+   if (d->uncertain) return VK_ERROR_DEVICE_LOST;
+   if (c->present_error!=VK_SUCCESS) return c->present_error;
    for (uint32_t j=0;j<c->images.size();j++) {
       uint32_t k=(c->cursor+j)%(uint32_t)c->images.size();
       if (!c->images[k].acquired) { c->images[k].acquired=true;*index=k;c->cursor=(k+1)%(uint32_t)c->images.size();break; }
@@ -688,7 +758,7 @@ VkResult VKAPI_CALL acquire_image(VkDevice device,VkSwapchainKHR swapchain,uint6
    lock.unlock();
    VkSubmitInfo signal{VK_STRUCTURE_TYPE_SUBMIT_INFO};signal.signalSemaphoreCount=semaphore?1:0;signal.pSignalSemaphores=&semaphore;
    VkResult r;
-   { std::lock_guard<std::recursive_mutex> submit(d->submit);r=DP(d,QueueSubmit)(d->copy_queue,1,&signal,fence); }
+   { std::lock_guard<std::recursive_mutex> submit(d->submit);r=d->uncertain?VK_ERROR_DEVICE_LOST:DP(d,QueueSubmit)(d->copy_queue,1,&signal,fence); }
    if (r!=VK_SUCCESS) { std::lock_guard<std::mutex> rollback(c->mutex);c->images[*index].acquired=false;c->available.notify_all(); }
    return r;
 }
@@ -760,8 +830,8 @@ std::shared_ptr<const nvkbridge_hud::Bitmap> prepare_hud(const std::shared_ptr<C
       }
       fprintf(stderr,"NVK HUD: GPU overlay enabled, %ux%u bitmap; small CPU upload refreshed at 4 Hz\n",bitmap->width,bitmap->height);
    }
-   // copy_frame waits for its copy fence before returning. This coherent
-   // mapping is therefore never overwritten while the GPU still reads it.
+   // Both paths complete one copy_frame before starting the next on this
+   // device. The worker keeps this mapping unchanged until its fence completes.
    if(c->hud_version!=bitmap->version) {
       memcpy(c->hud_mapping,bitmap->pixels.data(),bitmap->pixels.size()*4);c->hud_version=bitmap->version;
       hud_upload_bytes+=bitmap->pixels.size()*4;
@@ -789,6 +859,8 @@ VkResult copy_frame(const std::shared_ptr<Chain> &c,uint32_t index,VkSemaphore h
    size_t row=IOSurfaceGetBytesPerRow(surface),size=IOSurfaceGetAllocSize(surface);
    if (IOSurfaceGetPlaneCount(surface)>1 || row%4 || row<(uint64_t)c->extent.width*4 ||
        c->extent.height>SIZE_MAX/row || (uint64_t)row*c->extent.height>size) return VK_ERROR_FORMAT_NOT_SUPPORTED;
+   std::unique_lock<std::recursive_mutex> backend_lock(d->submit);
+   if(d->uncertain)return VK_ERROR_DEVICE_LOST;
    PresentTimer prepare(d->profile_present,3);
    std::shared_ptr<Frame> frame;
    if(d->reuse_present_resources) {
@@ -868,7 +940,11 @@ VkResult copy_frame(const std::shared_ptr<Chain> &c,uint32_t index,VkSemaphore h
      r=DP(d,QueueSubmit)(d->copy_queue,1,&submit,frame->fence); }
    if (r!=VK_SUCCESS) return r;
    if (handoff) consumed=true;
+   // The synchronous caller retains its outer recursive lock. The worker has
+   // no outer lock, allowing application submissions while it waits on the GPU.
+   backend_lock.unlock();
    start=std::chrono::steady_clock::now();r=DP(d,WaitForFences)(d->raw,1,&frame->fence,VK_TRUE,5000000000ull);
+   backend_lock.lock();
    auto wait_elapsed=elapsed(start);producer_ns+=wait_elapsed;
    if(d->profile_present)present_stats[6]+=wait_elapsed;
    if (r!=VK_SUCCESS) {
@@ -911,9 +987,113 @@ VkResult copy_frame(const std::shared_ptr<Chain> &c,uint32_t index,VkSemaphore h
    return VK_SUCCESS;
 }
 
+struct PresentTarget {
+   std::shared_ptr<Chain> chain;
+   uint32_t index{};
+   VkResult result{VK_ERROR_OUT_OF_DATE_KHR};
+   bool accepted{};
+};
+struct PresentJob {
+   std::shared_ptr<Device> dev;
+   std::vector<PresentTarget> targets;
+   VkSemaphore handoff{};
+};
+void run_present_job(const std::shared_ptr<PresentJob> &job) {
+   @autoreleasepool {
+   auto d=job->dev;
+   bool consumed=false;
+   for(auto &target:job->targets)if(target.accepted) {
+      if(d->uncertain)break;
+      target.result=copy_frame(target.chain,target.index,consumed?VK_NULL_HANDLE:job->handoff,consumed);
+      if(d->profile_present && target.result!=VK_SUCCESS)present_stats[12]++;
+   }
+   // Even an out-of-date drawable must consume and complete the caller's
+   // rendering dependencies before its source image or semaphore is released.
+   if(!consumed && !d->uncertain) {
+      VkFence fence{};VkFenceCreateInfo info{VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};VkResult r;
+      { std::lock_guard<std::recursive_mutex> lock(d->submit);
+        r=DP(d,CreateFence)(d->raw,&info,nullptr,&fence);
+        if(r==VK_SUCCESS) {
+           VkPipelineStageFlags all=VK_PIPELINE_STAGE_ALL_COMMANDS_BIT;
+           VkSubmitInfo drain{VK_STRUCTURE_TYPE_SUBMIT_INFO};drain.waitSemaphoreCount=1;
+           drain.pWaitSemaphores=&job->handoff;drain.pWaitDstStageMask=&all;
+           r=DP(d,QueueSubmit)(d->copy_queue,1,&drain,fence);
+        }
+      }
+      if(r==VK_SUCCESS)r=DP(d,WaitForFences)(d->raw,1,&fence,VK_TRUE,5000000000ull);
+      if(r!=VK_SUCCESS)d->uncertain=true;
+      else { std::lock_guard<std::recursive_mutex> lock(d->submit);DP(d,DestroyFence)(d->raw,fence,nullptr); }
+   }
+   if(d->uncertain)fail_presenter(d.get());
+   else { std::lock_guard<std::recursive_mutex> lock(d->submit);DP(d,DestroySemaphore)(d->raw,job->handoff,nullptr);job->handoff={}; }
+   for(auto &target:job->targets)if(target.accepted) {
+      auto c=target.chain;
+      std::lock_guard<std::mutex> lock(c->mutex);
+      if(!d->uncertain) {
+         c->images[target.index].acquired=false;c->images[target.index].present_pending=false;
+         if(target.result!=VK_SUCCESS)c->present_error=target.result;
+      }
+      c->available.notify_all();
+   }
+   }
+}
+
+// Called under present_call, without submit. All caller arrays are copied and
+// pResults is written before returning; the worker never retains those pointers.
+VkResult enqueue_present(const std::shared_ptr<Device> &d,VkQueue queue,const VkPresentInfoKHR *info) {
+   std::shared_ptr<PresentJob> job;
+   nvkbridge::PresentWorker::Task task;
+   std::vector<VkPipelineStageFlags> stages;
+   try {
+      job=std::make_shared<PresentJob>();job->dev=d;job->targets.resize(info->swapchainCount);
+      stages.assign(info->waitSemaphoreCount,VK_PIPELINE_STAGE_ALL_COMMANDS_BIT);
+      task=[job]{run_present_job(job);};
+   } catch(...) { return VK_ERROR_OUT_OF_HOST_MEMORY; }
+   VkResult overall=VK_SUCCESS;
+   for(uint32_t j=0;j<info->swapchainCount;++j) {
+      auto &target=job->targets[j];target.chain=find(chains,info->pSwapchains[j]);target.index=info->pImageIndices[j];
+      auto c=target.chain;
+      if(c && c->dev==d) {
+         std::lock_guard<std::mutex> lock(c->mutex);
+         if(c->present_error!=VK_SUCCESS)target.result=c->present_error;
+         else if(!c->retired && target.index<c->images.size() && c->images[target.index].acquired && !c->images[target.index].present_pending) {
+            target.result=VK_SUCCESS;target.accepted=true;c->images[target.index].present_pending=true;
+         }
+      }
+      if(info->pResults)info->pResults[j]=target.result;
+      if(target.result!=VK_SUCCESS)overall=target.result;
+   }
+   VkResult r;
+   { std::lock_guard<std::recursive_mutex> lock(d->submit);
+     VkSemaphoreCreateInfo sci{VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO};
+     r=d->uncertain?VK_ERROR_DEVICE_LOST:DP(d,CreateSemaphore)(d->raw,&sci,nullptr,&job->handoff);
+     if(r==VK_SUCCESS) {
+        VkSubmitInfo submit{VK_STRUCTURE_TYPE_SUBMIT_INFO};submit.waitSemaphoreCount=info->waitSemaphoreCount;
+        submit.pWaitSemaphores=info->pWaitSemaphores;submit.pWaitDstStageMask=stages.data();
+        submit.signalSemaphoreCount=1;submit.pSignalSemaphores=&job->handoff;
+        r=DP(d,QueueSubmit)(queue,1,&submit,VK_NULL_HANDLE);
+        if(r!=VK_SUCCESS)DP(d,DestroySemaphore)(d->raw,job->handoff,nullptr);
+     }
+   }
+   if(r!=VK_SUCCESS) {
+      for(auto &target:job->targets)if(target.accepted) {
+         std::lock_guard<std::mutex> lock(target.chain->mutex);target.chain->images[target.index].present_pending=false;
+      }
+      if(info->pResults)std::fill_n(info->pResults,info->swapchainCount,r);
+      return r;
+   }
+   // Capacity waits never retain submit: the worker may need it to finish.
+   // present_call prevents stop from racing this post, so it cannot be refused.
+   if(!d->presenter->post(std::move(task))) { fail_presenter(d.get());return VK_ERROR_DEVICE_LOST; }
+   return d->uncertain?VK_ERROR_DEVICE_LOST:overall;
+}
+
 VkResult VKAPI_CALL queue_present(VkQueue queue,const VkPresentInfoKHR *info) {
    auto q=find(queues,queue);auto d=q?q->dev.lock():nullptr;if (!d || !d->swapchain || d->uncertain) return VK_ERROR_DEVICE_LOST;
    PresentTimer total(d->profile_present,1),lock_wait(d->profile_present,14);
+   std::lock_guard<std::mutex> gate(d->present_call);
+   if(d->uncertain || d->closing)return VK_ERROR_DEVICE_LOST;
+   if(d->presenter) { lock_wait.finish();return enqueue_present(d,queue,info); }
    std::lock_guard<std::recursive_mutex> lock(d->submit);
    lock_wait.finish();
    VkSemaphore handoff{};VkSemaphoreCreateInfo sci{VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO};

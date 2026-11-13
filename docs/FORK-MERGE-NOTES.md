@@ -1,5 +1,18 @@
 # Retained fork changes for upstream merges
 
+## Bounded Wine presentation worker, 2026-11-14
+
+Preserve the separate lifecycle gate and bounded presentation worker described
+in [the async presentation record](WINE-ASYNC-PRESENTATION.md). Drawable acquisition
+and the rendering/copy fence wait must not hold the application submission lock
+in async mode. Keep the separately reserved copy-queue requirement, synchronous
+fallback/opt-out, copied caller arrays, source-image reservations, fenced rejected
+handoff drain, late-error reporting, idle/resize/teardown drains, process-exit join,
+HUD lifetime and timeout quarantine. Native Minecraft and Zink stay synchronous.
+Record the worker header in every frontend's source identity and the Zink
+packaging guard. User application qualification and the full-driver release hold
+remain separate from host fixtures and private GPU correctness checks.
+
 ## Safari WebGPU argument-buffer textures, 2026-11-13
 
 Preserve recognition of sole-use i64-loaded texture handles before raw-buffer
