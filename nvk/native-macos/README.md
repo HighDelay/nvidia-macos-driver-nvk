@@ -12,7 +12,7 @@ Requires Intel macOS, a compatible NVIDIA driver, Xcode command line tools and V
 python3 nvk/native-macos/build.py --output out/minecraft-native-runtime
 ```
 
-The output includes two signed dylibs under `lib/`, the NVK Bridge manifest, source and binary hashes, and build commands. Keep the entire directory together. Install the matching [NVK Bridge mod](https://github.com/HighDelay/minecraft-nvk) and point it at the runtime root with `-Dnvkbridge.runtime=/absolute/path/to/runtime`. Select Minecraft's Vulkan backend and restart the game. The mod preserves vanilla feature checks and SDL provider matching.
+The output includes two signed dylibs under `lib/`, the NVK Bridge manifest, source and binary hashes, and build commands. Keep the entire directory together. Set `-Dorg.lwjgl.vulkan.libname=/absolute/path/to/runtime/lib/libnvk_minecraft.dylib` in the launcher's JVM arguments, select Minecraft's Vulkan backend and restart. No companion mod is required. Vanilla retains its feature checks and SDL provider matching. See the [launcher setup guide](INSTALL.md).
 
 This reuses the renderer binary rather than rebuilding Mesa. Its IOSurface import protocol and surface-dirty entry points must match the installed driver. Other applications keep using their existing libraries.
 
@@ -27,7 +27,7 @@ a runtime built with these changes; the `v2.7.1-nvk` binaries are unchanged.
 
 The frontend targets macOS 15.0; the bundled upstream NVK renderer targets 15.5, making the package minimum **Sequoia 15.5**. Tahoe 26 is also supported. Build both accelerator variants with `build/accel_build_all.sh`, then pass `--accel-15`, `--accel-26` and `--minecraft-runtime` to `build/stage_package.py` along with the matching plugin, translator and framebuffer. The helper checks both runtime libraries against macOS 15.5, verifies the entry hash and signatures, and regenerates the replaced accelerators' nested checksums and the root manifest.
 
-The package installer already selects the accelerator for its running OS. It copies the bridge under `/Library/GPUBundles/nvmtl/minecraft` with the existing userland runtime, and uninstall removes it through that same directory. Companion mod **0.1.2+** detects that installed directory automatically; only custom runtime paths need a JVM argument. See [the packaged Minecraft setup instructions](INSTALL.md). This packaging does not enable Tahoe rotation on Sequoia or change the default Vulkan provider. Physical Sequoia boot/gameplay testing remains unqualified.
+The package installer already selects the accelerator for its running OS. It copies the bridge under `/Library/GPUBundles/nvmtl/minecraft` with the existing userland runtime, and uninstall removes it through that same directory. Users select it with the JVM argument in [the packaged Minecraft setup instructions](INSTALL.md); the companion selector mod remains optional. This packaging does not enable Tahoe rotation on Sequoia or change the default Vulkan provider. Physical Sequoia boot/gameplay testing remains unqualified.
 
 ## Presentation and synchronization
 
@@ -72,3 +72,17 @@ out/native-vulkan-smoke /absolute/runtime/lib/libnvk_minecraft.dylib /absolute/l
 ```
 
 Set `NVKBRIDGE_VERIFY_PIXELS=1` only for the diagnostic readback test. Its cost is not representative of gameplay.
+
+To test the standard Vulkan loader route, set `VK_DRIVER_FILES` to the runtime's
+`nvk_bridge_icd.json`, pass `libvulkan.1.dylib` as the smoke entry, and set
+`NVKBRIDGE_TEST_FRONTEND` to the absolute frontend path. The probe requires that
+the loader has already loaded that exact frontend before attaching its observer.
+
+`ModFreeProbe.java` invokes the unmodified Minecraft 26.3
+`NativeLibrariesBootstrap.tryLoadingVulkan` method, checks the provider selected
+by `-Dorg.lwjgl.vulkan.libname`, verifies SDL's provider pointer, and enumerates
+the native device. Compile with Java 25 and LWJGL 3.4.3 core/Vulkan/SDL jars;
+run with `-XstartOnFirstThread`, the game's logging dependencies, its client jar
+and LWJGL macOS native jars on the classpath. Pass the expected absolute frontend
+path as its one program argument. No companion jar is used. This probe does
+not start Minecraft or establish gameplay compatibility.

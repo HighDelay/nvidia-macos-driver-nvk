@@ -193,7 +193,14 @@ int main(int argc,char **argv) { @autoreleasepool { try {
    auto pump=[&]{while(SDL_PollEvent(event)){}};
    pump();recreate();
    unsigned frames=argc>=5?(unsigned)atoi(argv[4]):90;
-   if (getenv("NVKBRIDGE_VERIFY_PIXELS")) sym<void(*)(PresentObserver)>(entry,"nvkbridgeSetPresentObserver")(&verify_pixels);
+   // A loader routes Vulkan calls through its selected ICD. Observe that already
+   // loaded frontend, without accidentally loading a different one for the test.
+   void *test_entry=entry;
+   if (const char *path=getenv("NVKBRIDGE_TEST_FRONTEND")) {
+      test_entry=dlopen(path,RTLD_NOW|RTLD_LOCAL|RTLD_FIRST|RTLD_NOLOAD);
+      require(test_entry!=nullptr,"expected bridge was not loaded by the Vulkan loader");
+   }
+   if (getenv("NVKBRIDGE_VERIFY_PIXELS")) sym<void(*)(PresentObserver)>(test_entry,"nvkbridgeSetPresentObserver")(&verify_pixels);
    for (unsigned frame=0;frame<frames;frame++) {
       current_frame=frame;
       pump();
@@ -220,10 +227,10 @@ int main(int argc,char **argv) { @autoreleasepool { try {
       initialized[image]=true;
    }
    check(DeviceWaitIdle(device),"final idle");DestroySwapchainKHR(device,chain,nullptr);
-   uint64_t stats[7]{};sym<void(*)(uint64_t *)>(entry,"nvkbridgeGetStats")(stats);
+   uint64_t stats[7]{};sym<void(*)(uint64_t *)>(test_entry,"nvkbridgeGetStats")(stats);
    printf("STATS copies=%llu bytes=%llu import_failures=%llu cpu_readback=%llu cpu_upload=%llu\n",
       stats[0],stats[1],stats[4],stats[5],stats[6]);require(stats[0]==frames && stats[4]==0 && !stats[5] && !stats[6],"copy accounting");
-   if(auto present_stats=(void(*)(uint64_t *))dlsym(entry,"nvkbridgeGetPresentStats")) {
+   if(auto present_stats=(void(*)(uint64_t *))dlsym(test_entry,"nvkbridgeGetPresentStats")) {
       uint64_t detail[16]{};present_stats(detail);
       printf("PRESENT_STATS frames=%llu total_ns=%llu drawable_ns=%llu prepare_ns=%llu record_ns=%llu submit_ns=%llu fence_ns=%llu publish_ns=%llu cleanup_ns=%llu created=%llu hits=%llu evicted=%llu errors=%llu bytes=%llu lock_ns=%llu\n",
          detail[0],detail[1],detail[2],detail[3],detail[4],detail[5],detail[6],detail[7],detail[8],detail[9],detail[10],detail[11],detail[12],detail[13],detail[14]);

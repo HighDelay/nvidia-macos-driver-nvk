@@ -64,7 +64,6 @@ using `nullmoth-remove=1`, then reinstall your previous working package.
 
 ## Minecraft native Vulkan
 
-[Companion mod](https://github.com/HighDelay/minecraft-nvk) ·
 [Aetherium — optional Vulkan shader mod](https://github.com/HighDelay/aetherium)
 
 | Renderer | Application shader path |
@@ -92,16 +91,21 @@ with 256 MiB BAR1, including the small-BAR crash and black-window repair.
 
 ### Official Vulkan renderer with NVK Bridge
 
-Requires **Minecraft 26.3**, **Java 25**, and **Fabric 0.19.5+** or
-**NeoForge 26.3.0.99+**.
+Requires **Minecraft 26.3** and **Intel Java 25**. Vanilla Minecraft can select
+the native provider with one saved JVM argument; no companion mod is required.
 
 1. Install this fork's driver with its Minecraft runtime and reboot.
-2. Add the matching [NVK Bridge jar](https://github.com/HighDelay/minecraft-nvk/releases)
-   (**0.1.2+**) to `mods/`.
+2. Append this to the launcher's **JVM arguments**:
+
+   ```text
+   -Dorg.lwjgl.vulkan.libname=/Library/GPUBundles/nvmtl/minecraft/lib/libnvk_minecraft.dylib
+   ```
+
 3. Select **Vulkan**, restart Minecraft, and check F3 for **NVK Mesa**.
 
-The mod finds the installed runtime automatically; no JVM argument is required.
-[Full setup and custom runtime options](nvk/native-macos/INSTALL.md).
+[Prism/Minecraft Launcher instructions, migration and rollback](nvk/native-macos/INSTALL.md).
+Fabric/NeoForge are optional for other mods. Minecraft's default macOS library
+selection still prefers MoltenVK when the argument is absent.
 
 ## Other Vulkan applications
 
