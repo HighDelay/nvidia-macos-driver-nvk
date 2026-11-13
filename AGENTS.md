@@ -1,5 +1,12 @@
 # Repository instructions
 
+## Portable documentation
+
+Keep public documentation and result reports free of machine-specific usernames,
+mount points, worktree locations and build/cache paths. Use repository-relative
+references and keep only installation paths needed for setup or recovery.
+Keep raw local build/test records outside published documentation.
+
 ## Fork merge instructions
 
 Before merging upstream into this fork, read [docs/FORK-MERGE-NOTES.md](docs/FORK-MERGE-NOTES.md).

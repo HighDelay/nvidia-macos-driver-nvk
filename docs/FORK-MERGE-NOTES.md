@@ -351,8 +351,7 @@ the fork framebuffer, both accelerators, panel and plugin rather than substituti
 stock binaries. This validation does not install anything or qualify a new boot,
 Sequoia execution, physical laptop/RAM scanout, or AMD/Intel rendering. The current
 driver and kernel collection remain unchanged. Source/build records are under
-`out/records/upstream-2.7.2-20261106/`; the isolated checkout is under
-`/Volumes/Games/upstream-272-review-20261106/`. Package installation and boot
+`out/records/upstream-2.7.2-20261106/`. Package installation and boot
 testing are separate from these source-integration checks.
 
 ## Experimental WebKit GPU loading helper (2026-11-10)
@@ -717,8 +716,8 @@ This is isolated source/build/regression validation, not a reboot, physical audi
 or laptop test, Sequoia kernel link, or ARM GUI/game qualification. Installed files
 and the live collection remain unchanged. The user requested merging first and
 a separate ARM script package; no driver release or installable driver archive
-is prepared by this integration. Local details are under
-`/Volumes/Games/upstream-271-review-20261104/` and compact records under `out/records/`.
+is prepared by this integration. Compact validation records are retained under
+`out/records/`.
 
 ## Separate ARM app scripts, 2026-11-04
 
@@ -1433,8 +1432,8 @@ two private-fixture exclusions; 50 focused integrations; 36 driver host scripts;
 21 GPU shader readback cases/28 dispatches; both frontend ASan/UBSan fixtures;
 45 pixel-verified presentation frames with resize/restore per frontend; real
 D3D11/D3D12 rendering and DLSS evaluation; 19 setup checks and three real Wine
-registry/rollback scenarios. Isolated Tahoe kernel linking passes. Local records
-are under `/Volumes/Games/driver-2.6.4-review/`.
+registry/rollback scenarios. Isolated Tahoe kernel linking passes. Validation
+records are retained separately from the package.
 
 The final package still needs physical boot/application testing. Sequoia kernel
 linking, other GPUs, commercial CrossOver, DLSSG and ray tracing remain

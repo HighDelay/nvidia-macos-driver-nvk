@@ -53,13 +53,6 @@
         "name": "stable-default-pixels",
         "returncode": 0,
         "seconds": 3.327,
-        "command": [
-          "/Volumes/Games/nvk-async-present-20261114/native-smoke",
-          "/Volumes/Games/nvk-async-present-20261114/provider-final/lib/libnvk_wine.dylib",
-          "/Volumes/Games/nvk-present-trial-20261113/SDL3.framework/Versions/A/SDL3",
-          "4",
-          "120"
-        ],
         "async_default": true,
         "synchronous": false,
         "async_environment": null
@@ -68,13 +61,6 @@
         "name": "stable-sync-fallback-pixels",
         "returncode": 0,
         "seconds": 3.32,
-        "command": [
-          "/Volumes/Games/nvk-async-present-20261114/native-smoke",
-          "/Volumes/Games/nvk-async-present-20261114/provider-final/lib/libnvk_wine.dylib",
-          "/Volumes/Games/nvk-present-trial-20261113/SDL3.framework/Versions/A/SDL3",
-          "4",
-          "120"
-        ],
         "async_default": false,
         "synchronous": true,
         "async_environment": "0"
@@ -83,13 +69,6 @@
         "name": "stable-reuse-off-pixels",
         "returncode": 0,
         "seconds": 3.328,
-        "command": [
-          "/Volumes/Games/nvk-async-present-20261114/native-smoke",
-          "/Volumes/Games/nvk-async-present-20261114/provider-final/lib/libnvk_wine.dylib",
-          "/Volumes/Games/nvk-present-trial-20261113/SDL3.framework/Versions/A/SDL3",
-          "4",
-          "120"
-        ],
         "async_default": true,
         "synchronous": false,
         "async_environment": null
@@ -98,13 +77,6 @@
         "name": "stable-default-hud-pixels",
         "returncode": 0,
         "seconds": 3.336,
-        "command": [
-          "/Volumes/Games/nvk-async-present-20261114/native-smoke",
-          "/Volumes/Games/nvk-async-present-20261114/provider-final/lib/libnvk_wine.dylib",
-          "/Volumes/Games/nvk-present-trial-20261113/SDL3.framework/Versions/A/SDL3",
-          "4",
-          "120"
-        ],
         "async_default": true,
         "synchronous": false,
         "async_environment": null
@@ -113,10 +85,6 @@
         "name": "stable-abi",
         "returncode": 0,
         "seconds": 0.243,
-        "command": [
-          "/Volumes/Games/nvk-present-trial-20261113/host-abi",
-          "/Volumes/Games/nvk-async-present-20261114/provider-final/lib/libnvk_wine.dylib"
-        ],
         "async_default": false,
         "synchronous": true,
         "async_environment": null
@@ -125,16 +93,6 @@
         "name": "stable-win32-vulkan-two-surfaces",
         "returncode": 0,
         "seconds": 5.523,
-        "command": [
-          "/Volumes/Games/YAAGL-NVK-0.2.1-Global/ZZZ/launcher-data/wine-nvk/bin/wine",
-          "/Volumes/Games/mesa-nvk-update-20261114/windows-probes/win32-vulkan-probe.exe",
-          "--window",
-          "--images",
-          "4",
-          "--frames",
-          "120",
-          "--two-surfaces"
-        ],
         "async_default": true,
         "synchronous": false,
         "async_environment": null
@@ -143,12 +101,6 @@
         "name": "stable-dxvk-d3d11",
         "returncode": 0,
         "seconds": 2.721,
-        "command": [
-          "/Volumes/Games/YAAGL-NVK-0.2.1-Global/ZZZ/launcher-data/wine-nvk/bin/wine",
-          "/Volumes/Games/mesa-nvk-update-20261114/windows-probes/d3d11-probe.exe",
-          "--frames",
-          "120"
-        ],
         "async_default": true,
         "synchronous": false,
         "async_environment": null
@@ -157,13 +109,6 @@
         "name": "stable-dxvk-indirect",
         "returncode": 0,
         "seconds": 1.651,
-        "command": [
-          "/Volumes/Games/YAAGL-NVK-0.2.1-Global/ZZZ/launcher-data/wine-nvk/bin/wine",
-          "/Volumes/Games/mesa-nvk-update-20261114/windows-probes/d3d11-probe.exe",
-          "--indirect",
-          "--frames",
-          "60"
-        ],
         "async_default": true,
         "synchronous": false,
         "async_environment": null
@@ -172,13 +117,6 @@
         "name": "stable-dxvk-indexed",
         "returncode": 0,
         "seconds": 1.711,
-        "command": [
-          "/Volumes/Games/YAAGL-NVK-0.2.1-Global/ZZZ/launcher-data/wine-nvk/bin/wine",
-          "/Volumes/Games/mesa-nvk-update-20261114/windows-probes/d3d11-probe.exe",
-          "--indexed-indirect",
-          "--frames",
-          "60"
-        ],
         "async_default": true,
         "synchronous": false,
         "async_environment": null
@@ -187,10 +125,6 @@
         "name": "stable-dxvk-shared",
         "returncode": 0,
         "seconds": 0.801,
-        "command": [
-          "/Volumes/Games/YAAGL-NVK-0.2.1-Global/ZZZ/launcher-data/wine-nvk/bin/wine",
-          "/Volumes/Games/mesa-nvk-update-20261114/windows-probes/d3d11-shared-probe.exe"
-        ],
         "async_default": true,
         "synchronous": false,
         "async_environment": null
@@ -199,15 +133,6 @@
         "name": "stable-vkd3d-d3d12",
         "returncode": 0,
         "seconds": 2.567,
-        "command": [
-          "/Volumes/Games/YAAGL-NVK-0.2.1-Global/ZZZ/launcher-data/wine-nvk/bin/wine",
-          "/Volumes/Games/mesa-nvk-update-20261114/windows-probes/d3d12-probe.exe",
-          "--shaders",
-          "Z:\\Volumes\\Games\\mesa-nvk-update-20261114\\windows-probes",
-          "--window",
-          "--frames",
-          "120"
-        ],
         "async_default": false,
         "synchronous": true,
         "async_environment": null

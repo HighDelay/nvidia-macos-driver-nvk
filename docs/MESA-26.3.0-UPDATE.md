@@ -104,8 +104,7 @@ Sixteen renderer/frontend/manifest files were replaced, preserving their owner,
 mode and restricted flags. Eighty-nine unrelated files and three symlinks were
 verified unchanged, including the kernel, translator, Zink/CGL frontend and
 matched DXVK/vkd3d/NGX/NVAPI dependencies. Original files and a guarded rollback
-helper are retained in the root-owned
-`/Library/NullMoth/mesa-26.3.0-trial-20261114` backup.
+helper are retained in a root-owned backup.
 
 Installed-path checks passed: 60 native exact-pixel frames with resize/restore,
 15 Metal sampler checks, system Zink/OpenGL core/mapping/sharing checks and 12
