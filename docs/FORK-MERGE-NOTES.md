@@ -1,5 +1,22 @@
 # Retained fork changes for upstream merges
 
+## Safari WebGPU argument-buffer textures, 2026-11-13
+
+Preserve recognition of sole-use i64-loaded texture handles before raw-buffer
+emission, independently of BDA. Raw sampler retries must retain the required
+address model for dereferenced buffer pointers nested in argument groups,
+while keeping directly bound word-buffer/atomic cursor behavior. Keep the
+separate texture-slot and nonzero-uniform readbacks; successful shader
+compilation can still hide zero-valued resource reads. Preserve multisample
+typing through embedded texture discovery, reflection, loaded values and
+descriptor heaps: sample indices must lower to `Sample`, not mip `Lod`.
+Query-only shaders still need embedded texture descriptors. Keep the distinct
+four-sample resolve and dimension/mip/sample-count readbacks through both
+argument encoder paths. See the
+[Safari WebGPU repair record](SAFARI-WEBGPU-TEXTURES.md) for the reproduction, source
+constraints, private GPU results, and user-confirmed Safari result on RTX 2060
+SUPER / Tahoe 26.7.1. Full driver build/release remains held at the user's request.
+
 ## Repaired upstream 2.9 integration, 2026-11-10
 
 After the selective backports below, the user approved the broader integration

@@ -1467,19 +1467,29 @@ impl Emitter {
         for inst in tir.blocks.iter().flat_map(|block| &block.insts) {
             inst.visit_uses(|name| *use_counts.entry(name.to_string()).or_default() += 1);
         }
-        self.opaque_resource_payload_loads
-            .extend(
-                self.bda_inttoptr_sources
-                    .iter()
-                    .filter_map(|(pointer, source)| {
-                        let LlValue::Local(integer) = &source.value else {
-                            return None;
-                        };
-                        (self.opaque_resource_pointers.contains(pointer)
-                            && use_counts.get(integer) == Some(&1))
-                        .then(|| (integer.clone(), pointer.clone()))
-                    }),
-            );
+        // This resource-copy idiom also occurs in raw-first sampler retries
+        // without BDA; discovering it must not depend on the address model.
+        self.opaque_resource_payload_loads.extend(
+            tir.blocks
+                .iter()
+                .flat_map(|block| &block.insts)
+                .filter(|inst| {
+                    inst.opcode == "inttoptr" && matches!(inst.result_ty, Some(LlType::Ptr(1)))
+                })
+                .filter_map(|inst| {
+                    let pointer = inst.result.as_ref()?;
+                    let source = inst.operands.first()?.as_typed_value()?;
+                    if source.ty != LlType::Int(64) {
+                        return None;
+                    }
+                    let LlValue::Local(integer) = &source.value else {
+                        return None;
+                    };
+                    (self.opaque_resource_pointers.contains(pointer)
+                        && use_counts.get(integer) == Some(&1))
+                    .then(|| (integer.clone(), pointer.clone()))
+                }),
+        );
         self.seed_network_storage(&tir, &body_blocks, &f.params);
         for network in
             crate::native::emitter::pointer_network::null_rooted_pointer_networks(&body_blocks)

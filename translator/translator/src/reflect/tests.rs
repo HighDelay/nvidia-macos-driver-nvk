@@ -997,6 +997,7 @@ fn kernel_reflection_threadgroup_buffer_has_no_descriptor() {
         argument_index: 0,
         dim: spirv::Dim::Dim2D,
         arrayed: false,
+        multisampled: false,
         comp: crate::passes::ImageComp::Float,
         storage_format: None,
         array_length: Some(2),

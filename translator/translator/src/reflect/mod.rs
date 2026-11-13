@@ -3149,7 +3149,7 @@ fn append_embedded_resources(
             texture_shape: Some(TextureShape {
                 dimension: TextureDimension::from_spirv_dim(embedded.dim),
                 arrayed: embedded.arrayed,
-                multisampled: false,
+                multisampled: embedded.multisampled,
                 component: TextureComponent::from_image_comp(embedded.comp),
                 writable: embedded.storage_format.is_some(),
                 array_ref: embedded.array_length.is_some(),

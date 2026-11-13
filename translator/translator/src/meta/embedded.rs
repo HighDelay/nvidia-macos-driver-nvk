@@ -27,6 +27,7 @@ pub struct EmbeddedTexture {
     pub argument_index: u32,
     pub dim: Dim,
     pub arrayed: bool,
+    pub multisampled: bool,
     pub comp: ImageComp,
     pub storage_format: Option<TextureFormat>,
     pub array_length: Option<u32>,
@@ -109,11 +110,15 @@ pub(super) fn detect_embedded_samplers(
 }
 
 pub(super) fn body_uses_texture_intrinsic(ll: &str) -> bool {
-    ll.contains("@air.sample_")
-        || ll.contains("@air.gather_")
-        || ll.contains("@air.read_texture")
-        || ll.contains("@air.write_texture")
-        || ll.contains("@air.write_imageblock_slice_to_texture")
+    // Query-only shaders still need the argument buffer's texture descriptor.
+    // Omitting it silently lowers dimensions to zero and sample/mip counts to one.
+    ll.split('@').skip(1).any(|symbol| {
+        let name = symbol
+            .split(|c: char| !c.is_ascii_alphanumeric() && c != '_' && c != '.')
+            .next()
+            .unwrap_or_default();
+        crate::air_intrinsics::air_image_intrinsic(name)
+    })
 }
 
 pub(super) fn detect_embedded_textures(
@@ -139,6 +144,7 @@ pub(super) fn detect_embedded_textures(
                 argument_index: member.argument_index(tex_node),
                 dim: shape.dimension.to_spirv_dim(),
                 arrayed: shape.arrayed,
+                multisampled: shape.multisampled,
                 comp: shape.component.to_image_comp(),
                 storage_format: shape.storage_format,
                 array_length: shape.array_length,

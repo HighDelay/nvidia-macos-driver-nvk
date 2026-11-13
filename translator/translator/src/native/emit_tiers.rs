@@ -775,6 +775,22 @@ pub fn emit_vulkan_spirv_all_buffers_raw(san_ll: &str) -> Result<Vec<u8>, String
     .into_bytes())
 }
 
+fn raw_buffers_require_indirect_addresses(parsed: &LlModule) -> bool {
+    // Keep directly bound word-buffer/atomic cursors in their existing raw
+    // representation. Only modules that load an indirect buffer pointer and
+    // already require address-based dereferences need BDA in this retry tier.
+    let loads_buffer_pointer = parsed.functions.iter().any(|function| {
+        function.carrier_insts().any(|inst| {
+            matches!(inst.result_ty, Some(LlType::Ptr(1 | 2)))
+                && inst
+                    .load()
+                    .as_deref()
+                    .is_some_and(|load| matches!(load.ptr.ty, LlType::Ptr(2)))
+        })
+    });
+    loads_buffer_pointer && requires_device_address_model(parsed)
+}
+
 pub(crate) fn emit_vulkan_spirv_all_buffers_raw_with_sidecar(
     san_ll: &str,
     kern: Option<&meta::KernMeta>,
@@ -785,15 +801,19 @@ pub(crate) fn emit_vulkan_spirv_all_buffers_raw_with_sidecar(
 ) -> Result<crate::emit_sidecar::EmittedSpirv, String> {
     let san_ll = vec_scalar_merge::lower_vector_scalar_pointer_merge(san_ll);
     let mut parsed = LlModule::parse_with_stage_meta(&san_ll, kern, entry_name)?;
+    let requires_device_addresses = raw_buffers_require_indirect_addresses(&parsed);
     mark_all_device_buffers_raw(&mut parsed, false);
-    finalize_all_buffers_raw_emission(
-        Emitter::new(parsed).with_known_plan_rejections(
-            known_ordinary_plan_rejections,
-            known_ownership_plan_rejections,
-        ),
-        buffer_layouts,
-        &san_ll,
-    )
+    let mut emitter = Emitter::new(parsed).with_known_plan_rejections(
+        known_ordinary_plan_rejections,
+        known_ownership_plan_rejections,
+    );
+    // Raw-first retries must retain the primary construction's address model:
+    // a dereferenced buffer pointer is still an address, including constant
+    // buffers nested in WebGPU argument groups.
+    if requires_device_addresses {
+        emitter = emitter.with_bda_device_pointers();
+    }
+    finalize_all_buffers_raw_emission(emitter, buffer_layouts, &san_ll)
 }
 
 pub fn emit_vulkan_spirv_all_buffers_raw_with_workgroup(san_ll: &str) -> Result<Vec<u8>, String> {
@@ -820,15 +840,16 @@ pub(crate) fn emit_vulkan_spirv_all_buffers_raw_with_workgroup_sidecar(
 ) -> Result<crate::emit_sidecar::EmittedSpirv, String> {
     let san_ll = vec_scalar_merge::lower_vector_scalar_pointer_merge(san_ll);
     let mut parsed = LlModule::parse_with_stage_meta(&san_ll, kern, entry_name)?;
+    let requires_device_addresses = raw_buffers_require_indirect_addresses(&parsed);
     mark_all_device_buffers_raw(&mut parsed, true);
-    finalize_all_buffers_raw_emission(
-        Emitter::new(parsed).with_known_plan_rejections(
-            known_ordinary_plan_rejections,
-            known_ownership_plan_rejections,
-        ),
-        buffer_layouts,
-        &san_ll,
-    )
+    let mut emitter = Emitter::new(parsed).with_known_plan_rejections(
+        known_ordinary_plan_rejections,
+        known_ownership_plan_rejections,
+    );
+    if requires_device_addresses {
+        emitter = emitter.with_bda_device_pointers();
+    }
+    finalize_all_buffers_raw_emission(emitter, buffer_layouts, &san_ll)
 }
 
 pub fn emit_vulkan_spirv_all_buffers_raw_relooper_feed(san_ll: &str) -> Result<Vec<u8>, String> {

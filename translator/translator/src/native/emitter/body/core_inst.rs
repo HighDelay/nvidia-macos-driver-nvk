@@ -2086,6 +2086,21 @@ impl Emitter {
         result_ty: LlType,
         instructions: &mut Vec<Instruction>,
     ) -> Result<(), String> {
+        // AIR can copy an opaque texture's single-word payload as i64 before
+        // inttoptr. Its sole use is the already identified texture handle, so
+        // emit the normal resource load under that handle's name. Do this before
+        // raw-buffer lowering, which must retain the descriptor-field sidecar
+        // rather than turn this resource into a physical buffer address.
+        if result_ty == LlType::Int(64) {
+            if let Some(pointer_name) = self.opaque_resource_payload_loads.get(&name).cloned() {
+                return self.emit_load_resolved_inner(
+                    pointer_name,
+                    load,
+                    LlType::Ptr(1),
+                    instructions,
+                );
+            }
+        }
         let result_type = self.type_id(&result_ty)?;
         let result = self.result_id(&name, &result_ty)?;
         // DIAGNOSTIC (NVMTL_DEVHANDLE_TRACE=1): the id is allocated HERE, before any branch below picks
@@ -2401,24 +2416,6 @@ impl Emitter {
         }
         if self.emit_trailing_byte_array_value_load(result, &result_ty, &load.ptr, instructions)? {
             return Ok(());
-        }
-        if result_ty == LlType::Int(64)
-            && self
-                .pointer_pointee_for_value(&load.ptr.value)?
-                .is_some_and(|pointee| matches!(pointee, LlType::Ptr(1)))
-        {
-            if let Some(pointer_name) = self.opaque_resource_payload_loads.get(&name).cloned() {
-                let pointer_ty = LlType::Ptr(1);
-                let pointer_type = self.type_id(&pointer_ty)?;
-                let pointer = self.result_id(&pointer_name, &pointer_ty)?;
-                instructions.push(Self::inst(
-                    Op::Load,
-                    Some(pointer_type),
-                    Some(pointer),
-                    vec![Operand::IdRef(ptr)],
-                ));
-                return Ok(());
-            }
         }
         if let Some(pointee) = self.pointer_pointee_for_value(&load.ptr.value)? {
             let pointee = self.resolve_type(&pointee)?;

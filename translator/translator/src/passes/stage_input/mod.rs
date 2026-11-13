@@ -2581,8 +2581,11 @@ pub(in crate::passes) fn bindless_heap_var(
         binding,
     );
     ctx.interface_buffer_var(var);
+    let multisampled = type_def_of(ctx, image_ty).is_some_and(|ty| {
+        ty.operands.get(4) == Some(&Operand::LiteralBit32(1))
+    });
     ctx.image_array_vars
-        .insert(var, (image_ty, dims, comp, false));
+        .insert(var, (image_ty, dims, comp, multisampled));
     ctx.bindless_heap_vars.insert(image_ty, var);
     var
 }
@@ -2642,8 +2645,11 @@ pub(in crate::passes) fn bindless_storage_heap_var(
         binding,
     );
     ctx.interface_buffer_var(var);
+    let multisampled = type_def_of(ctx, image_ty).is_some_and(|ty| {
+        ty.operands.get(4) == Some(&Operand::LiteralBit32(1))
+    });
     ctx.image_array_vars
-        .insert(var, (image_ty, dims, comp, false));
+        .insert(var, (image_ty, dims, comp, multisampled));
     ctx.bindless_heap_vars.insert(image_ty, var);
     var
 }
@@ -2680,11 +2686,11 @@ fn register_embedded_textures(
                 tex.comp,
             )?;
             (
-                ctx.ty_storage_image(tex.dim, tex.arrayed, format, tex.comp),
+                ctx.ty_storage_image_ms(tex.dim, tex.arrayed, format, tex.comp, tex.multisampled),
                 state,
             )
         } else {
-            (ctx.ty_image(tex.dim, tex.arrayed, tex.comp), None)
+            (ctx.ty_image_ms(tex.dim, tex.arrayed, tex.comp, tex.multisampled), None)
         };
         // An array of textures (array<texture2d<float>, N>) goes through the heap as well, each element by the slot its
         // own handle carries: declared as an array binding, it would need N descriptors at one binding, and the host's
@@ -2759,7 +2765,7 @@ fn register_embedded_textures(
         ctx.interface_buffer_var(var);
         if let Some(length) = tex.array_length {
             ctx.image_array_vars
-                .insert(var, (image_ty, (tex.dim, tex.arrayed), tex.comp, false));
+                .insert(var, (image_ty, (tex.dim, tex.arrayed), tex.comp, tex.multisampled));
             ctx.register_runtime_storage_image_value(
                 var,
                 tex.synthetic_texture_index,
@@ -2820,6 +2826,9 @@ fn register_embedded_textures(
         ));
         ctx.image_dims.insert(lid, (tex.dim, tex.arrayed));
         ctx.image_comp.insert(lid, tex.comp);
+        if tex.multisampled {
+            ctx.image_multisampled.insert(lid);
+        }
         if tex.storage_format.is_some() {
             ctx.image_storage.insert(lid);
             ctx.register_runtime_storage_image_value(
