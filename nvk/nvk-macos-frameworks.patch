@@ -1,0 +1,15 @@
+CoreGraphics linkage from nullmoth/nvidia-macos-driver 7412cdde81447f78da0ebb64216dc258d8beaedb,
+nvk/nvk-metal-wsi.patch (MIT). Keep the dependency fix independently of its
+different software-presentation policy and deferred 2.9 kernel interfaces.
+
+--- a/src/vulkan/meson.build
++++ b/src/vulkan/meson.build
+@@ -73,7 +73,7 @@
+   vulkan_wsi_list += '-DVK_USE_PLATFORM_METAL_EXT'
+   vulkan_wsi_deps += dependency(
+     'appleframeworks',
+-    modules : ['QuartzCore', 'Metal']
++    modules : ['QuartzCore', 'Metal', 'CoreGraphics']
+   )
+ endif
+ 

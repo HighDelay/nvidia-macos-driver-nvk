@@ -1,9 +1,10 @@
 #!/bin/bash
 # Build NVK (Mesa Vulkan driver for NVIDIA + the NAK compiler) for x86_64 macOS from pristine Mesa plus the patches in nvk/.
 #
-# usage: build_nvk.sh <mesa git dir> <open-gpu-kernel-modules 610.57.04 tree> <out dir> [2.9|2.8]
+# usage: build_nvk.sh <mesa git dir> <open-gpu-kernel-modules 610.57.04 tree> <out dir> [2.8]
 #
-# The release argument selects the patch set (default 2.9):
+# The release argument selects the kernel-compatible patch set (default 2.8).
+# It does not override nvk/MESA_BASE. The upstream 2.9 chain remains deferred:
 #   Both end with nvk/dlss/patch_dlss_cache.py.
 #   2.9  nvk-macos, nvk-fixes-after-def16, nvk-620-kernel, nvk-recycle, nvk-slab, nvk-slabdef, nvk-hubfix,
 #        nvk-perf-boost-burst, nvk-rated-tdp, nvk-gps-maxpower, nvk-metal-wsi (VK_EXT_metal_surface: windows), nvk-card-select (NVK_ACCEL_ID),
@@ -13,6 +14,7 @@
 #        nvk-diag-nofollow (the opt-in diagnostic log is created without following a link, for its owner alone)
 #   2.8  the set the 2.8 / 2.8.1 package was built from: the same chain without hubfix, perf-boost-burst, rated-tdp and
 #        gps-maxpower, and with nvk/release-2.8/nvk-fixes-after-def16.patch (the copy-engine retry still logged to stderr)
+#        plus the compatible warning/bounded-name fixes, without changing its kernel mapping protocol.
 # The NAK changes (nvk/speed267) are already part of nvk-macos.patch; the scripts there are the history of how they
 # were made and are not run here.
 #
@@ -25,11 +27,11 @@
 #   NVK_EXTRA_PATCHES  space-separated names of extra patches in nvk/ applied last (e.g. nvk-upstream-nak)
 #   NVK_REF_EXPORTS optional file with the exported symbols to compare against (one name per line, sorted)
 #
-# The Mesa git must contain the commit in nvk/MESA_BASE (2.9: 90a959eb, mesa-26.3.0-rc3) and, for 2.8, 17ca6174. The tree is exported with git archive, so no .git is
+# The Mesa git must contain the commit in nvk/MESA_BASE. The tree is exported with git archive, so no .git is
 # present and the binary carries no git sha. Rebuilding is deterministic: the same inputs give the same LC_UUID.
 set -euo pipefail
 
-MESA_GIT=${1:?mesa git dir}; OGKM=${2:?open-gpu-kernel-modules 610.57.04 tree}; OUT=${3:?output dir}; REL=${4:-2.9}
+MESA_GIT=${1:?mesa git dir}; OGKM=${2:?open-gpu-kernel-modules 610.57.04 tree}; OUT=${3:?output dir}; REL=${4:-2.8}
 HERE=$(cd "$(dirname "$0")/.." && pwd); NVK=$HERE/nvk
 # This fork's candidate deliberately retains the validated 2.8 mapping protocol.
 # The incoming 2.9 patch chain expects a different kernel/token interface and is
@@ -43,8 +45,7 @@ case $REL in
   2.9) FIXES=$NVK/nvk-fixes-after-def16.patch
        CHAIN="nvk-macos @FIXES nvk-620-kernel nvk-recycle nvk-slab nvk-slabdef nvk-hubfix nvk-perf-boost-burst nvk-rated-tdp nvk-gps-maxpower nvk-metal-wsi nvk-card-select hwrt/ttu-nak hwrt/ttu-rq curves/curves hwrt/wide nvk-warnings nvk-unbound-stage nvk-diag-nofollow" ;;
   2.8) FIXES=$NVK/release-2.8/nvk-fixes-after-def16.patch
-       BASE=17ca6174   # the 2.8 / 2.8.1 package was built on this Mesa; 2.9 moved to nvk/MESA_BASE (26.3)
-       CHAIN="nvk-macos @FIXES nvk-620-kernel nvk-recycle nvk-slab nvk-slabdef" ;;
+       CHAIN="nvk-macos @FIXES nvk-620-kernel nvk-recycle nvk-slab nvk-slabdef nvk-warnings nvk-macos-frameworks" ;;
   *) echo "STOP: release must be 2.9 or 2.8"; exit 2 ;;
 esac
 
@@ -54,17 +55,37 @@ CHAIN="$CHAIN ${NVK_EXTRA_PATCHES:-}"
 
 git -C "$MESA_GIT" cat-file -e "$BASE^{commit}" || { echo "STOP: $MESA_GIT has no commit $BASE"; exit 2; }
 mkdir -p "$OUT"; OUT=$(cd "$OUT" && pwd)
+# Keep the exact Mesa and patch/helper inputs beside both the renderer and its
+# native compiler tools. An existing host directory is usable only when matched.
+{
+  git -C "$MESA_GIT" rev-parse "$BASE^{commit}"
+  for p in $CHAIN; do
+    f=$NVK/$p.patch; [ "$p" = "@FIXES" ] && f=$FIXES
+    shasum -a 256 "$f" | sed "s|$HERE/||"
+  done
+  for f in "$NVK/dlss/patch_dlss_cache.py" "$NVK/hwrt/nvk_hwrt.h" "$NVK/hwrt/nvk_hwrt_layout.h" \
+    "$NVK/curves/nvk_curve.h" "$NVK/hwrt/encode_wide.comp" "$NVK/hwrt/encode_wide_body.h" \
+    "$NVK/curves/curve_math.h" "$NVK/curves/curve_nir.h" "$NVK/ogkm-nvos-620.patch" "$NVK/ogkm-warnings.patch"; do
+    shasum -a 256 "$f" | sed "s|$HERE/||"
+  done
+} > "$OUT/source-inputs.txt"
+H=$OUT/host
+if [ -e "$H/bin/mesa_clc" ] || [ -e "$H/bin/vtn_bindgen2" ]; then
+  cmp -s "$OUT/source-inputs.txt" "$H/source-inputs.txt" || {
+    echo "STOP: native Mesa tools have missing or different source identity; use a fresh output directory"; exit 2;
+  }
+fi
 S=$OUT/mesa; rm -rf "$S" "$OUT/ogkm"; mkdir -p "$S"
 git -C "$MESA_GIT" archive "$BASE" | tar -x -C "$S"
 
 # Headers: NVK compiles against the 610 open kernel module headers with the 620 nvos.h change applied.
 cp -R "$OGKM" "$OUT/ogkm"
-patch -p1 -s --no-backup-if-mismatch -d "$OUT/ogkm" < "$NVK/ogkm-nvos-620.patch"
-[ "$REL" = 2.8 ] || patch -p1 -s --no-backup-if-mismatch -d "$OUT/ogkm" < "$NVK/ogkm-warnings.patch"   # DRF_MASK, also defined by Mesa's drf.h
+patch -p1 -s --fuzz=0 --no-backup-if-mismatch -d "$OUT/ogkm" < "$NVK/ogkm-nvos-620.patch"
+patch -p1 -s --fuzz=0 --no-backup-if-mismatch -d "$OUT/ogkm" < "$NVK/ogkm-warnings.patch"   # DRF_MASK, also defined by Mesa's drf.h
 
 for p in $CHAIN; do
   f=$NVK/$p.patch; [ "$p" = "@FIXES" ] && f=$FIXES
-  patch -p1 -s --no-backup-if-mismatch -d "$S" < "$f" || { echo "STOP: $f does not apply"; exit 3; }
+  patch -p1 -s --fuzz=0 --no-backup-if-mismatch -d "$S" < "$f" || { echo "STOP: $f does not apply"; exit 3; }
   echo "applied $(basename "$f")"
 done
 # the shared layout headers of the hardware ray-traversal part live in nvk/hwrt (the host tests include them too)
@@ -79,13 +100,13 @@ find "$S" -name '*.orig' -o -name '*.rej' | grep . && { echo "STOP: patch left .
 
 # mesa_clc and vtn_bindgen2 precompile NVK's internal CL shaders to serialized NIR. They MUST be built from this same
 # tree: tools from another Mesa revision give no build error and deserialize as garbage at run time.
-H=$OUT/host
 if [ ! -x "$H/bin/mesa_clc" ] || [ ! -x "$H/bin/vtn_bindgen2" ]; then
   meson setup "$OUT/clc-native" "$S" -Dbuildtype=release -Dprefix="$H" -Dllvm=enabled -Dmesa-clc=enabled -Dinstall-mesa-clc=true \
     -Dvulkan-drivers= -Dgallium-drivers= -Dplatforms= -Degl=disabled -Dgbm=disabled -Dgles1=disabled -Dgles2=disabled -Dglx=disabled \
     -Dopengl=false > "$OUT/clc-native.setup.log" 2>&1
   ninja -C "$OUT/clc-native" -j"$JOBS" src/compiler/clc/mesa_clc src/compiler/spirv/vtn_bindgen2 > "$OUT/clc-native.log" 2>&1
   mkdir -p "$H/bin"; cp "$OUT/clc-native/src/compiler/clc/mesa_clc" "$OUT/clc-native/src/compiler/spirv/vtn_bindgen2" "$H/bin/"
+  cp "$OUT/source-inputs.txt" "$H/source-inputs.txt"
 fi
 export PATH="$H/bin:$PATH"
 
@@ -136,6 +157,10 @@ cmp -s "$OUT/nvk-rust-crates.txt" "$HERE/licenses/nvk-rust-crates.txt" || { echo
 D=$B/src/nouveau/vulkan/libvulkan_nouveau.dylib
 U=$(nm -m "$D" | grep '(undefined)' | grep -v weak | grep 'dynamically looked up' || true)
 [ -z "$U" ] || { echo "STOP: unresolved strong references (dlopen fails in WindowServer):"; echo "$U"; exit 5; }
+# Compiler tools may use MacPorts/Homebrew libraries; the delivered renderer
+# must load using only the operating system's libraries and frameworks.
+HOST_DEPS=$(otool -L "$D" | tail -n +3 | awk '{print $1}' | grep -vE '^(/usr/lib/|/System/Library/Frameworks/)' || true)
+[ -z "$HOST_DEPS" ] || { echo "STOP: renderer depends on build-host libraries; use a system-library target sysroot:"; echo "$HOST_DEPS"; exit 5; }
 cp "$D" "$OUT/libvulkan_nouveau.dylib"; strip -S "$OUT/libvulkan_nouveau.dylib"
 nm -gU "$OUT/libvulkan_nouveau.dylib" | awk '{print $3}' | sort > "$OUT/exports.txt"
 UUID=$(otool -l "$OUT/libvulkan_nouveau.dylib" | awk '/uuid/{print $2; exit}')

@@ -2,29 +2,29 @@
 
 ## Mesa base
 
-This fork's 2.9 candidate retains `nvk/MESA_BASE` at **17ca6174**, the validated
-2.8 renderer base. The upstream 2.9 Mesa/token-interface rebase is deferred; do
-not apply its patch chain to our retained kernel interface. Package provenance
-records the actual reused renderer source and hash. See
-[the integration decisions](UPSTREAM-2.9-INTEGRATION.md).
+`nvk/MESA_BASE` pins official Mesa **26.3.0** at
+`0a6fa60abb737d26ac8a316a4aad7c9ddf64f9e4`. The builder uses the retained
+**2.8-compatible macOS/kernel interface**, rather than importing upstream's
+2.9 mapping-token and power-management chain. See the
+[stable update and private validation record](MESA-26.3.0-UPDATE.md).
 
-Upstream 2.9 moved to Mesa commit 90a959eb, the mesa-26.3.0-rc3 tag. Its 2.8 and 2.8.1 were built on 17ca6174 (2026-10-05, 26.3.0-devel); 32 nouveau commits separate the two and the whole upstream patch chain applies to both without fuzz. The NAK features that matter for compute speed
-are in that base, not behind a future update: the uniform base address on global loads (`uniform_addr`, `set_ureg_addr`,
-`nak_nir_opt_uniform_address`, `nir_opt_offsets` for SM73 and newer), LDSM, and the cooperative-matrix lowering.
-A rebase onto a newer Mesa therefore buys only the upstream commits made since. There are 62 of them touching
-`src/nouveau` (about 930 added and 650 removed lines), and the whole 2.9 patch chain applies to the newer tree without a
-reject. Moving the base would still re-base about 17,600 lines of patches that WindowServer composites through, with no
-card available to validate, so the base stays. The upstream fixes that matter for current cards are carried instead as
-`nvk/nvk-upstream-nak.patch` (eleven commits, MIT, listed in the patch header), applied only when
-`NVK_EXTRA_PATCHES=nvk-upstream-nak` is set for `build/build_nvk.sh`:
+The previous fork renderer used `17ca6174` (26.3.0-devel). Driver upstream
+`7412cdd`, also tagged `v3.0.0-beta.1`, pins `90a959eb` (26.3.0-rc3). A newer
+Mesa source revision does not require changing this fork's kernel protocol.
+The existing [2.9 integration decisions](UPSTREAM-2.9-INTEGRATION.md) remain
+applicable to those deferred interfaces and to previously assembled packages.
 
-- uniform `Ldcg` scoreboard on SM120 (RTX 50): a missing dependency, a correctness fix;
-- `ready_cycle` in the prepass scheduler, SM120 IMMA/HMMA latencies, `opt_fall_through` always applied: scheduling;
-- `IDP.4A` never encoded with an immediate, `OpBSSy` source type, input-attachment `texture_offset`.
+The native `mesa_clc` and `vtn_bindgen2` tools must come from the exact patched
+Mesa source used for the renderer. The builder records their source inputs and
+rejects stale or unidentified tools. Target dependencies must resolve to system
+libraries/frameworks; MacPorts LLVM and SPIR-V packages are build dependencies.
 
-Checked offline: the patch applies on top of the 2.9 chain with no reject; the build with it has the same 21 warnings and
-exactly the same 2274 exports as the build without it. Not checkable offline: whether the changed scheduling is faster or
-the same on a card. Default off until a Geekbench and compositor run on the target card shows no regression.
+The optional `nvk/nvk-upstream-nak.patch` remains disabled. Its earlier offline
+results applied to the older Mesa base. One SM120 latency hunk overlaps stable
+26.3.0, so do not append the entire patch to the new base without reconciling
+it and testing the resulting compiler on the target GPU. Native Zink keeps its
+separate Gallium/OpenGL Mesa pin and validated internal ABI; it calls the new
+NVK renderer through Vulkan.
 
 ## NVRM headers
 

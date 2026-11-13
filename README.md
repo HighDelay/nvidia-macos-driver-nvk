@@ -149,19 +149,22 @@ Existing Ada/Ampere codec paths are retained.
 
 ## Build from source
 
-Requires Xcode 16+, Rust (stable), Meson/Ninja, and NVIDIA's
-`open-gpu-kernel-modules` at **615.78.08**.
+Requires Xcode command line tools, Rust (stable), Meson/Ninja, and NVIDIA's
+`open-gpu-kernel-modules` at **620.70.06** for the kernel components. NVK uses
+**610.57.04** headers with the recorded NVOS compatibility patch.
 
 ```sh
 build/build_xlate.sh
 RELEASE=1 build/build_plugin.sh
-build/build263.sh
+build/build_nvk.sh /path/to/mesa-git /path/to/ogkm-610.57.04 /path/to/nvk-output
 build/accel_build.sh <src> <out>
 build/accel_build_all.sh kexts/NVRM <out>
 ```
 
 These build the translator, Metal plugin, NVK, kexts and both OS accelerators.
-Apply `nvk/nvk-macos.patch` to Mesa **17ca6174** before building NVK.
+The NVK builder exports official Mesa **26.3.0** from `nvk/MESA_BASE` and applies
+the complete 620-compatible patch chain, including matched native compiler tools.
+[Mesa update, dependencies and validation limits](docs/MESA-26.3.0-UPDATE.md).
 Rebuild **both accelerators** whenever `nvrm_vram_abi.h` or `nvrm_gpuva_abi.h`
 changes. [Zink build and packaging instructions](docs/ZINK-OPENGL.md#building-locally).
 

@@ -1,5 +1,31 @@
 # Retained fork changes for upstream merges
 
+## Mesa/NVK 26.3.0 private candidate, 2026-11-14
+
+The [stable Mesa update](MESA-26.3.0-UPDATE.md) advances NVK to official
+`0a6fa60abb737d26ac8a316a4aad7c9ddf64f9e4` while retaining the 620.70.06
+kernel interface, compatible macOS backend, slab/recycler defaults and DLSS
+view-lifetime repair. Keep the default/release-input patch chain on `2.8`;
+Mesa version selection comes from `nvk/MESA_BASE`. The upstream 2.9 token,
+hub and power changes remain deferred. Keep Zink's independent frontend ABI
+pin and the Wine provider/DXVK contract, MSync and presentation-reuse fallback.
+
+Use upstream's equivalent CoreGraphics dependency fix from
+`nvk/nvk-metal-wsi.patch` independently of its software-present policy. Native
+applications retain the fork's GPU-copy bridge. Both native compiler tools need
+matching patched-source identities; keep the no-fuzz patch and system-library
+dependency checks. Do not apply the older optional NAK patch wholesale to stable.
+
+Minecraft 26.3 can select the existing bridge using the documented
+`org.lwjgl.vulkan.libname` JVM argument. Preserve vanilla feature checks and
+SDL's provider alignment. The companion selector mod is optional; an ICD
+manifest does not override LWJGL's bundled MoltenVK preference by itself.
+
+Only private renderers/runtimes are built and tested for this candidate. The
+user will test applications; the installed driver and full build/release remain
+held. Automated RTX 2060 SUPER/Tahoe checks do not qualify WindowServer, a new
+boot, Sequoia, Blackwell, or every application.
+
 ## Safari WebGPU argument-buffer textures, 2026-11-13
 
 Preserve recognition of sole-use i64-loaded texture handles before raw-buffer
