@@ -20,6 +20,8 @@
 - (MTLPixelFormat)pixelFormat { return MTLPixelFormatBGRA8Unorm; }
 @end
 static int drawable_presented,dirty_called,native_released;
+static int native_created,pool_resets,fence_resets;
+static VkResult host_wait_result=VK_TIMEOUT,host_reset_result=VK_SUCCESS;
 @interface HostDrawable : NSObject
 @property(strong) HostTexture *texture;
 @end
@@ -32,20 +34,23 @@ static int drawable_presented,dirty_called,native_released;
 @implementation HostLayer
 - (id)nextDrawable { return self.drawable; }
 @end
-static VkResult host_buffer(VkDevice,const VkBufferCreateInfo *,const VkAllocationCallbacks *,VkBuffer *out) { *out=(VkBuffer)(uintptr_t)71;return VK_SUCCESS; }
+static VkResult host_buffer(VkDevice,const VkBufferCreateInfo *,const VkAllocationCallbacks *,VkBuffer *out) { native_created++;*out=(VkBuffer)(uintptr_t)71;return VK_SUCCESS; }
 static void host_requirements(VkDevice,VkBuffer,VkMemoryRequirements *out) { *out={256,64,1}; }
 static VkResult host_allocate(VkDevice,const VkMemoryAllocateInfo *info,const VkAllocationCallbacks *,VkDeviceMemory *out) {
-   close(((const VkImportMemoryFdInfoKHR *)info->pNext)->fd);*out=(VkDeviceMemory)(uintptr_t)72;return VK_SUCCESS;
+   native_created++;close(((const VkImportMemoryFdInfoKHR *)info->pNext)->fd);*out=(VkDeviceMemory)(uintptr_t)72;return VK_SUCCESS;
 }
 static VkResult host_bind(VkDevice,VkBuffer,VkDeviceMemory,VkDeviceSize) { return VK_SUCCESS; }
-static VkResult host_pool(VkDevice,const VkCommandPoolCreateInfo *,const VkAllocationCallbacks *,VkCommandPool *out) { *out=(VkCommandPool)(uintptr_t)73;return VK_SUCCESS; }
+static VkResult host_pool(VkDevice,const VkCommandPoolCreateInfo *,const VkAllocationCallbacks *,VkCommandPool *out) { native_created++;*out=(VkCommandPool)(uintptr_t)73;return VK_SUCCESS; }
 static VkResult host_commands(VkDevice,const VkCommandBufferAllocateInfo *,VkCommandBuffer *out) { *out=(VkCommandBuffer)(uintptr_t)74;return VK_SUCCESS; }
 static VkResult host_begin(VkCommandBuffer,const VkCommandBufferBeginInfo *) { return VK_SUCCESS; }
 static VkResult host_end(VkCommandBuffer) { return VK_SUCCESS; }
 static void host_barrier(VkCommandBuffer,VkPipelineStageFlags,VkPipelineStageFlags,VkDependencyFlags,uint32_t,const VkMemoryBarrier *,uint32_t,const VkBufferMemoryBarrier *,uint32_t,const VkImageMemoryBarrier *) {}
 static void host_copy(VkCommandBuffer,VkImage,VkImageLayout,VkBuffer,uint32_t,const VkBufferImageCopy *) {}
-static VkResult host_fence(VkDevice,const VkFenceCreateInfo *,const VkAllocationCallbacks *,VkFence *out) { *out=(VkFence)(uintptr_t)75;return VK_SUCCESS; }
-static VkResult host_timeout(VkDevice,uint32_t,const VkFence *,VkBool32,uint64_t) { return VK_TIMEOUT; }
+static VkResult host_fence(VkDevice,const VkFenceCreateInfo *,const VkAllocationCallbacks *,VkFence *out) { native_created++;*out=(VkFence)(uintptr_t)75;return VK_SUCCESS; }
+static VkResult host_timeout(VkDevice,uint32_t,const VkFence *,VkBool32,uint64_t) { return host_wait_result; }
+static VkResult host_reset_pool(VkDevice,VkCommandPool,VkCommandPoolResetFlags) { pool_resets++;return host_reset_result; }
+static VkResult host_reset_fences(VkDevice,uint32_t n,const VkFence *fences) { assert(n==1&&fences&&*fences);fence_resets++;return VK_SUCCESS; }
+static void host_destroy_image(VkDevice,VkImage,const VkAllocationCallbacks *) {}
 static void host_release_pool(VkDevice,VkCommandPool,const VkAllocationCallbacks *) { native_released++; }
 static void host_release_fence(VkDevice,VkFence,const VkAllocationCallbacks *) { native_released++; }
 static void host_release_buffer(VkDevice,VkBuffer,const VkAllocationCallbacks *) { native_released++; }
@@ -56,6 +61,7 @@ static PFN_vkVoidFunction host_proc(const char *name) {
    HOST(BindBufferMemory,host_bind);HOST(CreateCommandPool,host_pool);HOST(AllocateCommandBuffers,host_commands);
    HOST(BeginCommandBuffer,host_begin);HOST(EndCommandBuffer,host_end);HOST(CmdPipelineBarrier,host_barrier);
    HOST(CmdCopyImageToBuffer,host_copy);HOST(CreateFence,host_fence);HOST(WaitForFences,host_timeout);
+   HOST(ResetCommandPool,host_reset_pool);HOST(ResetFences,host_reset_fences);HOST(DestroyImage,host_destroy_image);
    HOST(DestroyCommandPool,host_release_pool);HOST(DestroyFence,host_release_fence);
    HOST(DestroyBuffer,host_release_buffer);HOST(FreeMemory,host_release_memory);
 #undef HOST
@@ -215,6 +221,43 @@ int main() { @autoreleasepool {
    d->swapchain=true;c->retired=false;c->format=VK_FORMAT_B8G8R8A8_UNORM;c->extent={4,4};c->images[0].raw=(VkImage)(uintptr_t)76;c->images[0].acquired=true;
    stage_import=host_stage;surface_dirty=host_dirty;
    present.pSwapchains=&c->handle;present.pImageIndices=&zero;
+   // Completed resources can be reused without keeping a drawable or chain.
+   d->reuse_present_resources=true;d->profile_present=true;host_wait_result=VK_SUCCESS;
+   const int first_created=native_created;
+   assert(queue_present(q->raw,&present)==VK_SUCCESS);
+   assert(native_created==first_created+4 && c->present_cache_bytes==IOSurfaceGetAllocSize(cpu));
+   auto parked=*std::find_if(c->present_cache.begin(),c->present_cache.end(),[](auto &entry){return bool(entry);});
+   assert(parked && !parked->drawable && !parked->chain);
+   std::weak_ptr<Frame> lifetime=parked;parked.reset();
+   c->images[0].acquired=true;
+   assert(queue_present(q->raw,&present)==VK_SUCCESS);
+   assert(native_created==first_created+4 && pool_resets==1 && fence_resets==1);
+   assert(present_stats[10]==1 && !lifetime.expired());
+   // Distinct retained surfaces must never borrow another surface's import.
+   IOSurfaceRef other_surfaces[3]{};
+   for(auto &other:other_surfaces) {
+      other=IOSurfaceCreate((__bridge CFDictionaryRef)props);assert(other&&other!=cpu);
+      texture.iosurface=other;c->images[0].acquired=true;
+      assert(queue_present(q->raw,&present)==VK_SUCCESS);
+      assert(c->present_cache_bytes<=3*IOSurfaceGetAllocSize(cpu));
+   }
+   assert(lifetime.expired() && present_stats[11]==1);
+   assert(std::count_if(c->present_cache.begin(),c->present_cache.end(),[](auto &entry){return bool(entry);})==3);
+   release_images(c);assert(!c->present_cache_bytes);
+   for(auto &entry:c->present_cache)assert(!entry);
+   for(auto other:other_surfaces)CFRelease(other);
+   puts("PASS completed-resource reuse, surface isolation, three-entry bound and swapchain cleanup without ownership cycles");
+   // A reset failure drops the idle entry, drains the handoff and permits retry.
+   texture.iosurface=cpu;c->images[0].raw=(VkImage)(uintptr_t)76;c->images[0].acquired=true;
+   assert(queue_present(q->raw,&present)==VK_SUCCESS);
+   host_reset_result=VK_ERROR_OUT_OF_HOST_MEMORY;c->images[0].acquired=true;
+   assert(queue_present(q->raw,&present)==VK_ERROR_OUT_OF_HOST_MEMORY);
+   assert(!d->uncertain&&!c->images[0].acquired&&!c->present_cache_bytes);
+   host_reset_result=VK_SUCCESS;c->images[0].acquired=true;
+   assert(queue_present(q->raw,&present)==VK_SUCCESS);
+   puts("PASS cached-resource reset failure releases idle resources and preserves handoff/retry rules");
+   // Timeout on the cached entry must retain every GPU-owned object unchanged.
+   host_wait_result=VK_TIMEOUT;c->images[0].acquired=true;dirty_called=drawable_presented=0;
    const int before_release=native_released,before_semaphores=destroyed_semaphores;
    assert(queue_present(q->raw,&present)==VK_ERROR_DEVICE_LOST);
    assert(d->uncertain && c->images[0].acquired && quarantine.size()==1);

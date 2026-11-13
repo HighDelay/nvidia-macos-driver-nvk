@@ -17,6 +17,7 @@
 #include <fcntl.h>
 #include <unistd.h>
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
@@ -51,6 +52,24 @@ std::once_flag backend_once;
 std::once_flag device_procs_once;
 std::atomic<uint64_t> next_handle{0x4e564b0000000000ull};
 std::atomic<uint64_t> copies{}, copy_bytes{}, drawable_ns{}, producer_ns{}, import_failures{};
+// Optional local profiling. Timings include the rendering dependencies waited
+// by the copy fence; they are not GPU timestamps for the copy alone.
+std::array<std::atomic<uint64_t>,16> present_stats{};
+struct PresentTimer {
+   bool active;
+   unsigned counter;
+   std::chrono::steady_clock::time_point start;
+   PresentTimer(bool enabled,unsigned index):active(enabled),counter(index) {
+      if(active)start=std::chrono::steady_clock::now();
+   }
+   void finish() {
+      if(!active)return;
+      present_stats[counter].fetch_add(std::chrono::duration_cast<std::chrono::nanoseconds>(
+         std::chrono::steady_clock::now()-start).count(),std::memory_order_relaxed);
+      active=false;
+   }
+   ~PresentTimer() { finish(); }
+};
 #ifdef NVKBRIDGE_WINE
 std::atomic<uint64_t> hud_upload_bytes{};
 #endif
@@ -68,6 +87,7 @@ struct Surface {
 };
 struct Queue { VkQueue raw{}; uint32_t family{}; std::weak_ptr<Device> dev; };
 struct Image { VkImage raw{}; VkDeviceMemory memory{}; bool acquired{}; };
+struct Frame;
 struct Chain {
    std::shared_ptr<Device> dev;
    std::shared_ptr<Surface> surface;
@@ -76,6 +96,11 @@ struct Chain {
    VkExtent2D extent{};
    VkPresentModeKHR present_mode{};
    std::vector<Image> images;
+   // Idle entries retain the exact IOSurface, not its drawable. This prevents
+   // surface-ID reuse without holding CoreAnimation's drawable slots hostage.
+   std::array<std::shared_ptr<Frame>,3> present_cache;
+   uint64_t present_cache_bytes{};
+   unsigned present_cache_cursor{};
 #ifdef NVKBRIDGE_WINE
    VkBuffer hud_buffer{};
    VkDeviceMemory hud_memory{};
@@ -101,6 +126,7 @@ struct Device {
    uint32_t copy_family{}, copy_index{};
    VkQueue copy_queue{};
    bool swapchain{};
+   bool reuse_present_resources{}, profile_present{};
    std::atomic<bool> uncertain{};
    std::recursive_mutex submit;
 };
@@ -379,6 +405,12 @@ VkResult VKAPI_CALL device_extensions(VkPhysicalDevice physical, const char *lay
 VkResult VKAPI_CALL create_device(VkPhysicalDevice physical, const VkDeviceCreateInfo *info, const VkAllocationCallbacks *alloc, VkDevice *result) {
    auto instance = find(physicals,physical); if (!instance) return VK_ERROR_INITIALIZATION_FAILED;
    auto state = std::make_shared<Device>(); state->physical=physical; state->instance=instance;
+#ifdef NVKBRIDGE_WINE
+   // Experimental switches stay prefix/process-local and survive Wine children.
+   const char *reuse=getenv("WINE_NVK_PRESENT_REUSE"),*profile=getenv("WINE_NVK_PRESENT_PROFILE");
+   state->reuse_present_resources=reuse && !strcmp(reuse,"1");
+   state->profile_present=profile && !strcmp(profile,"1");
+#endif
    IP(instance, GetPhysicalDeviceProperties)(physical,&state->properties);
    IP(instance, GetPhysicalDeviceMemoryProperties)(physical,&state->memory);
    std::vector<const char *> extensions;
@@ -548,6 +580,8 @@ int memory_type(const Device &d,uint32_t bits,VkMemoryPropertyFlags flags) {
 }
 void release_images(const std::shared_ptr<Chain> &c) {
    if (c->dev->uncertain) return;
+   for(auto &entry:c->present_cache)entry.reset();
+   c->present_cache_bytes=0;
 #ifdef NVKBRIDGE_WINE
    if(c->hud_mapping)DP(c->dev,UnmapMemory)(c->dev->raw,c->hud_memory);
    if(c->hud_buffer)DP(c->dev,DestroyBuffer)(c->dev->raw,c->hud_buffer,c->alloc());
@@ -663,6 +697,9 @@ VkResult VKAPI_CALL acquire_image2(VkDevice device,const VkAcquireNextImageInfoK
 }
 
 struct Frame {
+   std::shared_ptr<Device> dev;
+   // Only uncertain GPU work retains the chain. Idle cached entries must not
+   // form a Chain -> Frame -> Chain ownership cycle.
    std::shared_ptr<Chain> chain;
    id<CAMetalDrawable> __strong drawable;
    IOSurfaceRef surface{};
@@ -672,9 +709,11 @@ struct Frame {
    VkCommandBuffer commands{};
    VkFence fence{};
    uint64_t bytes{};
+   size_t row{}, allocation_size{};
    ~Frame() {
-      auto d=chain->dev;
+      auto d=dev;
       if (d->uncertain) return;
+      PresentTimer cleanup(d->profile_present,8);
       if (pool) DP(d,DestroyCommandPool)(d->raw,pool,nullptr);
       if (fence) DP(d,DestroyFence)(d->raw,fence,nullptr);
       if (buffer) DP(d,DestroyBuffer)(d->raw,buffer,nullptr);
@@ -731,10 +770,12 @@ std::shared_ptr<const nvkbridge_hud::Bitmap> prepare_hud(const std::shared_ptr<C
 #endif
 VkResult copy_frame(const std::shared_ptr<Chain> &c,uint32_t index,VkSemaphore handoff,bool &consumed) {
    auto d=c->dev;
-   auto frame=std::make_shared<Frame>();frame->chain=c;
-   auto start=std::chrono::steady_clock::now();frame->drawable=[c->surface->layer nextDrawable];drawable_ns+=elapsed(start);
-   if (!frame->drawable) return VK_ERROR_OUT_OF_DATE_KHR;
-   id<MTLTexture> texture=frame->drawable.texture;
+   auto start=std::chrono::steady_clock::now();
+   id<CAMetalDrawable> drawable=[c->surface->layer nextDrawable];
+   auto drawable_elapsed=elapsed(start);drawable_ns+=drawable_elapsed;
+   if(d->profile_present)present_stats[2]+=drawable_elapsed;
+   if (!drawable) return VK_ERROR_OUT_OF_DATE_KHR;
+   id<MTLTexture> texture=drawable.texture;
    if (texture.device.registryID!=d->metal.registryID || texture.iosurfacePlane!=0 || !texture.iosurface)
       return VK_ERROR_SURFACE_LOST_KHR;
    // A valid layer can resize before its old swapchain is replaced. Let the
@@ -743,29 +784,54 @@ VkResult copy_frame(const std::shared_ptr<Chain> &c,uint32_t index,VkSemaphore h
       return VK_ERROR_OUT_OF_DATE_KHR;
    MTLPixelFormat expected=c->format==VK_FORMAT_B8G8R8A8_SRGB?MTLPixelFormatBGRA8Unorm_sRGB:MTLPixelFormatBGRA8Unorm;
    if (texture.pixelFormat!=expected) return VK_ERROR_FORMAT_NOT_SUPPORTED;
-   frame->surface=(IOSurfaceRef)CFRetain(texture.iosurface);
-   size_t row=IOSurfaceGetBytesPerRow(frame->surface),size=IOSurfaceGetAllocSize(frame->surface);
-   if (IOSurfaceGetPlaneCount(frame->surface)>1 || row%4 || row<(uint64_t)c->extent.width*4 ||
+   IOSurfaceRef surface=texture.iosurface;
+   size_t row=IOSurfaceGetBytesPerRow(surface),size=IOSurfaceGetAllocSize(surface);
+   if (IOSurfaceGetPlaneCount(surface)>1 || row%4 || row<(uint64_t)c->extent.width*4 ||
        c->extent.height>SIZE_MAX/row || (uint64_t)row*c->extent.height>size) return VK_ERROR_FORMAT_NOT_SUPPORTED;
-   frame->bytes=(uint64_t)row*c->extent.height;
-   VkBufferCreateInfo buffer{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};buffer.size=frame->bytes;buffer.usage=VK_BUFFER_USAGE_TRANSFER_DST_BIT|VK_BUFFER_USAGE_TRANSFER_SRC_BIT;buffer.sharingMode=VK_SHARING_MODE_EXCLUSIVE;
-   VkResult r=DP(d,CreateBuffer)(d->raw,&buffer,nullptr,&frame->buffer);if (r!=VK_SUCCESS) return r;
-   VkMemoryRequirements req{};DP(d,GetBufferMemoryRequirements)(d->raw,frame->buffer,&req);
-   if (req.size>size) return VK_ERROR_OUT_OF_DEVICE_MEMORY;
-   int mt=memory_type(*d,req.memoryTypeBits,VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);if (mt<0) return VK_ERROR_OUT_OF_DEVICE_MEMORY;
-   VkImportMemoryFdInfoKHR imported{VK_STRUCTURE_TYPE_IMPORT_MEMORY_FD_INFO_KHR};
-   imported.handleType=VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_FD_BIT;imported.fd=sandbox_open("/dev/null",O_RDONLY|O_CLOEXEC);
-   if (imported.fd<0) return VK_ERROR_OUT_OF_HOST_MEMORY;
-   VkMemoryAllocateInfo allocation{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
-   allocation.pNext=&imported;allocation.allocationSize=req.size;allocation.memoryTypeIndex=mt;
-   Share share{3,IOSurfaceGetID(frame->surface),0,0,req.size};
-   stage_import(&share);r=DP(d,AllocateMemory)(d->raw,&allocation,nullptr,&frame->memory);stage_import(nullptr);
-   if (r!=VK_SUCCESS) { close(imported.fd);import_failures++;return r; }
-   r=DP(d,BindBufferMemory)(d->raw,frame->buffer,frame->memory,0);if (r!=VK_SUCCESS) return r;
-   VkCommandPoolCreateInfo pool{VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO};pool.queueFamilyIndex=d->copy_family;
-   r=DP(d,CreateCommandPool)(d->raw,&pool,nullptr,&frame->pool);if (r!=VK_SUCCESS) return r;
-   VkCommandBufferAllocateInfo cb{VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO};cb.commandPool=frame->pool;cb.level=VK_COMMAND_BUFFER_LEVEL_PRIMARY;cb.commandBufferCount=1;
-   r=DP(d,AllocateCommandBuffers)(d->raw,&cb,&frame->commands);if (r!=VK_SUCCESS) return r;
+   PresentTimer prepare(d->profile_present,3);
+   std::shared_ptr<Frame> frame;
+   if(d->reuse_present_resources) {
+      for(auto &entry:c->present_cache) {
+         if(entry && entry->surface==surface && entry->row==row && entry->allocation_size==size) {
+            frame=std::move(entry);c->present_cache_bytes-=frame->allocation_size;
+            if(d->profile_present)present_stats[10]++;
+            break;
+         }
+      }
+   }
+   VkResult r;
+   if(frame) {
+      // Cached entries are parked only after successful fence completion.
+      r=DP(d,ResetCommandPool)(d->raw,frame->pool,0);if(r!=VK_SUCCESS)return r;
+      r=DP(d,ResetFences)(d->raw,1,&frame->fence);if(r!=VK_SUCCESS)return r;
+   } else {
+      frame=std::make_shared<Frame>();frame->dev=d;
+      frame->surface=(IOSurfaceRef)CFRetain(surface);frame->row=row;frame->allocation_size=size;
+      frame->bytes=(uint64_t)row*c->extent.height;
+      VkBufferCreateInfo buffer{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};buffer.size=frame->bytes;buffer.usage=VK_BUFFER_USAGE_TRANSFER_DST_BIT|VK_BUFFER_USAGE_TRANSFER_SRC_BIT;buffer.sharingMode=VK_SHARING_MODE_EXCLUSIVE;
+      r=DP(d,CreateBuffer)(d->raw,&buffer,nullptr,&frame->buffer);if (r!=VK_SUCCESS) return r;
+      VkMemoryRequirements req{};DP(d,GetBufferMemoryRequirements)(d->raw,frame->buffer,&req);
+      if (req.size>size) return VK_ERROR_OUT_OF_DEVICE_MEMORY;
+      int mt=memory_type(*d,req.memoryTypeBits,VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);if (mt<0) return VK_ERROR_OUT_OF_DEVICE_MEMORY;
+      VkImportMemoryFdInfoKHR imported{VK_STRUCTURE_TYPE_IMPORT_MEMORY_FD_INFO_KHR};
+      imported.handleType=VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_FD_BIT;imported.fd=sandbox_open("/dev/null",O_RDONLY|O_CLOEXEC);
+      if (imported.fd<0) return VK_ERROR_OUT_OF_HOST_MEMORY;
+      VkMemoryAllocateInfo allocation{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
+      allocation.pNext=&imported;allocation.allocationSize=req.size;allocation.memoryTypeIndex=mt;
+      Share share{3,IOSurfaceGetID(frame->surface),0,0,req.size};
+      stage_import(&share);r=DP(d,AllocateMemory)(d->raw,&allocation,nullptr,&frame->memory);stage_import(nullptr);
+      if (r!=VK_SUCCESS) { close(imported.fd);import_failures++;return r; }
+      r=DP(d,BindBufferMemory)(d->raw,frame->buffer,frame->memory,0);if (r!=VK_SUCCESS) return r;
+      VkCommandPoolCreateInfo pool{VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO};pool.queueFamilyIndex=d->copy_family;
+      r=DP(d,CreateCommandPool)(d->raw,&pool,nullptr,&frame->pool);if (r!=VK_SUCCESS) return r;
+      VkCommandBufferAllocateInfo cb{VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO};cb.commandPool=frame->pool;cb.level=VK_COMMAND_BUFFER_LEVEL_PRIMARY;cb.commandBufferCount=1;
+      r=DP(d,AllocateCommandBuffers)(d->raw,&cb,&frame->commands);if (r!=VK_SUCCESS) return r;
+      VkFenceCreateInfo fi{VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};r=DP(d,CreateFence)(d->raw,&fi,nullptr,&frame->fence);if (r!=VK_SUCCESS) return r;
+      if(d->profile_present)present_stats[9]++;
+   }
+   frame->drawable=drawable;
+   prepare.finish();
+   PresentTimer record(d->profile_present,4);
    VkCommandBufferBeginInfo begin{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};begin.flags=VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
    r=DP(d,BeginCommandBuffer)(frame->commands,&begin);if (r!=VK_SUCCESS) return r;
    VkImageMemoryBarrier barrier{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
@@ -793,33 +859,62 @@ VkResult copy_frame(const std::shared_ptr<Chain> &c,uint32_t index,VkSemaphore h
    barrier.oldLayout=VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;barrier.newLayout=VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
    DP(d,CmdPipelineBarrier)(frame->commands,VK_PIPELINE_STAGE_TRANSFER_BIT,VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,0,0,nullptr,0,nullptr,1,&barrier);
    r=DP(d,EndCommandBuffer)(frame->commands);if (r!=VK_SUCCESS) return r;
-   VkFenceCreateInfo fi{VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};r=DP(d,CreateFence)(d->raw,&fi,nullptr,&frame->fence);if (r!=VK_SUCCESS) return r;
+   record.finish();
    VkPipelineStageFlags transfer=VK_PIPELINE_STAGE_TRANSFER_BIT;
    VkSubmitInfo submit{VK_STRUCTURE_TYPE_SUBMIT_INFO};submit.waitSemaphoreCount=handoff?1:0;submit.pWaitSemaphores=&handoff;submit.pWaitDstStageMask=&transfer;
    submit.commandBufferCount=1;submit.pCommandBuffers=&frame->commands;
-   r=DP(d,QueueSubmit)(d->copy_queue,1,&submit,frame->fence);if (r!=VK_SUCCESS) return r;
+   { PresentTimer submission(d->profile_present,5);
+     r=DP(d,QueueSubmit)(d->copy_queue,1,&submit,frame->fence); }
+   if (r!=VK_SUCCESS) return r;
    if (handoff) consumed=true;
-   start=std::chrono::steady_clock::now();r=DP(d,WaitForFences)(d->raw,1,&frame->fence,VK_TRUE,5000000000ull);producer_ns+=elapsed(start);
+   start=std::chrono::steady_clock::now();r=DP(d,WaitForFences)(d->raw,1,&frame->fence,VK_TRUE,5000000000ull);
+   auto wait_elapsed=elapsed(start);producer_ns+=wait_elapsed;
+   if(d->profile_present)present_stats[6]+=wait_elapsed;
    if (r!=VK_SUCCESS) {
       d->uncertain=true;
+      frame->chain=c;
       { std::lock_guard<std::mutex> lock(registry);quarantine.push_back(frame); }
       fprintf(stderr,"NVK Bridge: presentation completion uncertain (%d); resources quarantined\n",r);
       return VK_ERROR_DEVICE_LOST;
    }
    if (auto observer=present_observer.load()) observer(backend_gdpa,d->raw,d->copy_queue,frame->buffer,(uint32_t)row,c->extent.width,c->extent.height,d->copy_family);
+   PresentTimer publication(d->profile_present,7);
    if (surface_dirty(d->raw,IOSurfaceGetID(frame->surface),0)) return VK_ERROR_SURFACE_LOST_KHR;
    publish_tag(frame->surface);
    [frame->drawable present];
+   publication.finish();
+   frame->drawable=nil;
 #ifdef NVKBRIDGE_WINE
    if(c->surface->hud)c->surface->hud->record(std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count());
 #endif
    copies++;copy_bytes+=frame->bytes;
+   if(d->profile_present) { present_stats[0]++;present_stats[13]+=frame->bytes; }
+   // Never park the drawable, unfinished work or unbounded VRAM imports.
+   // A retained IOSurface pins its identity, matching the driver's idle-import
+   // contract. All cache entries are idle under the device submission lock.
+   constexpr uint64_t cache_cap=64ull<<20;
+   if(d->reuse_present_resources && frame->allocation_size<=cache_cap) {
+      std::shared_ptr<Frame> *slot=nullptr;
+      for(auto &entry:c->present_cache)if(!entry) { slot=&entry;break; }
+      if(!slot)slot=&c->present_cache[c->present_cache_cursor++%c->present_cache.size()];
+      if(*slot) {
+         c->present_cache_bytes-=(*slot)->allocation_size;slot->reset();
+         if(d->profile_present)present_stats[11]++;
+      }
+      for(auto &entry:c->present_cache) {
+         if(c->present_cache_bytes<=cache_cap-frame->allocation_size)break;
+         if(entry) { c->present_cache_bytes-=entry->allocation_size;entry.reset();if(d->profile_present)present_stats[11]++; }
+      }
+      *slot=std::move(frame);c->present_cache_bytes+=(*slot)->allocation_size;
+   }
    return VK_SUCCESS;
 }
 
 VkResult VKAPI_CALL queue_present(VkQueue queue,const VkPresentInfoKHR *info) {
    auto q=find(queues,queue);auto d=q?q->dev.lock():nullptr;if (!d || !d->swapchain || d->uncertain) return VK_ERROR_DEVICE_LOST;
+   PresentTimer total(d->profile_present,1),lock_wait(d->profile_present,14);
    std::lock_guard<std::recursive_mutex> lock(d->submit);
+   lock_wait.finish();
    VkSemaphore handoff{};VkSemaphoreCreateInfo sci{VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO};
    VkResult r=DP(d,CreateSemaphore)(d->raw,&sci,nullptr,&handoff);if (r!=VK_SUCCESS) return r;
    std::vector<VkPipelineStageFlags> stages(info->waitSemaphoreCount,VK_PIPELINE_STAGE_ALL_COMMANDS_BIT);
@@ -838,6 +933,7 @@ VkResult VKAPI_CALL queue_present(VkQueue queue,const VkPresentInfoKHR *info) {
          if (!d->uncertain) { std::lock_guard<std::mutex> guard(c->mutex);c->images[k].acquired=false;c->available.notify_all(); }
       }
       if (info->pResults) info->pResults[j]=result;
+      if(d->profile_present && result!=VK_SUCCESS)present_stats[12]++;
       if (result!=VK_SUCCESS) overall=result;
       if (d->uncertain) return VK_ERROR_DEVICE_LOST;
    }
@@ -942,6 +1038,13 @@ extern "C" VKAPI_ATTR VkResult VKAPI_CALL vkCreateMetalSurfaceEXT(
 }
 extern "C" void nvkbridgeGetStats(uint64_t out[7]) {
    out[0]=copies;out[1]=copy_bytes;out[2]=drawable_ns;out[3]=producer_ns;out[4]=import_failures;out[5]=0;out[6]=0;
+}
+// frames, total-present ns, drawable ns, resource-prepare ns, recording ns,
+// copy-submit ns, render+copy fence ns, publication ns, resource-cleanup ns,
+// resources created, cache hits, evictions, errors, copied bytes, lock-wait ns,
+// reserved. Profiling is opt-in; the existing seven-word stats ABI is unchanged.
+extern "C" void nvkbridgeGetPresentStats(uint64_t out[16]) {
+   for(unsigned i=0;i<16;i++)out[i]=present_stats[i].load(std::memory_order_relaxed);
 }
 extern "C" void nvkbridgeSetPresentObserver(PresentObserver observer) { present_observer=observer; }
 // Loader/ICD interface. The frontend already owns portable surfaces and

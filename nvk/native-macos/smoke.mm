@@ -223,6 +223,11 @@ int main(int argc,char **argv) { @autoreleasepool { try {
    uint64_t stats[7]{};sym<void(*)(uint64_t *)>(entry,"nvkbridgeGetStats")(stats);
    printf("STATS copies=%llu bytes=%llu import_failures=%llu cpu_readback=%llu cpu_upload=%llu\n",
       stats[0],stats[1],stats[4],stats[5],stats[6]);require(stats[0]==frames && stats[4]==0 && !stats[5] && !stats[6],"copy accounting");
+   if(auto present_stats=(void(*)(uint64_t *))dlsym(entry,"nvkbridgeGetPresentStats")) {
+      uint64_t detail[16]{};present_stats(detail);
+      printf("PRESENT_STATS frames=%llu total_ns=%llu drawable_ns=%llu prepare_ns=%llu record_ns=%llu submit_ns=%llu fence_ns=%llu publish_ns=%llu cleanup_ns=%llu created=%llu hits=%llu evicted=%llu errors=%llu bytes=%llu lock_ns=%llu\n",
+         detail[0],detail[1],detail[2],detail[3],detail[4],detail[5],detail[6],detail[7],detail[8],detail[9],detail[10],detail[11],detail[12],detail[13],detail[14]);
+   }
    printf("VERIFICATION frames=%llu separate_test_readback_bytes=%llu\n",verified_frames,verified_bytes);
    if (getenv("NVKBRIDGE_VERIFY_PIXELS")) require(verified_frames==frames,"verification frame count");
    DestroyFence(device,fence,nullptr);DestroySemaphore(device,acquired,nullptr);DestroySemaphore(device,rendered,nullptr);
