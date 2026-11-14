@@ -795,8 +795,14 @@ cat > "$BGP" <<EOF || die "write the boot-guard job's plist"
 EOF
 chmod 644 "$BGP" && chown root:wheel "$BGP" || die "boot-guard job permissions"
 ok "a start counts as good once the desktop is up"
-
-ba=$(nvram boot-args 2>/dev/null | cut -f2-)
+# A missing boot-args variable is empty only after a successful NVRAM listing.
+# A failed read must never become an empty value that we later overwrite.
+read_boot_args() {
+  local listing
+  listing=$(nvram -p 2>/dev/null) || return 1
+  printf '%s\n' "$listing" | sed -n $'s/^boot-args\t//p'
+}
+ba=$(read_boot_args) || ba=""
 for a in nvfb=1 nvaccel=1; do case " $ba " in *" $a "*) ;; *) echo "   NOTE: boot-args lack '$a' — add it in your OpenCore config.plist (README: Install — by hand), or let the 1401 Mac app set OpenCore up";; esac; done
 # WindowServer is a platform binary: with AMFI enforcing it refuses the Metal plugin ("mapping process is a platform
 # binary, but mapped file is not"), reaches the desktop with no Metal device and asserts "Failed to create MetalDevice".
@@ -809,8 +815,47 @@ amfi_note() {
 amfi_note "$ba"
 # WhateverGreen's boot screen copy (on unless gfxrst=4) reads a console mapping macOS may already have freed when this
 # driver's display first opens, and the Mac panics in IOFramebuffer::postOpen.
+# A note alone left machines unprotected, so the installer also adds gfxrst=4 to the NVRAM boot-args when no gfxrst is
+# set (a gfxrst the user chose stays). OpenCore configs that write their own boot-args at every start replace the NVRAM
+# value, so the note about config.plist stays; uninstall.sh removes only a gfxrst=4 recorded here as added.
+weg_gfxrst() {   # $1 = current boot-args; prints the boot-args to write, or nothing when no change is due
+  case " $1 " in *" gfxrst="*) return 0;; esac
+  if [ -n "$1" ]; then echo "$1 gfxrst=4"; else echo "gfxrst=4"; fi
+}
+weg_gfxrst_apply() {
+  local nb record temporary meta owner mode current
+  current=$(read_boot_args) || return 1
+  [ "$current" = "$1" ] || return 1
+  nb=$(weg_gfxrst "$1"); [ -n "$nb" ] || return 0
+  record=/Library/NullMoth/added-boot-args
+  [ -d /Library/NullMoth ] && [ ! -L /Library/NullMoth ] || return 1
+  meta=$(stat -f '%u %Lp' /Library/NullMoth) || return 1
+  owner=${meta%% *}; mode=${meta#* }
+  [ "$owner" = 0 ] || return 1
+  case "$mode" in *[2367]?|*[2367]) return 1;; esac
+  if [ -e "$record" ] || [ -L "$record" ]; then
+    [ -f "$record" ] && [ ! -L "$record" ] && grep -qx 'gfxrst=4' "$record" || return 1
+  fi
+  temporary=$(mktemp /Library/NullMoth/.added-boot-args.XXXXXX) || return 1
+  if ! (printf '%s\n' 'gfxrst=4' > "$temporary" && chmod 600 "$temporary" && chown root:wheel "$temporary"); then
+    rm -f "$temporary"; return 1
+  fi
+  if ! nvram boot-args="$nb" 2>/dev/null; then rm -f "$temporary"; return 1; fi
+  if ! mv -f "$temporary" "$record"; then
+    # Do not replace another process's later boot-args while recovering a failed record write.
+    if current=$(read_boot_args) && [ "$current" = "$nb" ]; then
+      if [ -n "$1" ]; then nvram boot-args="$1"; else nvram -d boot-args; fi
+    fi
+    rm -f "$temporary"; return 1
+  fi
+  echo "   WhateverGreen is loaded: added gfxrst=4 to the NVRAM boot-args (its boot screen copy can panic the Mac when the NVIDIA display first opens)"
+}
 if kmutil showloaded --list-only --bundle-identifier as.vit9696.WhateverGreen 2>/dev/null | grep -q WhateverGreen; then
-  case " $ba " in *" gfxrst=4 "*) ;; *) echo "   NOTE: WhateverGreen is loaded and boot-args lack 'gfxrst=4' — add it in your OpenCore config.plist, or the Mac can panic when the NVIDIA display first opens";; esac
+  nb=$(weg_gfxrst "$ba")
+  if [ -n "$nb" ]; then
+    weg_gfxrst_apply "$ba" || echo "   NOTE: gfxrst=4 could not be added with its recovery record; check boot-args before rebooting."
+    echo "   NOTE: also add 'gfxrst=4' to boot-args in your OpenCore config.plist — a config that sets boot-args at every start replaces the NVRAM value"
+  fi
 fi
 
 # Commit ownership only after all install/link/job steps succeeded. Rollback and
@@ -884,7 +929,8 @@ choose_webkit_fixup() {
   printf '\n%s\n' '----------------------------------------------------------------------'
   echo "   Optional Safari WebGL helper for Intel Sequoia/Tahoe (requires Lilu 1.7.2+)."
   printf '%s\n\n' '----------------------------------------------------------------------'
-  echo "   Manual gives copy/config instructions; automatic backs up and updates the OpenCore EFI you select."
+  echo "   Manual gives copy/config instructions; automatic detects a compatible OpenCore EFI, then backs up and updates it."
+  echo "   If several qualify, choose your boot EFI from the list. --efi-target overrides detection."
   if [ "$WEBKIT_CHOICE" = ask ]; then
     WEBKIT_CHOICE=manual
     if [ -t 0 ]; then
@@ -910,15 +956,9 @@ if [ -d "$HERE/Optional/NVWebKitFixup/NVWebKitFixup.kext" ]; then
         echo "   NOTE: package checksums do not cover the EFI helper; automatic installation skipped."
         webkit_manual
       else
-        if [ -z "$EFI_TARGET" ] && [ -t 0 ]; then
-          echo "   Select the EFI you boot from. Partitions: diskutil list"
-          printf '   EFI partition (diskXsY) or mounted /Volumes/.../EFI/OC path: '
-          IFS= read -r EFI_TARGET || EFI_TARGET=''
-        fi
-        if [ -z "$EFI_TARGET" ]; then
-          echo "   NOTE: no EFI target selected; automatic installation skipped."
-          webkit_manual
-        elif ! /usr/bin/python3 "$HERE/Optional/NVWebKitFixup/efi.py" install --target "$EFI_TARGET"; then
+        webkit_args=(install)
+        [ -z "$EFI_TARGET" ] || webkit_args+=(--target "$EFI_TARGET")
+        if ! /usr/bin/python3 "$HERE/Optional/NVWebKitFixup/efi.py" "${webkit_args[@]}"; then
           echo "   NOTE: EFI helper installation did not complete; the NVIDIA driver is installed. Review the EFI backup/error above."
           webkit_manual
         fi

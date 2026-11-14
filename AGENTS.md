@@ -95,8 +95,11 @@ Bundle the matching NVWebKitFixup build under `Optional/NVWebKitFixup/`, includi
 its entry template, EFI helper, guide and licenses. Its installer choice is
 Manual (default), Automatic or Skip. Manual must print the original extracted
 package path and OpenCore instructions, not a temporary private-copy path.
-Automatic requires an explicitly selected EFI target, verified compatible Lilu,
-an unvaulted config and guarded backup/rollback; never guess or silently edit EFI.
+Automatic detects EFI System Partitions from diskutil's structured partition
+types and selects only a unique compatible OpenCore candidate. Multiple
+candidates require a choice; an explicit EFI target overrides detection.
+Require verified compatible Lilu, an unvaulted config and guarded backup/rollback;
+never choose the first of ambiguous candidates or edit EFI outside Automatic.
 Skip identical helper/configuration installs without a new backup or rewrite;
 back up actual changes only, avoiding kext copies for configuration-only updates.
 Keep it out of `/Library/Extensions` and the driver's kernel collections. A

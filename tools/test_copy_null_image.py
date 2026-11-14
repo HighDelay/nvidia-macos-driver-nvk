@@ -58,6 +58,7 @@ static void check(int ok, const char *name) { checks++; printf("%s %s\n", ok ? "
     ('static inline uint32_t nvmtl_lvl(', True),
     ('static inline uint32_t nvmtl_blocks(', True),
     ('static int nvmtl_copy_has_image(', False),
+    ('static int nvmtl_copy_into_multisample(', False),
     ('int nvmtl_vk_cmd_copy_buffer_to_image_3d(', False),
     ('int nvmtl_vk_cmd_copy_image_to_buffer_3d(', False),
     ('int nvmtl_vk_cmd_copy_buffer_to_image_level_layer(', True),
@@ -79,8 +80,13 @@ int main(void) {
     check(rc == 0 && copies == 1 && barriers == 2, "negative control: a texture with a VkImage still copies (2 barriers, 1 copy)");
     rc = nvmtl_vk_cmd_copy_image_to_buffer_level_layer(&c, &good, 0, 0, 64, 64, &b, 0, 256, 0, 0);
     check(rc == 0 && copies == 2, "negative control: and reads back");
+    nvk_image ms = good; ms.samples = 4; before = barriers + copies;
+    rc = nvmtl_vk_cmd_copy_buffer_to_image_level_layer(&c, &b, 0, 256, &ms, 0, 0, 64, 64, 0, 0);
+    check(rc == -1 && barriers + copies == before, "a multisample upload is refused before any barrier or copy reaches Vulkan");
+    check(nvmtl_copy_into_multisample("host upload", &ms) &&
+          !nvmtl_copy_into_multisample("single sample", &good), "the sample-count guard retains ordinary uploads");
     for (int i = 0; i < 40; i++) nvmtl_vk_cmd_copy_buffer_to_image_level_layer(&c, &b, 0, 256, &none, 0, 0, 64, 64, 0, 0);
-    check(logs <= 16, "a per-frame refusal is logged at most 16 times");
+    check(logs <= 18, "null-image refusals stay bounded separately from the two multisample refusals");
     printf("%s: %u checks, %u failures\n", errors ? "FAIL" : "PASS", checks, errors);
     return errors ? 1 : 0;
 }

@@ -25,7 +25,10 @@ elif name=='ioreg':print('+-o GFX0@0  <class IOPCIDevice>\n    {\n      "device-
 elif name=='nvram':print('boot-args\tnvfb=1 nvaccel=1')
 elif name=='stat':
  p=Path(a[-1]);info=p.lstat()
- if a[1]=='%u %Lp':print(os.environ.get('FAKE_INSTALLER_OWNER','0')+' '+format(info.st_mode&0o7777,'o'))
+ # The synthetic filesystem has trusted parents. Preserve actual modes inside
+ # the fixture so writable-parent and untrusted-record negative controls work.
+ mode=0o755 if p in r.parents else info.st_mode&0o7777
+ if a[1]=='%u %Lp':print(os.environ.get('FAKE_INSTALLER_OWNER','0')+' '+format(mode,'o'))
  elif a[1]=='%d:%i':print(str(info.st_dev)+':'+str(info.st_ino))
  else:sys.exit(98)
 

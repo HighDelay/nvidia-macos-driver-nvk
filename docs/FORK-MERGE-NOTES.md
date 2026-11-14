@@ -1,5 +1,39 @@
 # Retained fork changes for upstream merges
 
+## Modern upstream 3.0 integration, 2026-11-14
+
+The merge of `87e524ab36f12d17c04626d6cf7fc3bde1cc63e4` uses
+`7412cdde81447f78da0ebb64216dc258d8beaedb` as its common ancestor.
+Follow the [scope, equivalence review and validation limits](UPSTREAM-3.0-INTEGRATION.md).
+Legacy macOS support is excluded at the user's request. Keep stable Mesa 26.3.0,
+the 620.70.06 mapping ABI and the default/release `2.8` patch chain; append only
+the compatible uncached-stream patch. Deferred 2.9/3.0 power/token/display
+implementations are not qualified by the merge ancestry.
+
+Preserve full surface-ID/plane keys and linear-image exclusions in dirty-mark
+deduplication, overflow-safe scanout reservation with allocation fallbacks,
+the deferred-connect registration recheck, and worker-first failed-start cleanup
+with the fork's Intel-panel controller grouping and quarantine. A slow utilization
+query disables later queries without bypassing power accounting or locking.
+Keep the stronger existing bounded AIR caches and object-identity HiDPI ownership
+instead of duplicating equivalent upstream fixes. Preserve all translator,
+native OpenGL/Minecraft, Wine/async/reuse, MoltenVK, codec and Safari repairs below.
+WhateverGreen boot-argument ownership must fail closed on an unreadable NVRAM
+store, preserve user choices and retain recovery state after failed removal.
+
+Automatic Safari WebGL helper setup now detects EFI partitions by structured
+diskutil type and validates OpenCore/Lilu on each. Select only a unique compatible
+candidate; multiple candidates require a choice or explicit override. Manual
+remains the default. Keep mount cleanup, vault/signature checks, guarded
+backup/restore and no-op handling; restore requires the original explicit target.
+
+Thirty focused host entrypoints, production scale ownership, private Metal
+readbacks, all 43 native Zink cases and an isolated kernel-collection link passed.
+The broad snapshot has no new failures against the fork baseline, with 76
+historical failures still present. The changed RM source compiled as an object;
+the isolated link reused the recorded installed RM, so a complete new RM link
+and boot remain untested. Full-driver build/release remains held.
+
 ## Zink/Gallium 26.3.0, 2026-11-14
 
 The [Zink stable update](ZINK-MESA-26.3.0.md) advances the independently checked
@@ -532,9 +566,13 @@ Before each merge:
 4. Build the affected components and check their behavior, resource lifetime and synchronization.
    Record which fork changes upstream now covers, what remains local and the validation limits.
 
-The current upstream base is **2.8 at `60fb7255e18c31fe0747091fd9a961f30c1cd82a`**,
-integrated on 2026-11-08 with `18ba05f38b5eadea8b5ae05834bb51c61fb4c5c3`
-(2.7.2) as the common ancestor. The preceding 2.7.2 integration used
+The current upstream ancestry is **3.0 at `87e524ab36f12d17c04626d6cf7fc3bde1cc63e4`**,
+integrated from the repaired 2.9 base `7412cdde81447f78da0ebb64216dc258d8beaedb`.
+This is a selective implementation merge: legacy support and the incompatible
+power/token/display chain remain excluded. The matched kernel/NVK patch chain
+still follows 2.8 at `60fb7255e18c31fe0747091fd9a961f30c1cd82a`, integrated
+on 2026-11-08 with `18ba05f38b5eadea8b5ae05834bb51c61fb4c5c3` (2.7.2) as
+the common ancestor. The preceding 2.7.2 integration used
 `6b4752c51b0719862fb46471d383317ef7ecc6f0` (2.7.1); the 2.7.1 integration
 used `470e391` (2.6.6). Earlier upstream history was rewritten: old 2.6.5
 `ceba63c` maps to `c6f5aa0`; do not replay already integrated history. The

@@ -244,4 +244,29 @@ if [ -f "$KC" ]; then
 fi
 REMOVING=0
 rm -rf "$RB"
+# Change boot-args only after removal commits. A failed NVRAM write keeps the ownership record for recovery.
+# Keep identical to install.sh: an unreadable NVRAM store is not empty boot-args.
+read_boot_args() {
+  local listing
+  listing=$(nvram -p 2>/dev/null) || return 1
+  printf '%s\n' "$listing" | sed -n $'s/^boot-args\t//p'
+}
+if grep -qx "gfxrst=4" /Library/NullMoth/added-boot-args 2>/dev/null; then
+  gfxrst_removed=0
+  if cur=$(read_boot_args); then
+    kept=""
+    read -r -a boot_args_fields <<< "$cur"
+    for a in "${boot_args_fields[@]-}"; do [ "$a" = "gfxrst=4" ] || kept="$kept $a"; done
+    kept=${kept# }
+    if [ "$kept" = "$cur" ]; then
+      gfxrst_removed=1
+    elif [ -n "$kept" ]; then
+      nvram boot-args="$kept" 2>/dev/null && gfxrst_removed=1
+    else
+      nvram -d boot-args 2>/dev/null && gfxrst_removed=1
+    fi
+  fi
+  if [ "$gfxrst_removed" = 1 ]; then rm -f /Library/NullMoth/added-boot-args
+  else echo "NOTE: gfxrst=4 could not be removed; its ownership record was retained."; fi
+fi
 echo "Driver removed. Reboot now: sudo shutdown -r now"

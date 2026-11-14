@@ -17,11 +17,11 @@ static inline int nvrm_audio_port_number(uint8_t pin, unsigned external, uint8_t
     return 1;
 }
 
-static inline int nvrm_audio_snapshot_current(uint32_t version, uint64_t sampled,
+static inline int nvrm_audio_snapshot_current(uint32_t snapshot_version, uint64_t sampled,
                                               uint64_t current, unsigned unavailable,
                                               unsigned truncated, unsigned count)
 {
-    return version == 1 && sampled == current && !unavailable && !truncated && count <= 64;
+    return snapshot_version == 1 && sampled == current && !unavailable && !truncated && count <= 64;
 }
 
 static inline int nvrm_audio_fallback_allowed(unsigned external, int mst, int config_error)

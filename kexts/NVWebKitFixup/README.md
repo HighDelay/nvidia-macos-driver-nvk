@@ -90,6 +90,10 @@ was applied to Safari. This is a short local result, not a general benchmark or
 qualification of other GPUs, kernel builds, WebGL applications or extended use.
 Future driver packages bundle it as an optional OpenCore component with Manual
 (default), Automatic and Skip choices. See [the setup guide](../../docs/SAFARI-WEBGL.md).
+Automatic detects EFI partitions by type and selects the sole compatible
+OpenCore installation. Multiple compatible installations require a choice;
+`--efi-target` overrides detection. Lilu, vault, backup and rollback checks apply
+to both detected and explicit targets.
 It is never installed in the system kext repositories or activated by default.
 
 The 0.2.0 extension passes OS/symbol/instruction/routing refusal tests, the

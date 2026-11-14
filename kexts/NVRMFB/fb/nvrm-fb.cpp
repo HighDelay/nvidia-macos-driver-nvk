@@ -42,6 +42,7 @@ static inline thread_call_t nvrmfbCall(thread_call_func_t fn, thread_call_param_
 }
 #include "nvrm-hud.h"
 #include "nvrm-fb-safety.h"
+#include "nvrmfb_scanout_reserve.h"
 #include "nvrm-rotation.h"
 #include "../../NVRM/nvrm_display_identity.h"
 #include "nvrm-allocation-table.h"
@@ -147,7 +148,6 @@ static inline void nvu_zero_wide(void *p, size_t n) { size_t q = n >> 3; __asm__
 #define FBLOG(fmt, ...) do { IOLog("NVRM-fb: " fmt "\n", ##__VA_ARGS__); kprintf("NVRM-fb: " fmt "\n", ##__VA_ARGS__); \
     { char _tb[220]; snprintf(_tb, sizeof _tb, fmt, ##__VA_ARGS__); FBTRACE(_tb); } } while (0)
 static const char kPixelFormats[] = IO32BitDirectPixels "\0";
-static const UInt32 kNVRMFBSetTransform = 0x00000400;   // kIOFBSetTransform
 static const IODisplayModeID kModeId = 1;
 static const unsigned kTraceMax = 900;
 
@@ -419,7 +419,7 @@ class NVRMNVDAFramebuffer : public IOFramebuffer {
     // Widest raster offered when it fits the scanout memory. Separate from the scaler limit: a 5120x1440 monitor whose
     // firmware started at 2560x1440 has a 3840-wide scaler limit, yet 5120x1440 needs less memory than 3840x2160.
     NvU32 fRasterMaxW = 0;
-    NvU64 fAllocSize = 0, fMemBytes = 0;
+    NvU64 fAllocSize = 0, fMemBytes = 0, fModesAllocSize = 0;
     // The scanout and cursor bytes this head mapped into BAR1 (video memory only), counted once into gVramDisplayBytes.
     NvU64 fScanoutBarBytes = 0, fCursorBarBytes = 0;
     unsigned fModeSwitches = 0, fValidateCalls = 0, fValidateOk = 0;
@@ -466,6 +466,7 @@ class NVRMNVDAFramebuffer : public IOFramebuffer {
     // This instance exists because a display appeared after boot (see gNDpyBoot), and its connect handler has already
     // been fired once -- see connectNotifyFire and enableController.
     bool fHotplugBorn = false, fConnectFired = false;
+    volatile SInt32 fConnectOwed = 0;
     bool fEdidSwapped = false;
     void adoptSwappedDisplay();
     void takeEdid(const NvU8 *src, NvU32 size);
@@ -1188,6 +1189,13 @@ bool NVRMNVDAFramebuffer::kapiInit()
         mp.useVideoMemory = kTryOrder[t];
         mp.compressible   = &compressible;
         fMem = fKms->allocateMemory(fDev, &mp);
+        // the floor is extra: when it cannot be had, the size the mode list asks for is tried before the boot size
+        if (!fMem && fModesAllocSize && fModesAllocSize < mp.size) {
+            FBLOG("%s: allocateMemory(%llu) with the reserve floor failed -- trying the mode list's %llu", what,
+                  (unsigned long long)mp.size, (unsigned long long)fModesAllocSize);
+            fAllocSize = fModesAllocSize; mp.size = fModesAllocSize;
+            fMem = fKms->allocateMemory(fDev, &mp);
+        }
         if (!fMem && mp.size != fSize) {
             FBLOG("%s: allocateMemory(%llu) for scaled modes failed -- falling back to the boot size %llu (no mode above %ux%u)",
                   what, (unsigned long long)mp.size, fSize, fW, fH);
@@ -1408,7 +1416,16 @@ void NVRMNVDAFramebuffer::connectNotifyFire(thread_call_param_t p0, thread_call_
     if (!me) return;
     NVRMCallReference callReference(me);
     if (OSAddAtomic(0, &me->fStopping)) return;
-    if (!me->fConnect.proc) { FBLOG("fb%u connect notify: nothing registered yet", me->fIndex); return; }
+    if (!me->fConnect.proc) {
+        // IOFramebuffer::open registers the connect handler after enableController, and on a display plugged in after
+        // boot the open can take longer than the 1.5 s delay. Dropping the notification here left such a display dark
+        // until a restart: nothing fired it again. Owe it instead; registerForInterruptType pays it.
+        OSCompareAndSwap(0, 1, &me->fConnectOwed);
+        if (me->fConnect.proc) me->notifyConnectionChanged(100);
+        FBLOG("fb%u connect notify: nothing registered yet -- it fires when the framework registers its connect handler", me->fIndex);
+        return;
+    }
+    OSCompareAndSwap(1, 0, &me->fConnectOwed);
     me->fConnectFired = true;
     FBLOG("fb%u -> connect interrupt (the framework's registered handler)", me->fIndex);
     me->fConnect.proc(me->fConnect.target, me->fConnect.ref);
@@ -1554,7 +1571,7 @@ void NVRMNVDAFramebuffer::adoptSwappedDisplay()
     const NvU64 keepAlloc = fAllocSize;
     const NvU32 oldW = fScalerMaxW, oldH = fScalerMaxH;
     computeScanoutCaps(fPitchAlign);
-    const bool short_ = fAllocSize > keepAlloc;
+    const bool short_ = !nvrmfb_scanout_fits(fScalerMaxW, fScalerMaxH, fPitchAlign, fMemBytes);
     fAllocSize = keepAlloc;
     // ceilings past the allocation would let a desktop scan out beyond the end of its memory: keep the ones that fit
     if (short_) { fScalerMaxW = oldW; fScalerMaxH = oldH; fRasterMaxW = oldW; }
@@ -3353,7 +3370,8 @@ void NVRMNVDAFramebuffer::computeScanoutCaps(NvU32 pitchAlign)
       } }
     const NvU64 mp_ = ((NvU64)fScalerMaxW * 4 + pitchAlign - 1) & ~((NvU64)pitchAlign - 1);
     fAllocSize = (mp_ * fScalerMaxH + 0xffff) & ~0xffffull;
-    if (fAllocSize < fSize) fAllocSize = fSize;
+    fModesAllocSize = fAllocSize > fSize ? fAllocSize : fSize;
+    fAllocSize = nvrmfb_scanout_reserve(fAllocSize, fSize, pitchAlign);
 }
 // Users on HDMI and DisplayPort (RTX 3050/3060/4060, 144-240 Hz panels) saw only 60 Hz: macOS's EDID parse handed
 // validateDetailedTiming nothing above 60 Hz for those panels, while NVKMS parses the same EDID (CTA-861 and DisplayID
@@ -4687,6 +4705,12 @@ IOReturn NVRMNVDAFramebuffer::registerForInterruptType(IOSelect type, IOFBInterr
     if (type == kIOFBConnectInterruptType) {
         fConnect = { proc, target, ref }; if (interruptRef) *interruptRef = &fConnect;
         FBLOG("registerForInterruptType '%s' -> CONNECT REGISTERED", t);
+        // A connect notification that came due before this registration (connectNotifyFire found no handler). It runs
+        // from the thread call, not here: the framework is inside its own open path while it registers.
+        if (proc && OSAddAtomic(0, &fConnectOwed)) {
+            FBLOG("fb%u: the connect interrupt owed since the mode set fires now that the handler is registered", fIndex);
+            notifyConnectionChanged(100);
+        }
         return kIOReturnSuccess;
     }
     FBLOG("registerForInterruptType '%s' -> REFUSED (unsupported)", t);

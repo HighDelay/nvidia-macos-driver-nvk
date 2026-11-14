@@ -53,6 +53,7 @@ static void clock_interval_to_deadline(unsigned ms,int,std::uint64_t*d){*d=ms;} 
 struct OSObject{int refs=1;void retain(){++refs;}void release(){--refs;}};
 class Base{public:IOReturn getAttributeForConnection(IOIndex,IOSelect,std::uintptr_t*){return 77;}};
 struct NVRMNVDAFramebuffer:OSObject,Base{
+volatile int fConnectOwed=0;
 using super=Base; bool fDpyLost=false,fInternal=false,fConnectFired=false,fRotationEnabled=false; unsigned fEdidSize=0,fIndex=0; UInt8 fEdid[256]={};
 volatile int fStopping=0; thread_call_t fConnectNotify=reinterpret_cast<void*>(1);
 struct{void(*proc)(void*,void*);void*target;void*ref;}fConnect{}; unsigned scheduled=0;std::uint64_t deadline=0;
@@ -62,6 +63,7 @@ void notifyConnectionChanged(unsigned); static void connectNotifyFire(thread_cal
 };
 class NVRMCallReference{OSObject*p;public:explicit NVRMCallReference(OSObject*v):p(v){}~NVRMCallReference(){p->release();}};
 static int OSAddAtomic(int,volatile int*v){return *v;}
+static bool OSCompareAndSwap(int o,int n,volatile int*v){if(*v!=o)return false;*v=n;return true;}
 '''
 checks = r'''
 int main(){NVRMNVDAFramebuffer f;std::uintptr_t v=0;f.fEdidSize=128;

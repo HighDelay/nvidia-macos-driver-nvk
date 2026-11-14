@@ -46,13 +46,23 @@ The extracted package contains `pkgroot/Optional/NVWebKitFixup/` with
 
 ## Automatic setup
 
-Select Automatic and enter the EFI partition, such as `diskXsY`, or its mounted
-`/Volumes/…/EFI/OC` path. The script mounts an unmounted partition you explicitly
-select and unmounts it afterward. It never chooses a boot disk for you.
+Select Automatic to detect EFI System Partitions using the partition types from
+`diskutil list -plist`. Volume names and slice numbers are not used to guess.
+The helper checks each partition for a compatible OpenCore configuration and
+Lilu. It selects the only compatible candidate; if several qualify, choose your
+boot EFI from the numbered list. Without interactive input, an ambiguous result
+requires `--efi-target`. If none qualifies, follow the reported error or use
+manual setup. Detection does not change EFI files.
 
 ```sh
+sudo ./install.sh --webkit-fixup=auto
+# Optional override for a specific EFI:
 sudo ./install.sh --webkit-fixup=auto --efi-target diskXsY
 ```
+
+The override accepts a partition identifier or an absolute mounted `EFI/OC`
+path. It bypasses detection and still runs the same checks. Partitions mounted
+by the helper are unmounted afterward; existing mounts remain mounted.
 
 Automatic setup requires a writable EFI System Partition, OpenCore, enabled
 compatible Lilu and an unvaulted config. It checks the bundles and backs up the
@@ -75,8 +85,8 @@ concurrent edits are left for manual recovery. EFI failure does not undo the
 driver install. Review the reported error/backup and follow the manual guide.
 Keep the backup until boot testing succeeds; it contains private OpenCore data
 and must not be included in public logs. Use `--webkit-fixup=manual` for
-instructions or `--webkit-fixup=skip` to skip. No automatic changes occur without
-the automatic choice and an explicit target.
+instructions or `--webkit-fixup=skip` to skip. EFI installation requires the
+Automatic choice; Manual remains the default.
 
 ## Verify and recover
 

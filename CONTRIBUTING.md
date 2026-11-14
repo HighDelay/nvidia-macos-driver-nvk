@@ -22,9 +22,13 @@ changes and answer review questions.
 - Commit messages: `component: short summary` under 72 characters (`NVRMFB: fix 165 Hz mode missing`), then a
   plain explanation if one is needed.
 - Comments in code explain why the code does what it does. They are not a log of when you found something.
+- Sign off every commit (`git commit -s`). It certifies you wrote the change or may submit it under this
+  repository's licence (Developer Certificate of Origin, <https://developercertificate.org>).
 
-Kernel changes (`kexts/`) need a boot on real hardware before they can be merged, because a bad kext stops the
-machine from starting. Say which card you booted it on.
+Kernel changes (`kexts/`) need component compilation and an isolated kernel-collection
+check. Record actual boot results separately, including the GPU and macOS version;
+a source merge or link check does not qualify deployment. Retain recovery files
+and obtain the required local testing and release approval before publication.
 
 ## Where help is needed
 
@@ -40,3 +44,4 @@ If you own a card we haven't tested, a working report (the "It works" form) is a
 ## Building
 
 See [docs/HOW-IT-WORKS.md](docs/HOW-IT-WORKS.md) for the layout of the source and how each part is built.
+Setting up, the tests and the rules for changes are in [DEVELOPING.md](DEVELOPING.md).

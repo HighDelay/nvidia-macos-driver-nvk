@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Install the optional WebKit helper in an explicitly selected OpenCore EFI."""
+"""Install the optional WebKit helper in a detected or selected OpenCore EFI."""
 import argparse
 import contextlib
 import hashlib
@@ -61,6 +61,57 @@ def disk_info(target):
 def esp(info):
     require(info.get('Content') == 'EFI' or info.get('PartitionType', '').upper() == EFI_GUID,
             'Select an EFI System Partition, not a normal data volume')
+
+
+def efi_partitions():
+    """Use partition types, never volume names or assumed slice numbers."""
+    listing = plistlib.loads(command('/usr/sbin/diskutil', 'list', '-plist'))
+    disks = listing.get('AllDisksAndPartitions')
+    require(isinstance(disks, list), 'diskutil did not report a partition list')
+    result = []
+
+    def visit(items):
+        for item in items:
+            require(isinstance(item, dict), 'Invalid diskutil partition record')
+            identifier = item.get('DeviceIdentifier', '')
+            if (item.get('Content') == 'EFI' or item.get('PartitionType', '').upper() == EFI_GUID):
+                require(isinstance(identifier, str) and re.fullmatch(r'disk[0-9]+s[0-9]+', identifier),
+                        'Invalid EFI partition identifier')
+                if identifier not in result:
+                    result.append(identifier)
+            partitions = item.get('Partitions', [])
+            require(isinstance(partitions, list), 'Invalid diskutil partition list')
+            visit(partitions)
+
+    visit(disks)
+    return result
+
+
+def detect_target(payload):
+    """Inspect every ESP; mounting is scoped, and prepare never changes files."""
+    candidates = []
+    for target in efi_partitions():
+        try:
+            with target_oc(target) as oc:
+                prepare(oc, payload)
+            candidates.append(target)
+        except (ValueError, OSError, KeyError, plistlib.InvalidFileException, subprocess.CalledProcessError) as error:
+            print('EFI ' + target + ' skipped: ' + str(error), file=sys.stderr)
+    require(candidates, 'No compatible OpenCore EFI found; use manual setup or --target with your OpenCore EFI')
+    if len(candidates) == 1:
+        print('Detected OpenCore EFI: ' + candidates[0])
+        return candidates[0]
+    print('Multiple compatible OpenCore EFI partitions:')
+    for index, target in enumerate(candidates, 1):
+        print('  ' + str(index) + ': ' + target)
+    require(sys.stdin.isatty(), 'Choose your boot EFI with --target; automatic selection is ambiguous')
+    try:
+        answer = input('Select your boot EFI number (Enter cancels): ').strip()
+    except EOFError:
+        answer = ''
+    require(answer.isascii() and answer.isdecimal() and 1 <= int(answer) <= len(candidates),
+            'No EFI selected; no files changed')
+    return candidates[int(answer)-1]
 
 
 @contextlib.contextmanager
@@ -310,12 +361,15 @@ def restore(oc, backup):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('action', choices=('install', 'restore'))
-    parser.add_argument('--target', required=True, help='Explicit EFI partition diskXsY or mounted /Volumes/.../EFI/OC')
+    parser.add_argument('--target', help='EFI partition diskXsY or absolute mounted EFI/OC path; install detects it when omitted')
     parser.add_argument('--payload', type=Path, default=Path(__file__).resolve().parent)
     parser.add_argument('--backup', help='Backup folder name printed by the automatic install')
     args = parser.parse_args()
     require(os.geteuid() == 0, 'Run with sudo')
-    with target_oc(args.target) as oc:
+    if args.action == 'restore':
+        require(args.target, 'Restore requires the original --target EFI')
+    target = args.target or detect_target(args.payload)
+    with target_oc(target) as oc:
         if args.action == 'install':
             install(oc, args.payload)
         else:

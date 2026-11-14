@@ -33,6 +33,7 @@
 #include "nvmtl_shared_wc.h"
 #include "nvmtl_app_profile.h"
 #import "nvmtl_osver_install.h"
+#include "nvmtl_os_major.h"
 #include "nvmtl_claims.h"
 #include "nvmtl_gpu_policy.h"
 #include "nvmtl_card_select.h"
@@ -1048,15 +1049,27 @@ static void nvmtl_install_hw_resource_pools(id dev)
     set(dev, NSSelectorFromString(@"setHwResourcePool:count:"), pools, 3);
     nvlog("  hw resource pools: installed 3 (slot 2 + count)");
 }
+/* A refusal before [super initWithAcceleratorPort:] must not free the object. Under ARC, returning nil from an init
+   releases self, and -[_MTLDevice dealloc] then releases dispatch objects that only the superclass's init creates: a NULL
+   dispatch_release on Metal's device queue, which killed the program inside MTLCopyAllDevices. The uninitialized object
+   is kept instead (one per refused accelerator, a few hundred bytes, once per process). After super init has run, a
+   plain nil is safe and is used. */
+static id nvmtl_refuse_before_init(id obj)
+{
+    (void)CFBridgingRetain(obj);
+    return nil;
+}
 - (instancetype)initWithAcceleratorPort:(mach_port_t)port {
     nvlog("-[NVMTLDevice initWithAcceleratorPort:%u] in %s", port, getprogname());
     {   /* the 2.x driver is built for macOS 15 and 26 only: on any later macOS, or when the version cannot be
            read, it creates no device, before touching the accelerator */
-        char v[32] = {0}; size_t n = sizeof v - 1;
-        int major = sysctlbyname("kern.osproductversion", v, &n, NULL, 0) == 0 ? atoi(v) : 0;
-        if (major < 15 || major > 26) { nvlog("  macOS %s is not supported by this driver: no device", v[0] ? v : "unknown"); return nil; }
+        char v[32] = {0}, d[32] = {0}; size_t n = sizeof v - 1, dn = sizeof d - 1;
+        if (sysctlbyname("kern.osproductversion", v, &n, NULL, 0) != 0) v[0] = 0;
+        if (sysctlbyname("kern.osrelease", d, &dn, NULL, 0) != 0) d[0] = 0;
+        int major = nvmtl_os_major_from(v, d);   // "10.16" for a program built before macOS 11: resolved from Darwin
+        if (major < 15 || major > 26) { nvlog("  macOS %s is not supported by this driver: no device", v[0] ? v : "unknown"); return nvmtl_refuse_before_init(self); }
     }
-    if (!nvmtl_card_wanted(port)) return nil;   // nvmultigpu=1 only: this process drives another card
+    if (!nvmtl_card_wanted(port)) return nvmtl_refuse_before_init(self);   // nvmultigpu=1 only: this process drives another card
     self = [super initWithAcceleratorPort:port];
     if (!self) { nvlog("  super initWithAcceleratorPort: returned nil"); return nil; }
     {   /* one GPU per process: the plugin runs a single Vulkan device, so a second Metal device on another vendor's
@@ -1397,7 +1410,7 @@ static inline BOOL nvmtl_bgr10_storage_remap(MTLTextureDescriptor *d, uint32_t *
     { static int said; if (!said++) nvlog("texture: writable BGR10A2Unorm is held as R10G10B10A2 so kernels can store to it"); }
     return YES;
 }
-// GBGR422 / BGRG422 (NVMTL_YUV422=1): a full-width RGBA8 image holding what Metal's sampler returns, with the packed bytes
+// GBGR422 / BGRG422 (on by default, NVMTL_YUV422=0 turns them off): a full-width RGBA8 image holding what Metal's sampler returns, with the packed bytes
 // kept beside it (nvmtl_yuv422.h). Sampling works for any shader; the texture is filled by replaceRegion and read by
 // getBytes. Blits, views, render targets and IOSurface backing are refused, each with a log line.
 // ---- sparse heaps and textures (NVMTL_SPARSE_TEXTURES=1; nvmtl_sparse_map.h) ----
@@ -1472,7 +1485,7 @@ void nvmtl_sparse_update(id<MTLTexture> tex, MTLSparseTextureMappingMode mode, M
 }
 static id<MTLTexture> nvmtl_make_y422_texture(MTLTextureDescriptor *d, NVMTLTexture *t) {
     const char *on = getenv("NVMTL_YUV422");
-    if (!on || on[0] != '1') { static int said; if (!said++) nvlog("newTextureWithDescriptor: 4:2:2 pixel format %lu is not carried (NVMTL_YUV422=1 turns it on) -> nil", (unsigned long)d.pixelFormat); return nil; }
+    if (on && on[0] == '0') { static int said; if (!said++) nvlog("newTextureWithDescriptor: 4:2:2 pixel format %lu is switched off (NVMTL_YUV422=0) -> nil", (unsigned long)d.pixelFormat); return nil; }
     if (d.textureType != MTLTextureType2D || d.mipmapLevelCount != 1 || d.arrayLength > 1 || d.depth != 1 || d.sampleCount > 1 ||
         !d.width || !d.height || (d.width & 1u) || d.width > 16384 || d.height > 16384 ||
         (d.usage & (MTLTextureUsageShaderWrite | MTLTextureUsageRenderTarget))) {
@@ -1808,7 +1821,7 @@ static char nvmtl_surface_cache_key;
              | ((MTLResourceOptions)d.storageMode << MTLResourceStorageModeShift);
     t->_fbo = nvmtl_desc_fbo(d);
     t->_fmt = d.pixelFormat;
-    if (nvmtl_y422_is_format((uint32_t)d.pixelFormat)) {   // a video frame: NVMTL_YUV422=1, decoded on use, never cached or written back
+    if (nvmtl_y422_is_format((uint32_t)d.pixelFormat)) {   // a video frame: decoded on use, never cached or written back
         if (!surf || w != IOSurfaceGetWidthOfPlane(surf, (uint32_t)plane) || h != IOSurfaceGetHeightOfPlane(surf, (uint32_t)plane)) { nvlog("4:2:2 texture over an IOSurface plane: size mismatch or no surface - nil"); return nil; }
         id<MTLTexture> made = nvmtl_make_y422_texture(d, t);
         if (made) { t->_y422Surf = (IOSurfaceRef)CFRetain(surf); t->_y422Plane = plane; }

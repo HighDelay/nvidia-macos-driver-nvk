@@ -318,6 +318,7 @@ public:
     void free() override;
     bool start(IOService *provider) override;
     bool startReal(IOService *provider);
+    void startUnwind();
     void stop(IOService *provider) override;
 
     IOReturn enableController() override { return kIOReturnSuccess; }
@@ -789,10 +790,15 @@ bool NMIntelFB::start(IOService *provider)
     if (!fVBuf || fVBuf->prepare() != kIOReturnSuccess) { IFBLOG("virtual: no contiguous buffer"); OSSafeReleaseNULL(fVBuf); return false; }
     bzero(fVBuf->getBytesNoCopy(), fVBuf->getLength());
     fApertureBase = fVBuf->getPhysicalSegment(0, nullptr, kIOMemoryMapperNone); fApertureLen = fVBuf->getLength();
-    if (!IOFramebuffer::start(provider)) { fVBuf->complete(); OSSafeReleaseNULL(fVBuf); return false; }
     fSurfMap = fVBuf->map();
+    if (!fSurfMap) { fVBuf->complete(); OSSafeReleaseNULL(fVBuf); return false; }
     setProperty("IOFBDependentID", 0x4E56524D00000001ull, 64);
     setProperty("IOFBDependentIndex", 4ull, 32);
+    if (!IOFramebuffer::start(provider)) {
+        OSSafeReleaseNULL(fSurfMap);
+        fVBuf->complete(); OSSafeReleaseNULL(fVBuf);
+        return false;
+    }
     if (IOWorkLoop *wl = getWorkLoop()) {
         fTimer = IOTimerEventSource::timerEventSource(this, [](OSObject *o, IOTimerEventSource *t) {
             ((NMIntelFB *)o)->sample(); t->setTimeoutMS(2000); });
@@ -827,7 +833,10 @@ bool NMIntelFB::start(IOService *provider)
         if (kernel_thread_start(guardThread, this, &bt) == KERN_SUCCESS) thread_deallocate(bt);
         else { fGuardRunning = false; release(); IFBLOG("boot-guard worker failed; guard remains armed"); }
         IOLockUnlock(fWorkerLock);
-    } else ifb_nv_set("nullmoth-intelfb-attaching", nullptr);
+    } else {
+        startUnwind();
+        ifb_nv_set("nullmoth-intelfb-attaching", nullptr);
+    }
     if (provider->getProperty("nm-intel-panel"))
         provider->setProperty(ok ? "NMIntelFBReady" : "NMIntelFBFailed", kOSBooleanTrue);
     return ok;
@@ -855,13 +864,14 @@ bool NMIntelFB::startReal(IOService *provider)
         fSurfMap = sm->map(kIOMapWriteCombineCache); sm->release();
     }
     ifb_trail(fSurfMap ? "surf" : "surf-fail");
+    if (!fSurfMap) { IFBLOG("surface mapping failed; leaving the firmware screen"); return false; }
     // nmx-intel (RTX-2 hung in registerPowerDriver with these set after IOFramebuffer::start): the dependent ID decides
     // the controller IOFramebuffer::start builds, so it goes in before, as NVRMFB does. nullmoth-intelfb-dep=0
     // publishes a plain framebuffer, without joining NVAccel as head 4.
     // intelfb-0009: on a laptop with nothing on the NVIDIA ports no NVRMFB head ever starts (NVRM "heads 0x0"), so in
     // NVRM's group this panel sat alone at index 4 with fFbs[0] NULL. Default (dep=1): a controller of its own (see
     // open()); dep=2 keeps NVRM's group as before. Index 4 at publish is what makes NVAccel treat it as head 4.
-    uint32_t dep = fSurfMap ? ifb_knob("nullmoth-intelfb-dep", bridge ? 1 : 0) : 0;
+    uint32_t dep = ifb_knob("nullmoth-intelfb-dep", bridge ? 1 : 0);
     if (dep) {
         fOwnGroup = dep != 2;
         setProperty("IOFBDependentID", fOwnGroup ? 0x4E4D494E00000001ull : 0x4E56524D00000001ull, 64);
@@ -872,14 +882,14 @@ bool NMIntelFB::startReal(IOService *provider)
         uint32_t head = fOwnGroup ? ifb_knob("nullmoth-intelfb-head", 0) : 4;
         setProperty("IOFBDependentIndex", head == 4 ? 4ull : 0ull, 32);
         ifb_trail(!fOwnGroup ? "dep-nvrm" : head == 4 ? "dep-own-h4" : "dep-own-h0");
-    } else IFBLOG("the surface would not map write-combined, or nullmoth-intelfb-dep=0: NVIDIA rendering stays off for this panel");
+    } else IFBLOG("nullmoth-intelfb-dep=0: NVIDIA rendering stays off for this panel");
     // Publish neither a primary framebuffer without RM handles nor a display
     // without a VBL worker. Registration can synchronously notify NVAccel.
     if (bridge && fOwnGroup && ifb_knob("nullmoth-intelfb-head", 0) != 4 && !kapiInit(provider)) return false;
     fVblAlways = ifb_knob("nullmoth-intelfb-vbl", 1) != 0;
     if (!armVbl()) return false;
     publishBacklight();   // Keep the fork's brightness handler before framebuffer registration.
-    if (!IOFramebuffer::start(provider)) { ifb_trail("fb-start-failed"); if (fBacklight) { fBacklight->terminate(kIOServiceSynchronous); fBacklight->detach(this); OSSafeReleaseNULL(fBacklight); } OSSafeReleaseNULL(fSurfMap); OSSafeReleaseNULL(fMMIO); fRegs = nullptr; return false; }
+    if (!IOFramebuffer::start(provider)) { ifb_trail("fb-start-failed"); return false; }
     ifb_trail("fb-started");
     setProperty("NMIntelFBPipe", fPipe, 32);
     setProperty("NMIntelFBDisplayVersion", fVer, 32);
@@ -910,7 +920,8 @@ bool NMIntelFB::startReal(IOService *provider)
     return true;
 }
 
-void NMIntelFB::stop(IOService *provider)
+// Used for failed start as well as stop: drain workers before releasing mappings.
+void NMIntelFB::startUnwind()
 {
     drainWorkers();
 #ifdef NMINTELFB_VIRTUAL
@@ -938,6 +949,12 @@ void NMIntelFB::stop(IOService *provider)
     if (fBacklight) { fBacklight->terminate(kIOServiceSynchronous); fBacklight->detach(this); OSSafeReleaseNULL(fBacklight); }
     fPwmPeriod = 0;
     if (!quarantined()) { OSSafeReleaseNULL(fSurfMap); OSSafeReleaseNULL(fMMIO); fRegs = nullptr; }
+
+}
+
+void NMIntelFB::stop(IOService *provider)
+{
+    startUnwind();
     IOFramebuffer::stop(provider);
 }
 

@@ -1,3 +1,20 @@
+## Fork integration of upstream 3.0 (unreleased)
+
+- Integrate compatible macOS 15/26 fixes while retaining stable Mesa 26.3.0,
+  the matched NVIDIA 620 interface and the fork's rendering/performance repairs.
+  Legacy macOS kits are excluded. See [review and validation](docs/UPSTREAM-3.0-INTEGRATION.md).
+- Use uncached NVK command/upload streams, deduplicate shared-surface marks per
+  commit, resolve old-SDK macOS version answers and safely refuse uninitialized
+  Metal devices. Packed YUV422 is enabled with an opt-out; invalid multisample
+  buffer uploads are refused.
+- Reserve room for late display identification, repay deferred connect events,
+  unwind failed Intel-panel starts and preserve guarded framebuffer lifetimes.
+- Automatic Safari WebGL helper setup detects compatible OpenCore EFI partitions
+  by type. A unique candidate is selected; multiple candidates require a choice.
+  Manual remains the default and explicit EFI targets remain supported.
+- Source/component validation is separate from boot qualification. The full-driver
+  build and release hold remains in force.
+
 ## Fork 2.9 integration candidate (local testing)
 
 - Integrate the 2.9 loader/translator with bounded background work, foreground

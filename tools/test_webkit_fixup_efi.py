@@ -239,6 +239,97 @@ class EfiTests(unittest.TestCase):
         self.assertNotIn(self.oc/'Kexts/Lilu.kext',signatures)
         self.assertIn(self.payload/efi.NAME,signatures)
 
+    def disk_commands(self, disks, listing=None):
+        """Model diskutil mount state, including ESPs whose names are misleading."""
+        if listing is None:
+            listing = {'AllDisksAndPartitions':[{'Content':'GUID_partition_scheme', 'Partitions':[
+                {'DeviceIdentifier':name, 'Content':info.get('Content', ''),
+                 'PartitionType':info.get('PartitionType', '')} for name,info in disks.items()]}]}
+        def run(*args):
+            if args[0] != '/usr/sbin/diskutil':
+                return b''  # lipo and codesign: the same fixture contract as the transaction tests
+            if args[1:] == ('list','-plist'):
+                return plistlib.dumps(listing)
+            action = args[1]; target = args[-1]; info = disks[target]
+            if action == 'info':
+                return plistlib.dumps({k:v for k,v in info.items() if k != '_mount'})
+            if action == 'mount':
+                info['MountPoint'] = info['_mount']
+            elif action == 'unmount':
+                info.pop('MountPoint', None)
+            else:
+                self.fail('Unexpected diskutil action: ' + action)
+            return b''
+        return run
+
+    def test_detection_uses_partition_type_and_restores_mount_state(self):
+        disks = {'disk0s1':{'Content':'EFI','_mount':str(self.root)},
+                 'disk0s4':{'Content':'Apple_APFS','VolumeName':'EFI','_mount':'unused'},
+                 'disk9s2':{'PartitionType':efi.EFI_GUID.lower(),'MountPoint':str(self.root)}}
+        before = efi.tree(self.oc)
+        with patch.object(efi,'command',side_effect=self.disk_commands(disks)) as commands:
+            self.assertEqual(efi.efi_partitions(),['disk0s1','disk9s2'])
+            # Rejecting an ambiguous target cannot create a backup or change a config.
+            with patch.object(efi.sys.stdin,'isatty',return_value=False):
+                with self.assertRaisesRegex(ValueError,'ambiguous'):efi.detect_target(self.payload)
+        self.assertEqual(before,efi.tree(self.oc))
+        self.assertNotIn('MountPoint',disks['disk0s1'])
+        self.assertEqual(disks['disk9s2']['MountPoint'],str(self.root))
+        disk_calls = [c.args for c in commands.call_args_list if c.args[0]=='/usr/sbin/diskutil']
+        self.assertNotIn(('/usr/sbin/diskutil','info','-plist','disk0s4'),disk_calls)
+        self.assertEqual([c for c in disk_calls if c[1] in ('mount','unmount')],
+                         [('/usr/sbin/diskutil','mount','disk0s1'),('/usr/sbin/diskutil','unmount','disk0s1')])
+
+    def test_unique_compatible_opencore_selected_and_empty_efi_skipped(self):
+        empty=self.root/'empty';empty.mkdir()
+        disks={'disk7s1':{'Content':'EFI','_mount':str(empty)},
+               'disk0s1':{'Content':'EFI','_mount':str(self.root)}}
+        with patch.object(efi,'command',side_effect=self.disk_commands(disks)):
+            self.assertEqual(efi.detect_target(self.payload),'disk0s1')
+        self.assertTrue(all('MountPoint' not in d for d in disks.values()))
+        self.assertFalse((self.oc/'NVWebKitFixup-backups').exists())
+
+    def test_detection_refuses_vault_lilu_and_readonly_failures(self):
+        for reason in ('vault','lilu','readonly'):
+            config=copy.deepcopy(self.config)
+            if reason=='vault':config['Misc']['Security']['Vault']='Secure'
+            if reason=='lilu':config['Kernel']['Add'][0]['Enabled']=False
+            (self.oc/'config.plist').write_bytes(plistlib.dumps(config))
+            disks={'disk0s1':{'Content':'EFI','_mount':str(self.root),'ReadOnlyVolume':reason=='readonly'}}
+            with self.subTest(reason=reason),patch.object(efi,'command',side_effect=self.disk_commands(disks)):
+                with self.assertRaisesRegex(ValueError,'No compatible OpenCore EFI'):efi.detect_target(self.payload)
+            self.assertNotIn('MountPoint',disks['disk0s1'])
+            self.assertFalse((self.oc/'Kexts'/efi.NAME).exists())
+
+    def test_multiple_candidates_require_valid_interactive_selection(self):
+        disks={'disk0s1':{'Content':'EFI','MountPoint':str(self.root)},
+               'disk8s3':{'Content':'EFI','MountPoint':str(self.root)}}
+        with patch.object(efi,'command',side_effect=self.disk_commands(disks)), \
+             patch.object(efi.sys.stdin,'isatty',return_value=True):
+            with patch('builtins.input',return_value='2'):
+                self.assertEqual(efi.detect_target(self.payload),'disk8s3')
+            for answer in ('','0','3','disk0s1'):
+                with self.subTest(answer=answer),patch('builtins.input',return_value=answer):
+                    with self.assertRaisesRegex(ValueError,'No EFI selected'):efi.detect_target(self.payload)
+        self.assertFalse((self.oc/'NVWebKitFixup-backups').exists())
+
+    def test_explicit_target_bypasses_detection_and_restore_needs_target(self):
+        disks={'disk0s1':{'Content':'EFI','MountPoint':str(self.root)}}
+        with patch.object(efi.os,'geteuid',return_value=0),patch.object(efi,'detect_target') as detect:
+            with patch.object(efi.sys,'argv',['efi.py','install','--target','disk0s1']), \
+                 patch.object(efi,'command',side_effect=self.disk_commands(disks)),patch.object(efi,'install') as install:
+                efi.main();install.assert_called_once()
+            with patch.object(efi.sys,'argv',['efi.py','restore','--backup','a'*32]):
+                with self.assertRaisesRegex(ValueError,'original --target'):efi.main()
+            detect.assert_not_called()
+
+    def test_no_efi_and_malformed_identifiers_are_not_guessed(self):
+        for listing in ({'AllDisksAndPartitions':[]},
+                        {'AllDisksAndPartitions':[{'Content':'EFI','DeviceIdentifier':'disk0'}]},
+                        {'AllDisks':['disk0s1']}):
+            with self.subTest(listing=listing),patch.object(efi,'command',return_value=plistlib.dumps(listing)):
+                with self.assertRaises(ValueError):efi.detect_target(self.payload)
+
 
 if __name__ == '__main__':
     unittest.main()

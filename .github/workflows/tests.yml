@@ -1,0 +1,55 @@
+name: Tests
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  host:
+    runs-on: macos-15-intel
+    timeout-minutes: 45
+    env:
+      PYTHONDONTWRITEBYTECODE: '1'
+    steps:
+      - name: Check out the change
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+          # Full history: negative controls read earlier revisions of the source.
+          fetch-depth: 0
+      - name: Show the tools in use
+        run: python3 --version && clang --version
+      - name: Check out matching Vulkan headers
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: KhronosGroup/Vulkan-Headers
+          ref: c46850864f4661461b0f6cb9922c058ffea4915e
+          path: .test-deps/Vulkan-Headers
+          persist-credentials: false
+      - name: Expose fixture headers
+        run: ln -s "$GITHUB_WORKSPACE/.test-deps/Vulkan-Headers" "$HOME/Vulkan-Headers"
+      - name: Modern integration and retained fork regressions
+        run: |
+          python3 tools/run_all_tests.py -j 3 \
+            test_device_refusal.py test_hybrid_fb_dependent_id.py \
+            test_install_weg_gfxrst.py test_nvrmfb_connect_owed.py \
+            test_nvrmfb_hotplug_lifecycle.py test_scanout_reserve.py \
+            test_scanout_caps.py test_stream_uncached.py test_ws_mark_once.py \
+            test_yuv422_default.py test_yuv422.c test_copy_null_image.py test_utilization_hang.py \
+            test_security_hardening.py test_submission_copies.py \
+            test_air_analysis_cache.py test_windowserver_caches.py \
+            test_surface_publication.py test_surface_pending_lifetime.py \
+            test_surface_import_reuse.py test_surface_host_span.py \
+            test_surface_alloc_bound.py test_render_sampler_cache.py \
+            test_intel_panel_bridge.py test_intel_panel_install.py \
+            test_webkit_fixup_efi.py test_optional_webkit_install.py \
+            test_native_gld_install.py test_uninstall_kext_paths.py \
+            test_tree_layout.py
+      - name: Per-display scale ownership
+        run: python3 tools/rotation/native_attributes_test.py

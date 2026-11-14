@@ -63,13 +63,15 @@ SOURCE_PACKAGE="/original extracted package"
         result,called=self.invoke(answer='s');self.assertIsNone(called)
         self.assertIn('helper skipped',result.stdout);self.assertNotIn('Manual Safari',result.stdout)
 
-    def test_automatic_requires_explicit_target_and_preserves_spaces(self):
+    def test_automatic_detection_and_explicit_target_preserve_spaces(self):
         for choice in (['--webkit-fixup=auto'],[]):
             result,called=self.invoke(*choice,'--efi-target','/Volumes/My EFI/EFI/OC',answer='a' if not choice else None)
             self.assertEqual(result.returncode,0,result.stderr)
             self.assertEqual(called,['install','--target','/Volumes/My EFI/EFI/OC'])
-        result,called=self.invoke('--webkit-fixup=auto');self.assertIsNone(called)
-        self.assertIn('no EFI target selected',result.stdout)
+        result,called=self.invoke('--webkit-fixup=auto')
+        self.assertEqual(result.returncode,0,result.stderr);self.assertEqual(called,['install'])
+        result,called=self.invoke(answer='a')
+        self.assertEqual(result.returncode,0,result.stderr);self.assertEqual(called,['install'])
 
     def test_uncovered_helper_cannot_execute(self):
         for name in ('efi.py','NVWebKitFixup.kext/Contents/MacOS/NVWebKitFixup','NVWebKitFixup.kext/Contents/_CodeSignature/CodeResources'):
