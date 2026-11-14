@@ -245,6 +245,23 @@ Other drivers and Wine hosts retain their existing binding path. The
 other driver workarounds; keep it unset for normal play. The patched pair is
 part of the locally staged driver candidate, pending complete package testing.
 
+When updating an existing D3D12 prefix from the earlier DLL pair, close the
+game and launcher first. Restore the previous helper-managed setup once using
+the matching prefix and Wine executable:
+
+```sh
+"$nvk_runtime/bin/nvk-runtime" restore "$nvk_runtime" "$nvk_prefix" "$nvk_wine"
+```
+
+Then reopen YAAGL and launch normally; it installs the updated provider pair.
+For YAAGL, `nvk_prefix` is its `launcher-data/wineprefix-nvk` directory and
+`nvk_wine` is its `launcher-data/wine-nvk/bin/wine` executable. Standalone users
+can rerun `install-d3d12`, or `install-dlss` when applicable. The restore preserves
+the original-file backups and registry rollback rules; it briefly restores
+the original DXVK files before the same driver-supplied DXVK pair is reapplied.
+No launcher update is required. An already installed graphics pair is never
+silently overwritten; a changed DLL or backup must be resolved first.
+
 ### Optional DLSS Super Resolution
 
 The provider includes the unmodified NVIDIA Wine NGX pair (`nvngx.dll` and
