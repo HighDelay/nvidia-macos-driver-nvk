@@ -9217,12 +9217,29 @@ mod tests {
 
     #[test]
     fn owned_derivative_execution_model_check_matches_vulkan_validation() {
-        let module = module_with_composite_instruction(Instruction::new(
+        let mut module = module_with_composite_instruction(Instruction::new(
             Op::Fwidth,
             Some(15),
             Some(40),
             vec![Operand::IdRef(23)],
         ));
+        // SPIRV-Tools applies the required derivative-mode check to KHR,
+        // while NV permits an omitted mode. Name the contract explicitly.
+        module.extensions.push(inst(
+            Op::Extension,
+            vec![Operand::LiteralString(
+                "SPV_KHR_compute_shader_derivatives".to_string(),
+            )],
+        ));
+        module.capabilities.push(inst(
+            Op::Capability,
+            vec![Operand::Capability(
+                spirv::Capability::ComputeDerivativeGroupQuadsKHR,
+            )],
+        ));
+        // A valid quad group needs an even workgroup width and height.
+        module.execution_modes[0].operands[2] = Operand::LiteralBit32(2);
+        module.execution_modes[0].operands[3] = Operand::LiteralBit32(2);
         assert_owned_invalid(
             &module,
             "native emitter: owned derivative instruction is reachable from a non-Fragment entry point",
@@ -9237,11 +9254,26 @@ mod tests {
             std::process::id()
         ));
         let validation = crate::tools::spirv_val_bytes(&bytes, &tmp);
-        let _ = std::fs::remove_dir(&tmp);
-        assert!(
-            validation.is_err(),
-            "spirv-val must reject a compute derivative without the required derivative execution mode: {validation:?}"
+        let error = validation.expect_err(
+            "spirv-val must reject a KHR compute derivative without a derivative group mode",
         );
+        assert!(error.contains("DerivativeGroup"), "{error}");
+
+        module.execution_modes.push(inst(
+            Op::ExecutionMode,
+            vec![
+                Operand::IdRef(32),
+                Operand::ExecutionMode(spirv::ExecutionMode::DerivativeGroupQuadsKHR),
+            ],
+        ));
+        let valid_bytes = module
+            .assemble()
+            .iter()
+            .flat_map(|word| word.to_le_bytes())
+            .collect::<Vec<_>>();
+        crate::tools::spirv_val_bytes(&valid_bytes, &tmp)
+            .expect("the same KHR shader with a valid derivative group mode must validate");
+        let _ = std::fs::remove_dir(&tmp);
     }
 
     #[test]
