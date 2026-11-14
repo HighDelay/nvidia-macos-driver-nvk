@@ -575,11 +575,16 @@ static NSString *nvmtl_spvcache_path(NSData *air, NSString *stage) {
 @end
 static const void *NVMTL_AIRDIGEST_KEY = &NVMTL_AIRDIGEST_KEY;
 static const void *NVMTL_AIRTEXT_KEY = &NVMTL_AIRTEXT_KEY;
+static const void *NVMTL_AIRLINK_KEY = &NVMTL_AIRLINK_KEY;
+static const void *NVMTL_AIRGRID_KEY = &NVMTL_AIRGRID_KEY;
 // Marks text nvmtl_air_to_text made; it is never edited, so state can be kept on it.
 static const void *NVMTL_AIRTG_KEY = &NVMTL_AIRTG_KEY;
 static NSString *nvmtl_air_text_made(NSString *s) {
     if (s.length >= 4096) objc_setAssociatedObject(s, NVMTL_AIRTEXT_KEY, @YES, OBJC_ASSOCIATION_RETAIN);
     return s;
+}
+static BOOL nvmtl_air_analysis_cacheable(NSString *ll) {
+    return ll.length >= 4096 && objc_getAssociatedObject(ll, NVMTL_AIRTEXT_KEY) != nil;
 }
 // newFunctionWithName scanned the whole module twice on every call for these two markers (megabytes of text, each
 // time a VideoToolbox transfer made its function). The answer is kept on the text once.
@@ -2431,7 +2436,25 @@ static BOOL nvmtl_air_grid_only_scan(NSString *ll, NSString *fname)
 }
 BOOL nvmtl_air_grid_only(NVMTLFunction *fn)
 {
-    return fn ? nvmtl_air_grid_only_scan(fn->_air, fn->_fname) : NO;
+    if (!fn) return NO;
+    NSString *ll = fn->_air, *name = fn->_fname;
+    if (!nvmtl_air_analysis_cacheable(ll) || !name.length)
+        return nvmtl_air_grid_only_scan(ll, name);
+    NSDictionary *entries = objc_getAssociatedObject(ll, NVMTL_AIRGRID_KEY);
+    NSNumber *have = entries[name];
+    if (have) return have.boolValue;
+    BOOL result = nvmtl_air_grid_only_scan(ll, name);
+    // VideoToolbox makes new function/pipeline objects for each transfer. Keep
+    // the answer on their shared immutable AIR, including the entry name.
+    @synchronized (ll) {
+        entries = objc_getAssociatedObject(ll, NVMTL_AIRGRID_KEY);
+        if (entries.count < 32) {
+            NSMutableDictionary *updated = entries ? [entries mutableCopy] : [NSMutableDictionary new];
+            updated[name] = @(result);
+            objc_setAssociatedObject(ll, NVMTL_AIRGRID_KEY, [updated copy], OBJC_ASSOCIATION_RETAIN);
+        }
+    }
+    return result;
 }
 
 // One `air.struct_type_info` tuple: members of `i32 offset, i32 size, i32 count, !"type", !"name",
@@ -2991,14 +3014,22 @@ BOOL nvmtl_air_reads_function_table(NSString *air)
 BOOL nvmtl_needs_visible_link(NSString *air, NSString *why)
 {
     if (air.length && nvmtl_xlate_ready() && xlate_vrefs) {
+        const BOOL keep = nvmtl_air_analysis_cacheable(air);
+        NSNumber *have = keep ? objc_getAssociatedObject(air, NVMTL_AIRLINK_KEY) : nil;
+        if (have) return have.boolValue;
         uint8_t *out = NULL; size_t len = 0; char e[256] = {0};
         if (xlate_vrefs(air.UTF8String, &out, &len, e, sizeof e) == 0) {
             id refs = [NSJSONSerialization JSONObjectWithData:[NSData dataWithBytes:out length:len] options:0 error:NULL];
             xlate_free(out, len);
             // the query lists direct references only; a function that calls through a visible or intersection
             // function table has none, and nvmtl_link_stage links it from the table candidates
-            if ([refs isKindOfClass:[NSArray class]])
-                return [(NSArray *)refs count] > 0 || nvmtl_air_reads_function_table(air);
+            if ([refs isKindOfClass:[NSArray class]]) {
+                BOOL result = [(NSArray *)refs count] > 0 || nvmtl_air_reads_function_table(air);
+                // Only a successful query is definitive. A failed query still
+                // consults this call's error and may succeed on a later call.
+                if (keep) objc_setAssociatedObject(air, NVMTL_AIRLINK_KEY, @(result), OBJC_ASSOCIATION_RETAIN);
+                return result;
+            }
         }
     }
     return why && ([why rangeOfString:@"visible function reference"].location != NSNotFound

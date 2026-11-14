@@ -314,8 +314,11 @@ impl LlModule {
                         .as_ref()
                         .is_none_or(|result| !substitutions.contains_key(result))
                 });
-                typed.substitute_values(&substitutions);
             }
+            crate::native::tir::substitute_values_in_blocks(
+                function.blocks.iter_mut().filter_map(BodyBlock::typed_mut),
+                &substitutions,
+            );
             prune_constant_cfg_edges(&mut function.blocks);
         }
     }

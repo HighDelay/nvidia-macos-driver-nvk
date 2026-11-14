@@ -421,6 +421,37 @@ only its Kernel/Add entry and kext on an explicitly selected EFI, checks Lilu an
 vault state, and retains a guarded recovery backup. Never add this Lilu plugin
 to the normal system extension repository or kernel collection.
 
+## Safari navigation frame-conversion latency (2026-11-14)
+
+Preserve the immutable-AIR analysis caches in `NVMTLLibraryLoad.m`. VideoToolbox
+recreates functions and pipelines for transfers, so caching only on those objects
+repeats large visible-function-table and grid-only scans. Keep successful positive
+and negative link-query results on driver-produced immutable text; query failures
+must still use the current error fallback and permit recovery. Grid-only results
+also include the entry name, with at most 32 cached entries per text. External or
+mutable text must remain uncached. Keep the existing grouping and linking rules.
+
+Retain the translator's shared replacement-token map across blocks during static
+initializer folding, and the per-call parse-cache scope around sampler
+specialization. These avoid repeated work without changing shader output or
+retaining parsed modules across calls. Preserve the Safari video/filter policies,
+WebKit feature settings, decoder selection and sandbox behavior.
+
+On RTX 2060 SUPER / Tahoe 26.7.1 / Safari 27.0, captured page transitions waited
+for GPU-process video-frame conversion. Three isolated NV12-to-BGRA conversion
+cases improved from 190–315 ms to 35–48 ms on repeated calls, with identical
+pixel fingerprints. First conversions with empty caches improved from 5.1–7.3 s
+to 3.3–5.0 s; first-seen variants still require compilation. Forty-one translator
+comparisons matched output bytes or refusal results, and 12 sampler GPU recordings
+matched expected pixels. Analysis-cache and retained WebKit/sampler/cache checks
+pass. The compiler suite passes 2,266 cases; its existing derivative-validator
+negative control fails equally on unchanged source with SPIRV-Tools 2026.4.
+The wrapper suite passes 48 self-contained cases; two require unavailable local
+captures and two are explicitly ignored. After installing the signed userland
+components and relaunching Safari, the user confirmed clearly faster YouTube
+navigation with normal playback. Other GPUs and operating systems remain
+untested for this optimization. First conversions can still compile shaders.
+
 ## Safari filtered-icon compatibility trial (2026-11-09)
 
 `NVMTLWebKit.m` also selects WebKit's software CSS/SVG filter implementation

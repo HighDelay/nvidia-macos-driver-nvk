@@ -19,6 +19,7 @@ mod phi_edit;
 mod rename;
 pub(in crate::native) use rename::renamed_llvalue;
 mod substitute;
+pub(in crate::native) use substitute::substitute_values_in_blocks;
 
 pub(in crate::native) fn canonicalize_single_predecessor_phis(
     blocks: &mut [crate::native::cfg::BodyBlock],

@@ -877,7 +877,9 @@ pub unsafe extern "C" fn nvmtl_translate_samplers(
     ll:*const c_char, stage:*const c_char, json:*const c_char,
     out:*mut *mut u8, out_len:*mut usize, err:*mut c_char, err_len:usize,
 )->i32 {
-    let result=(|| -> Result<Vec<u8>,String> {
+    // Reflection, storage-image options and emission inspect the same
+    // specialized AIR. Share their parses for this call, as translate_one does.
+    let result=metal2vulkan::with_parse_cache(|| (|| -> Result<Vec<u8>,String> {
         if ll.is_null()||stage.is_null()||json.is_null()||out.is_null()||out_len.is_null(){return Err("null sampler argument".into())}
         let ll=CStr::from_ptr(ll).to_str().map_err(|e|e.to_string())?;
         let st=match CStr::from_ptr(stage).to_bytes(){b"vertex"=>Stage::Vertex,b"fragment"=>Stage::Fragment,b"kernel"=>Stage::Kernel,_=>return Err("bad stage".into())};
@@ -910,7 +912,7 @@ pub unsafe extern "C" fn nvmtl_translate_samplers(
         translate_with_pointer_retry(ll, |ll| {
             metal2vulkan::translate_native_no_retry_constructed_with_options(ll,st,opts)
         })
-    })();
+    })());
     match result {
         Ok(bytes)=>{let mut b=bytes.into_boxed_slice();*out=b.as_mut_ptr();*out_len=b.len();std::mem::forget(b);0}
         Err(e)=>{if !err.is_null()&&err_len>0{let n=e.len().min(err_len-1);std::ptr::copy_nonoverlapping(e.as_ptr(),err.cast(),n);*err.add(n)=0;}-1}

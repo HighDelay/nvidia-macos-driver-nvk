@@ -308,14 +308,18 @@ fn substitute_switch(switch: &mut LlSwitch, substitutions: &Substitutions) {
 }
 
 impl TirBlock {
-    fn substitute_values_impl(&mut self, substitutions: &Substitutions, include_phis: bool) {
+    fn substitute_values_with_tokens(
+        &mut self,
+        substitutions: &Substitutions,
+        tokens: &HashMap<String, String>,
+        include_phis: bool,
+    ) {
         if substitutions.is_empty() {
             return;
         }
-        let tokens = token_map(substitutions);
         for inst in &mut self.insts {
             if include_phis || !inst.is_phi() {
-                substitute_inst(inst, substitutions, &tokens);
+                substitute_inst(inst, substitutions, tokens);
             }
         }
         match &mut self.terminator {
@@ -345,11 +349,27 @@ impl TirBlock {
     }
 
     pub(in crate::native) fn substitute_values(&mut self, substitutions: &Substitutions) {
-        self.substitute_values_impl(substitutions, true);
+        self.substitute_values_with_tokens(substitutions, &token_map(substitutions), true);
     }
 
     pub(in crate::native) fn substitute_non_phi_values(&mut self, substitutions: &Substitutions) {
-        self.substitute_values_impl(substitutions, false);
+        self.substitute_values_with_tokens(substitutions, &token_map(substitutions), false);
+    }
+}
+
+// Static initialization can fold thousands of values across thousands of
+// blocks in a system shader. Render replacement tokens once for that function,
+// instead of rebuilding the complete map for every block.
+pub(in crate::native) fn substitute_values_in_blocks<'a>(
+    blocks: impl IntoIterator<Item = &'a mut TirBlock>,
+    substitutions: &Substitutions,
+) {
+    if substitutions.is_empty() {
+        return;
+    }
+    let tokens = token_map(substitutions);
+    for block in blocks {
+        block.substitute_values_with_tokens(substitutions, &tokens, true);
     }
 }
 
