@@ -22,9 +22,10 @@ libraries/frameworks; MacPorts LLVM and SPIR-V packages are build dependencies.
 The optional `nvk/nvk-upstream-nak.patch` remains disabled. Its earlier offline
 results applied to the older Mesa base. One SM120 latency hunk overlaps stable
 26.3.0, so do not append the entire patch to the new base without reconciling
-it and testing the resulting compiler on the target GPU. Native Zink keeps its
-separate Gallium/OpenGL Mesa pin and validated internal ABI; it calls the new
-NVK renderer through Vulkan.
+it and testing the resulting compiler on the target GPU. Native Zink now also
+pins stable 26.3.0, with its own validated Gallium/OpenGL overlay and internal
+ABI. Its source identity remains separate from NVK; the two communicate through
+Vulkan. See the [Zink update record](ZINK-MESA-26.3.0.md).
 
 ## NVRM headers
 

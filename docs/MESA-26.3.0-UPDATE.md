@@ -111,8 +111,10 @@ Installed-path checks passed: 60 native exact-pixel frames with resize/restore,
 native Zink presentations, Wine ABI fill/readback, 120 DXVK frames with five
 readbacks and resize, and D3D12 compute plus 60 presentations/three readbacks.
 Manifests, signatures, installed paths and protected-file metadata were rechecked.
-Zink still reports its independent Gallium frontend version; that string does
-not identify the updated NVK backend.
+At this initial installation, Zink still reported its independent development
+frontend version; that string did not identify the updated NVK backend.
+The subsequent [Zink frontend update](ZINK-MESA-26.3.0.md) advances that component
+to stable 26.3.0 as well.
 
 ZZZ then loaded the stable renderer through the private
 [async Wine candidate](WINE-ASYNC-PRESENTATION.md), with MSync active and no bridge

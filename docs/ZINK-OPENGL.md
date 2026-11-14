@@ -255,8 +255,8 @@ show `zink` and `NVK` without any Minecraft companion mod or JVM argument.
 
 ### Build commands
 
-Use a separate, clean Mesa checkout at
-[`17ca6174dcc6cb22059ac343bc29f8af7800f42e`](https://gitlab.freedesktop.org/mesa/mesa/-/commit/17ca6174dcc6cb22059ac343bc29f8af7800f42e).
+Use a separate, clean Mesa **26.3.0 stable** checkout at
+[`0a6fa60abb737d26ac8a316a4aad7c9ddf64f9e4`](https://gitlab.freedesktop.org/mesa/mesa/-/commit/0a6fa60abb737d26ac8a316a4aad7c9ddf64f9e4).
 Do not apply this overlay to the Mesa tree producing the installed NVMTL plugin.
 The builder checks the source identity before applying its small Darwin/Zink
 patch. Dispatch generation uses the local Apple symbols/slots and refuses
@@ -264,6 +264,9 @@ unrecognized conventions; it does not whitelist a particular OS build. It retain
 descriptor sets for Darwin NVK, staging/GPU texture uploads
 instead of host image copies, and bounded inline texture uploads on the render
 worker. Other drivers retain their existing upload threshold.
+The [Zink stable update record](ZINK-MESA-26.3.0.md) describes the frontend API
+adjustment, retained repairs and validation limits. Zink's source identity is
+checked independently of the NVK renderer, even when both use the same version.
 
 Install Xcode command-line tools, Vulkan-Headers, Python, Meson, Ninja, Mako,
 PyYAML, packaging and Bison 3.x. Bison 2.3 from macOS cannot parse this Mesa tree.
@@ -282,12 +285,11 @@ python3 tools/test_zink_runtime.py --runtime /path/to/zink-out \
 `VULKAN_HEADERS` can override the default `~/Vulkan-Headers/include`.
 For a checkout extracted from the pinned mirror archive, set
 `ZINK_MESA_ARCHIVE=/path/to/mesa-source.tar.gz`. The accepted archive SHA-256 is
-`1328a4aaba2260c005ff46c88d572403f0b677cd87580050f4d1bfafe56388f0`;
-its URL is `https://codeload.github.com/chaotic-cx/mesa-mirror/tar.gz/17ca6174dcc6cb22059ac343bc29f8af7800f42e`.
-GitHub's regenerated archive with CSV CRLF checkout rules is also accepted:
-`79c8a65a5a5cf6968368e0b7338726465fc21444cc5d5583716eaf685ce879cf`.
-Its 12,909 file contents match the same pinned Git tree after normalizing those
-33 CSV files' line endings. The builder records the actual archive hash and
+`cf65daa7cb857010df1b56169426350cc11d8481def906ca3653fa2ccd2cd0d4`;
+its URL is `https://codeload.github.com/chaotic-cx/mesa-mirror/tar.gz/0a6fa60abb737d26ac8a316a4aad7c9ddf64f9e4`.
+Its 12,923 file contents match the pinned Git tree after normalizing the
+33 CSV files with CRLF checkout rules. Older development archives are rejected.
+The builder records the actual archive hash and
 checks extracted files against it. Source/build hashes,
 Mesa identity and the private renderer pairing are recorded in `ZINK-BUILD.json`
 and `NATIVE-BUILD.json`; packaging rejects stale or mismatched components.

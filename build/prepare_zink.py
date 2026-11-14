@@ -11,12 +11,8 @@ import tarfile
 import tempfile
 from opengl_api import requirements
 
-MESA_COMMIT = '17ca6174dcc6cb22059ac343bc29f8af7800f42e'
-ARCHIVE_SHA256 = '1328a4aaba2260c005ff46c88d572403f0b677cd87580050f4d1bfafe56388f0'
-# GitHub regenerated the archive with .gitattributes CSV CRLF checkout rules.
-# All 12,909 blobs were checked against the same pinned Git tree; only those
-# line endings differ. Keep accepting existing verified build inputs too.
-ARCHIVE_SHA256_CRLF = '79c8a65a5a5cf6968368e0b7338726465fc21444cc5d5583716eaf685ce879cf'
+MESA_COMMIT = '0a6fa60abb737d26ac8a316a4aad7c9ddf64f9e4'
+ARCHIVE_SHA256 = 'cf65daa7cb857010df1b56169426350cc11d8481def906ca3653fa2ccd2cd0d4'
 ROOT = Path(__file__).resolve().parents[1]
 FRONTEND = ('nvk_zink.c', 'nvk_zink.h', 'nvk_zink_private.h', 'nvk_iosurface.c',
             'nvk_present.c', 'nvk_present.h', 'meson.build', 'zink_sync_probe.c')
@@ -40,7 +36,7 @@ def prepare(source, archive=None):
     # Patch applicability alone cannot establish a matching Mesa ABI.
     if archive:
         archive_digest = digest(archive.read_bytes())
-        if archive_digest not in (ARCHIVE_SHA256, ARCHIVE_SHA256_CRLF):
+        if archive_digest != ARCHIVE_SHA256:
             raise ValueError('Mesa archive does not match the pinned source digest')
         identity['archive_sha256'] = archive_digest
         with tarfile.open(archive) as tar:
@@ -94,7 +90,7 @@ def prepare(source, archive=None):
 def main():
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument('source',type=Path)
-    ap.add_argument('--archive',type=Path,help='Verified 17ca6174 source archive for a checkout without .git')
+    ap.add_argument('--archive',type=Path,help='Verified Mesa 26.3.0 source archive for a checkout without .git')
     args = ap.parse_args()
     prepare(args.source.resolve(),args.archive)
 

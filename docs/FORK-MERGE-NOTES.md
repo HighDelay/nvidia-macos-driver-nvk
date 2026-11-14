@@ -1,5 +1,28 @@
 # Retained fork changes for upstream merges
 
+## Zink/Gallium 26.3.0, 2026-11-14
+
+The [Zink stable update](ZINK-MESA-26.3.0.md) advances the independently checked
+frontend from `17ca6174` to `0a6fa60abb737d26ac8a316a4aad7c9ddf64f9e4`.
+Use the new zero-initialized `broken_invalidate` field instead of the removed
+`get_param` callback. Rebase the native overlay against this exact Mesa tree;
+never change only the reported version string.
+
+Upstream now covers the locked submission broadcasts, predicate wait loops,
+monotonic timed waits and additional fence/reset synchronization. Preserve its
+implementation instead of replaying the old submission hunks. Retain the locked
+usage/unflushed predicate update, the batch generation guard in both wait loops
+and the Darwin barrier teardown repair.
+Keep native Vulkan selection, descriptor sets, staging/GPU texture uploads,
+bounded texture-worker payloads, coherent system-memory preference on small BARs,
+failed-map handling/diagnostics and IOSurface write-generation tracking.
+
+The frontend, CGL adapter and native Vulkan bridge must retain matching build
+records. Native GPU-copy presentation, capability filtering, shared-context/HDR
+interop, OBS compatibility, the macOS 15.5 minimum and the no-exact-build-gate
+policy remain. The full-driver build/release hold still applies; prior Sequoia
+and small-BAR application results do not qualify the new frontend automatically.
+
 ## Mesa/NVK 26.3.0, 2026-11-14
 
 The [stable Mesa update](MESA-26.3.0-UPDATE.md) advances NVK to official

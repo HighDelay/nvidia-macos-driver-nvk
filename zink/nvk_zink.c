@@ -82,12 +82,6 @@ NVK_EXPORT void nvk_zink_end_front_flush(struct nvk_zink_context *ctx, int prese
    if (!presented) ctx->front_flush_pending = true;
 }
 
-static int get_param(struct pipe_frontend_screen *fscreen,
-                     enum st_manager_param param)
-{
-   return 0;
-}
-
 static bool validate(struct st_context *st, struct pipe_frontend_drawable *drawable,
                      const enum st_attachment_type *requested, unsigned count,
                      struct pipe_resource **out, struct pipe_resource **resolve)
@@ -158,7 +152,6 @@ nvk_zink_create_drawable_profile(unsigned width, unsigned height, struct nvk_zin
          if (screen) {
             screen->fscreen.screen = zink_create_screen(NULL,NULL);
             if (!screen->fscreen.screen) { free(screen); screen = NULL; }
-            else screen->fscreen.get_param = get_param;
          }
          process_screen = screen;
       }
