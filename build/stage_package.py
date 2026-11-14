@@ -22,6 +22,7 @@ RUNTIME = Path("Library/GPUBundles/nvmtl")
 TRANSLATOR = RUNTIME / "libnvmtl_translate.dylib"
 BUNDLED_TRANSLATOR = PLUGIN / "Contents/MacOS/libnvmtl_translate.dylib"
 FRAMEBUFFER = Path("Library/Extensions/NVRMFB.kext")
+NVRM = Path("Library/Extensions/NVRM.kext")
 AGDC = Path("Library/Extensions/NVRMAGDC.kext")
 ACCEL = {v: Path("Library/NullMoth/kexts") / v / "NVAccel.kext" for v in ("15", "26")}
 MINECRAFT = RUNTIME / "minecraft"
@@ -382,6 +383,11 @@ def stage(args):
     commit = run("git", "-C", REPO, "rev-parse", "--short", "HEAD").stdout.strip()
     plugin = args.plugin or REPO / ("out/plugin-" + commit + "-release/NVMTLDriver")
     translator = args.translator or REPO / "out/translator/x86_64-apple-darwin/release/libnvmtl_translate.dylib"
+    nvrm = getattr(args, "nvrm", None)
+    if nvrm:
+        bundle(nvrm, "NVRM")
+        validate_links(nvrm.resolve())
+        run("lipo", nvrm / "Contents/MacOS/NVRM", "-verify_arch", "x86_64")
     framebuffer = getattr(args, "framebuffer", None)
     if framebuffer:
         bundle(framebuffer, "NVRMFB")
@@ -430,6 +436,10 @@ def stage(args):
     with tempfile.TemporaryDirectory(prefix=".nullmoth-stage-", dir=output.parent) as temporary:
         work = Path(temporary) / "pkgroot"
         shutil.copytree(base, work, symlinks=True)
+        if nvrm:
+            destination = work / NVRM
+            shutil.rmtree(destination)
+            shutil.copytree(nvrm, destination, symlinks=True)
         for major, accelerator in accelerators.items():
             if not accelerator:
                 continue
@@ -453,7 +463,7 @@ def stage(args):
         replace_file(plist, work / FRAMEBUFFER / "Contents/Info.plist")
         # Build templates and reused bundles may carry older versions. Keep
         # per-OS release metadata without replacing the fork's personalities.
-        for relative in (*ACCEL.values(), FRAMEBUFFER, AGDC, Path("Library/Extensions/NVAccel.kext")):
+        for relative in (*ACCEL.values(), NVRM, FRAMEBUFFER, AGDC, Path("Library/Extensions/NVAccel.kext")):
             if (work / relative).is_dir() and (base / relative).is_dir():
                 preserve_kext_release_metadata(work / relative, base / relative)
         for source, relative in replacements:
@@ -512,6 +522,7 @@ def stage(args):
         work.rename(output)
     print("Package ready: " + str(output))
     print("Updated: NVMTLDriver, translator, " + ("NVRMFB" if framebuffer else "NVRMFB Info.plist")
+          + (", NVRM" if nvrm else "")
           + (", NVRMAGDC" if agdc else "")
           + "".join(", macOS " + major + " NVAccel" for major, source in accelerators.items() if source)
           + (", Minecraft native NVK runtime" if minecraft else "")
@@ -529,6 +540,7 @@ def main():
     parser.add_argument("--plugin", type=Path, help="NVMTLDriver executable (default: current-commit release output)")
     parser.add_argument("--translator", type=Path, help="libnvmtl_translate.dylib (default: out/translator Intel release)")
     parser.add_argument("--air-dis", type=Path, help="matched signed nvmtl-air-dis fallback; required by the 2.9 loader unless already in the base")
+    parser.add_argument("--nvrm", type=Path, help="optional complete rebuilt NVRM.kext with matching NVIDIA core and firmware")
     parser.add_argument("--framebuffer-plist", type=Path, help="NVRMFB Info.plist (default: this checkout's PR #131 plist)")
     parser.add_argument("--framebuffer", type=Path, help="optional complete rebuilt NVRMFB.kext; uses its plist unless overridden")
     parser.add_argument("--agdc", type=Path, help="optional complete rebuilt NVRMAGDC.kext")

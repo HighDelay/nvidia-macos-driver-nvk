@@ -217,6 +217,30 @@ class StagePackage(unittest.TestCase):
         self.assert_manifest(self.output)
         self.assert_unchanged()
 
+    def test_nvrm_replacement_removes_stale_resources_and_retains_release_dependencies(self):
+        self.args.nvrm = self.make_bundle(self.build / "NVRM.kext", "NVRM", b"rebuilt RM core")
+        old_plist = self.base / STAGE.NVRM / "Contents/Info.plist"
+        info = plistlib.loads(old_plist.read_bytes())
+        info.update(CFBundleVersion="3.0", OSBundleLibraries={"com.apple.kpi.iokit": "8.0.0"})
+        old_plist.write_bytes(plistlib.dumps(info))
+        self.put(self.base / STAGE.NVRM / "Contents/stale-resource", b"old core resource")
+        self.seal_base()
+        self.stage()
+        target = self.output / STAGE.NVRM
+        self.assertEqual((target / "Contents/MacOS/NVRM").read_bytes(), b"rebuilt RM core")
+        self.assertFalse((target / "Contents/stale-resource").exists())
+        self.assertEqual(plistlib.loads((target / "Contents/Info.plist").read_bytes()), info)
+        self.assert_manifest(self.output)
+        self.assert_unchanged()
+
+    def test_wrong_nvrm_architecture_is_rejected_before_staging(self):
+        self.args.nvrm = self.make_bundle(self.build / "NVRM.kext", "NVRM", b"ARM64 incompatible")
+        self.original_build = self.snapshot(self.build)
+        with self.assertRaisesRegex(ValueError, "lipo failed"):
+            self.stage()
+        self.assertFalse(self.output.exists())
+        self.assert_unchanged()
+
     def test_agdc_replacement_keeps_complete_bundle_and_refreshes_root_manifest(self):
         self.args.agdc = self.make_bundle(self.build / "NVRMAGDC.kext", "NVRMAGDC", b"stable display slots")
         self.put(self.base / STAGE.AGDC / "Contents/obsolete-signature", b"must not survive overlay")

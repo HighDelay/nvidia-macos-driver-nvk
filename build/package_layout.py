@@ -113,7 +113,7 @@ def organize(payload, records, identity=None):
     compact['optional_audio'] = {'bundled': audio.is_file(), 'default': 'No', 'minimum_macos_major': 26, 'existing_opt_ins_retained': True}
     webkit = payload/'Optional/NVWebKitFixup/NVWebKitFixup.kext/Contents/MacOS/NVWebKitFixup'
     compact['optional_webkit_fixup'] = {'bundled': webkit.is_file(), 'default': 'Manual instructions',
-                                       'installation': 'OpenCore EFI only; automatic installation requires an explicit target'}
+                                       'installation': 'OpenCore EFI only; Automatic detects a unique compatible EFI or asks for a choice; explicit target overrides detection'}
     # SHA256SUMS covers every file. These hashes identify the primary components.
     paths = [Path('Library/Extensions') / (name + '.kext/Contents/MacOS/' + name)
              for name in ('NVRM', 'NVRMFB', 'NVAccel', 'NVRMAGDC')]

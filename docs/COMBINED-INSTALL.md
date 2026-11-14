@@ -26,7 +26,8 @@ the separate Wine/NVK setup and the game's `nvngx_dlss.dll`.
 
 The optional Safari WebGL helper offers **Manual**, **Automatic**, or **Skip**.
 Manual is the default and prints the bundled kext's location and OpenCore setup
-steps. Automatic uses the EFI target you select and backs up its config first.
+steps. Automatic detects EFI partitions and selects a unique compatible OpenCore
+installation; multiple candidates require your choice. It backs up changes first.
 See [Safari WebGL setup and recovery](https://github.com/HighDelay/nvidia-macos-driver-nvk/blob/main/docs/SAFARI-WEBGL.md).
 
 With a compatible NVIDIA driver already running, `Verify.command` checks
