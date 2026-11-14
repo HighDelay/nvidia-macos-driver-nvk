@@ -8,3 +8,4 @@ tools/test_stage_package.py text eol=lf
 # Unified patch context includes space-only lines by definition.
 zink/mesa-zink-nvk.patch text eol=lf whitespace=-blank-at-eol
 video/nvenc-turing.patch text eol=lf whitespace=-blank-at-eol
+nvk/nvk-small-bar-memory.patch text eol=lf whitespace=-blank-at-eol

@@ -131,6 +131,7 @@ struct Device {
    bool swapchain{};
    bool private_copy_queue{};
    bool reuse_present_resources{}, profile_present{};
+   VkDeviceSize host_present_alignment{};
    std::atomic<bool> uncertain{};
    std::atomic<bool> closing{};
    std::recursive_mutex submit;
@@ -450,6 +451,55 @@ VkResult VKAPI_CALL device_extensions(VkPhysicalDevice physical, const char *lay
    return enumerate(all,count,out);
 }
 
+bool limited_bar_memory(const VkPhysicalDeviceMemoryProperties &memory) {
+   VkDeviceSize vram=0;
+   for(uint32_t h=0;h<memory.memoryHeapCount;h++)
+      if(memory.memoryHeaps[h].flags&VK_MEMORY_HEAP_DEVICE_LOCAL_BIT)
+         vram=std::max(vram,memory.memoryHeaps[h].size);
+   if(!vram)return false;
+   bool system_uploads=false;
+   for(uint32_t t=0;t<memory.memoryTypeCount;t++) {
+      const auto &type=memory.memoryTypes[t];
+      if(type.heapIndex>=memory.memoryHeapCount)continue;
+      const auto flags=type.propertyFlags;
+      if((flags&(VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT|VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT))==
+         (VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT|VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT) &&
+         memory.memoryHeaps[type.heapIndex].size>=vram)return false;
+      if(!(flags&VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT) &&
+         (flags&(VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT|VK_MEMORY_PROPERTY_HOST_COHERENT_BIT))==
+         (VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT|VK_MEMORY_PROPERTY_HOST_COHERENT_BIT))system_uploads=true;
+   }
+   return system_uploads;
+}
+
+void enable_host_present(const std::shared_ptr<Device> &d,std::vector<const char *> &extensions) {
+   // Full BAR keeps its original device extensions and VRAM import path. Only
+   // limited-BAR devices may recover a refused drawable import using its host
+   // pages, as Zink does. Pixels still travel directly from the GPU.
+   if(!limited_bar_memory(d->memory))return;
+   uint32_t count=0;
+   auto enumerate_extensions=IP(d->instance,EnumerateDeviceExtensionProperties);
+   if(enumerate_extensions(d->physical,nullptr,&count,nullptr)!=VK_SUCCESS)return;
+   std::vector<VkExtensionProperties> available(count);
+   if(enumerate_extensions(d->physical,nullptr,&count,available.data())!=VK_SUCCESS)return;
+   available.resize(count);
+   if(std::none_of(available.begin(),available.end(),[](const auto &e) {
+      return !strcmp(e.extensionName,VK_EXT_EXTERNAL_MEMORY_HOST_EXTENSION_NAME);
+   }))return;
+   auto properties=IP(d->instance,GetPhysicalDeviceProperties2);
+   if(!properties)properties=iproc<PFN_vkGetPhysicalDeviceProperties2>(d->instance->raw,"vkGetPhysicalDeviceProperties2KHR");
+   if(!properties)return;
+   VkPhysicalDeviceExternalMemoryHostPropertiesEXT host{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTERNAL_MEMORY_HOST_PROPERTIES_EXT};
+   VkPhysicalDeviceProperties2 all{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2};all.pNext=&host;
+   properties(d->physical,&all);
+   const auto alignment=host.minImportedHostPointerAlignment;
+   if(!alignment || alignment>SIZE_MAX || (alignment&(alignment-1)))return;
+   if(std::none_of(extensions.begin(),extensions.end(),[](auto name) {
+      return !strcmp(name,VK_EXT_EXTERNAL_MEMORY_HOST_EXTENSION_NAME);
+   }))extensions.push_back(VK_EXT_EXTERNAL_MEMORY_HOST_EXTENSION_NAME);
+   d->host_present_alignment=alignment;
+}
+
 VkResult VKAPI_CALL create_device(VkPhysicalDevice physical, const VkDeviceCreateInfo *info, const VkAllocationCallbacks *alloc, VkDevice *result) {
    auto instance = find(physicals,physical); if (!instance) return VK_ERROR_INITIALIZATION_FAILED;
    auto state = std::make_shared<Device>(); state->physical=physical; state->instance=instance;
@@ -500,6 +550,7 @@ VkResult VKAPI_CALL create_device(VkPhysicalDevice physical, const VkDeviceCreat
       }
       if (std::none_of(extensions.begin(),extensions.end(),[](auto name) { return !strcmp(name,VK_KHR_EXTERNAL_MEMORY_FD_EXTENSION_NAME); }))
          extensions.push_back(VK_KHR_EXTERNAL_MEMORY_FD_EXTENSION_NAME);
+      enable_host_present(state,extensions);
    }
    VkDeviceCreateInfo copy=*info;
    copy.enabledExtensionCount=static_cast<uint32_t>(extensions.size()); copy.ppEnabledExtensionNames=extensions.data();
@@ -781,6 +832,8 @@ struct Frame {
    VkFence fence{};
    uint64_t bytes{};
    size_t row{}, allocation_size{};
+   void *host_pointer{};
+   bool host_locked{};
    ~Frame() {
       auto d=dev;
       if (d->uncertain) return;
@@ -789,10 +842,44 @@ struct Frame {
       if (fence) DP(d,DestroyFence)(d->raw,fence,nullptr);
       if (buffer) DP(d,DestroyBuffer)(d->raw,buffer,nullptr);
       if (memory) DP(d,FreeMemory)(d->raw,memory,nullptr);
+      if (host_locked) IOSurfaceUnlock(surface,0,nullptr);
       if (surface) CFRelease(surface);
    }
 };
 std::vector<std::shared_ptr<Frame>> quarantine;
+
+VkResult import_host_frame(const std::shared_ptr<Frame> &frame,VkBufferCreateInfo buffer) {
+   auto d=frame->dev;
+   const size_t alignment=d->host_present_alignment;
+   auto host_properties=DP(d,GetMemoryHostPointerPropertiesEXT);
+   if(!alignment || !host_properties)return VK_ERROR_INVALID_EXTERNAL_HANDLE;
+   if(IOSurfaceLock(frame->surface,0,nullptr)!=kIOReturnSuccess)return VK_ERROR_INVALID_EXTERNAL_HANDLE;
+   frame->host_locked=true;
+   void *base=IOSurfaceGetBaseAddress(frame->surface);
+   if(!base || reinterpret_cast<uintptr_t>(base)%alignment)return VK_ERROR_INVALID_EXTERNAL_HANDLE;
+   DP(d,DestroyBuffer)(d->raw,frame->buffer,nullptr);frame->buffer=VK_NULL_HANDLE;
+   VkExternalMemoryBufferCreateInfo external{VK_STRUCTURE_TYPE_EXTERNAL_MEMORY_BUFFER_CREATE_INFO};
+   constexpr auto handle_type=VK_EXTERNAL_MEMORY_HANDLE_TYPE_HOST_ALLOCATION_BIT_EXT;
+   external.handleTypes=handle_type;buffer.pNext=&external;
+   VkResult r=DP(d,CreateBuffer)(d->raw,&buffer,nullptr,&frame->buffer);if(r!=VK_SUCCESS)return r;
+   VkMemoryRequirements requirements{};DP(d,GetBufferMemoryRequirements)(d->raw,frame->buffer,&requirements);
+   if(requirements.size>SIZE_MAX-(alignment-1))return VK_ERROR_OUT_OF_DEVICE_MEMORY;
+   const size_t bytes=(requirements.size+alignment-1)&~(alignment-1);
+   if(bytes>frame->allocation_size)return VK_ERROR_OUT_OF_DEVICE_MEMORY;
+   VkMemoryHostPointerPropertiesEXT properties{VK_STRUCTURE_TYPE_MEMORY_HOST_POINTER_PROPERTIES_EXT};
+   r=host_properties(d->raw,handle_type,base,&properties);if(r!=VK_SUCCESS)return r;
+   int type=memory_type(*d,requirements.memoryTypeBits&properties.memoryTypeBits,
+      VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT|VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+   if(type<0)return VK_ERROR_INVALID_EXTERNAL_HANDLE;
+   VkImportMemoryHostPointerInfoEXT host{VK_STRUCTURE_TYPE_IMPORT_MEMORY_HOST_POINTER_INFO_EXT};
+   host.handleType=handle_type;host.pHostPointer=base;
+   VkMemoryAllocateInfo allocation{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
+   allocation.pNext=&host;allocation.allocationSize=bytes;allocation.memoryTypeIndex=type;
+   r=DP(d,AllocateMemory)(d->raw,&allocation,nullptr,&frame->memory);
+   if(r==VK_SUCCESS)frame->host_pointer=base;
+   return r;
+}
+
 void publish_tag(IOSurfaceRef surface) {
    struct Tag { uint32_t magic,seed,generation; } tag{0x564d5634u,IOSurfaceGetSeed(surface),0};
    CFTypeRef old=IOSurfaceCopyValue(surface,CFSTR("NVMTLVramAt:p0"));
@@ -877,6 +964,11 @@ VkResult copy_frame(const std::shared_ptr<Chain> &c,uint32_t index,VkSemaphore h
       // Cached entries are parked only after successful fence completion.
       r=DP(d,ResetCommandPool)(d->raw,frame->pool,0);if(r!=VK_SUCCESS)return r;
       r=DP(d,ResetFences)(d->raw,1,&frame->fence);if(r!=VK_SUCCESS)return r;
+      if(frame->host_pointer) {
+         if(IOSurfaceLock(surface,0,nullptr)!=kIOReturnSuccess)return VK_ERROR_INVALID_EXTERNAL_HANDLE;
+         frame->host_locked=true;
+         if(IOSurfaceGetBaseAddress(surface)!=frame->host_pointer)return VK_ERROR_INVALID_EXTERNAL_HANDLE;
+      }
    } else {
       frame=std::make_shared<Frame>();frame->dev=d;
       frame->surface=(IOSurfaceRef)CFRetain(surface);frame->row=row;frame->allocation_size=size;
@@ -893,7 +985,11 @@ VkResult copy_frame(const std::shared_ptr<Chain> &c,uint32_t index,VkSemaphore h
       allocation.pNext=&imported;allocation.allocationSize=req.size;allocation.memoryTypeIndex=mt;
       Share share{3,IOSurfaceGetID(frame->surface),0,0,req.size};
       stage_import(&share);r=DP(d,AllocateMemory)(d->raw,&allocation,nullptr,&frame->memory);stage_import(nullptr);
-      if (r!=VK_SUCCESS) { close(imported.fd);import_failures++;return r; }
+      if (r!=VK_SUCCESS) {
+         close(imported.fd);import_failures++;
+         if(r!=VK_ERROR_INVALID_EXTERNAL_HANDLE || !d->host_present_alignment)return r;
+         r=import_host_frame(frame,buffer);if(r!=VK_SUCCESS)return r;
+      }
       r=DP(d,BindBufferMemory)(d->raw,frame->buffer,frame->memory,0);if (r!=VK_SUCCESS) return r;
       VkCommandPoolCreateInfo pool{VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO};pool.queueFamilyIndex=d->copy_family;
       r=DP(d,CreateCommandPool)(d->raw,&pool,nullptr,&frame->pool);if (r!=VK_SUCCESS) return r;
@@ -928,6 +1024,11 @@ VkResult copy_frame(const std::shared_ptr<Chain> &c,uint32_t index,VkSemaphore h
    VkBufferImageCopy region{};region.bufferRowLength=(uint32_t)(row/4);region.bufferImageHeight=c->extent.height;
    region.imageSubresource={VK_IMAGE_ASPECT_COLOR_BIT,0,0,1};region.imageExtent={c->extent.width,c->extent.height,1};
    DP(d,CmdCopyImageToBuffer)(frame->commands,c->images[index].raw,VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,frame->buffer,1,&region);
+   if(frame->host_locked) {
+      VkMemoryBarrier host{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
+      host.srcAccessMask=VK_ACCESS_TRANSFER_WRITE_BIT;host.dstAccessMask=VK_ACCESS_HOST_READ_BIT;
+      DP(d,CmdPipelineBarrier)(frame->commands,VK_PIPELINE_STAGE_TRANSFER_BIT,VK_PIPELINE_STAGE_HOST_BIT,0,1,&host,0,nullptr,0,nullptr);
+   }
    barrier.srcAccessMask=VK_ACCESS_TRANSFER_READ_BIT;barrier.dstAccessMask=0;
    barrier.oldLayout=VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;barrier.newLayout=VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
    DP(d,CmdPipelineBarrier)(frame->commands,VK_PIPELINE_STAGE_TRANSFER_BIT,VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,0,0,nullptr,0,nullptr,1,&barrier);
@@ -956,8 +1057,13 @@ VkResult copy_frame(const std::shared_ptr<Chain> &c,uint32_t index,VkSemaphore h
    }
    if (auto observer=present_observer.load()) observer(backend_gdpa,d->raw,d->copy_queue,frame->buffer,(uint32_t)row,c->extent.width,c->extent.height,d->copy_family);
    PresentTimer publication(d->profile_present,7);
-   if (surface_dirty(d->raw,IOSurfaceGetID(frame->surface),0)) return VK_ERROR_SURFACE_LOST_KHR;
-   publish_tag(frame->surface);
+   if(frame->host_locked) {
+      if(IOSurfaceUnlock(frame->surface,0,nullptr)!=kIOReturnSuccess)return VK_ERROR_SURFACE_LOST_KHR;
+      frame->host_locked=false;
+   } else {
+      if (surface_dirty(d->raw,IOSurfaceGetID(frame->surface),0)) return VK_ERROR_SURFACE_LOST_KHR;
+      publish_tag(frame->surface);
+   }
    [frame->drawable present];
    publication.finish();
    frame->drawable=nil;

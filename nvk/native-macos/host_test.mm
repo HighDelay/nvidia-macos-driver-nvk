@@ -1,4 +1,17 @@
+#import <IOSurface/IOSurface.h>
+#include <atomic>
+static std::atomic<int> surface_locks{},surface_unlocks{};
+static IOReturn tracked_surface_lock(IOSurfaceRef surface,IOSurfaceLockOptions options,uint32_t *seed) {
+   auto result=IOSurfaceLock(surface,options,seed);if(result==kIOReturnSuccess)surface_locks++;return result;
+}
+static IOReturn tracked_surface_unlock(IOSurfaceRef surface,IOSurfaceLockOptions options,uint32_t *seed) {
+   auto result=IOSurfaceUnlock(surface,options,seed);if(result==kIOReturnSuccess)surface_unlocks++;return result;
+}
+#define IOSurfaceLock tracked_surface_lock
+#define IOSurfaceUnlock tracked_surface_unlock
 #include "bridge.mm"
+#undef IOSurfaceLock
+#undef IOSurfaceUnlock
 #include <cassert>
 #include <future>
 
@@ -40,6 +53,10 @@ static HostBlock drawable_block,fence_block;
 static std::atomic<int> drawable_presented{},dirty_called{},native_released{};
 static std::atomic<int> native_created{},pool_resets{},fence_resets{};
 static std::atomic<VkResult> host_wait_result{VK_TIMEOUT},host_reset_result{VK_SUCCESS};
+static VkResult fd_import_result=VK_SUCCESS,host_import_result=VK_SUCCESS,host_bind_result=VK_SUCCESS;
+static int host_imports{},host_barriers{};
+static uint32_t host_memory_bits=1,host_pointer_bits=2;
+static VkDeviceSize host_requirement_bytes=256;
 @interface HostDrawable : NSObject
 @property(strong) HostTexture *texture;
 @end
@@ -53,16 +70,36 @@ static std::atomic<VkResult> host_wait_result{VK_TIMEOUT},host_reset_result{VK_S
 - (id)nextDrawable { drawable_block.wait();return self.drawable; }
 @end
 static VkResult host_buffer(VkDevice,const VkBufferCreateInfo *,const VkAllocationCallbacks *,VkBuffer *out) { native_created++;*out=(VkBuffer)(uintptr_t)71;return VK_SUCCESS; }
-static void host_requirements(VkDevice,VkBuffer,VkMemoryRequirements *out) { *out={256,64,1}; }
+static void host_requirements(VkDevice,VkBuffer,VkMemoryRequirements *out) { *out={host_requirement_bytes,64,host_memory_bits}; }
 static VkResult host_allocate(VkDevice,const VkMemoryAllocateInfo *info,const VkAllocationCallbacks *,VkDeviceMemory *out) {
-   native_created++;close(((const VkImportMemoryFdInfoKHR *)info->pNext)->fd);*out=(VkDeviceMemory)(uintptr_t)72;return VK_SUCCESS;
+   auto import=(const VkBaseInStructure *)info->pNext;
+   if(import->sType==VK_STRUCTURE_TYPE_IMPORT_MEMORY_FD_INFO_KHR) {
+      if(fd_import_result!=VK_SUCCESS)return fd_import_result;
+      close(((const VkImportMemoryFdInfoKHR *)import)->fd);
+   } else {
+      assert(import->sType==VK_STRUCTURE_TYPE_IMPORT_MEMORY_HOST_POINTER_INFO_EXT);
+      auto host=(const VkImportMemoryHostPointerInfoEXT *)import;
+      assert(host->handleType==VK_EXTERNAL_MEMORY_HANDLE_TYPE_HOST_ALLOCATION_BIT_EXT && host->pHostPointer);
+      assert(info->memoryTypeIndex==1 && surface_locks==surface_unlocks+1);host_imports++;
+      if(host_import_result!=VK_SUCCESS)return host_import_result;
+   }
+   native_created++;*out=(VkDeviceMemory)(uintptr_t)72;return VK_SUCCESS;
 }
-static VkResult host_bind(VkDevice,VkBuffer,VkDeviceMemory,VkDeviceSize) { return VK_SUCCESS; }
+static VkResult host_pointer_properties(VkDevice,VkExternalMemoryHandleTypeFlagBits type,const void *pointer,VkMemoryHostPointerPropertiesEXT *out) {
+   assert(type==VK_EXTERNAL_MEMORY_HANDLE_TYPE_HOST_ALLOCATION_BIT_EXT && pointer);out->memoryTypeBits=host_pointer_bits;return VK_SUCCESS;
+}
+static VkResult host_bind(VkDevice,VkBuffer,VkDeviceMemory,VkDeviceSize) { return host_bind_result; }
 static VkResult host_pool(VkDevice,const VkCommandPoolCreateInfo *,const VkAllocationCallbacks *,VkCommandPool *out) { native_created++;*out=(VkCommandPool)(uintptr_t)73;return VK_SUCCESS; }
 static VkResult host_commands(VkDevice,const VkCommandBufferAllocateInfo *,VkCommandBuffer *out) { *out=(VkCommandBuffer)(uintptr_t)74;return VK_SUCCESS; }
 static VkResult host_begin(VkCommandBuffer,const VkCommandBufferBeginInfo *) { return VK_SUCCESS; }
 static VkResult host_end(VkCommandBuffer) { return VK_SUCCESS; }
-static void host_barrier(VkCommandBuffer,VkPipelineStageFlags,VkPipelineStageFlags,VkDependencyFlags,uint32_t,const VkMemoryBarrier *,uint32_t,const VkBufferMemoryBarrier *,uint32_t,const VkImageMemoryBarrier *) {}
+static void host_barrier(VkCommandBuffer,VkPipelineStageFlags src,VkPipelineStageFlags dst,VkDependencyFlags,uint32_t count,const VkMemoryBarrier *barriers,uint32_t,const VkBufferMemoryBarrier *,uint32_t,const VkImageMemoryBarrier *) {
+   if(count) {
+      assert(count==1 && src==VK_PIPELINE_STAGE_TRANSFER_BIT && dst==VK_PIPELINE_STAGE_HOST_BIT);
+      assert(barriers->srcAccessMask==VK_ACCESS_TRANSFER_WRITE_BIT && barriers->dstAccessMask==VK_ACCESS_HOST_READ_BIT);
+      assert(surface_locks==surface_unlocks+1);host_barriers++;
+   }
+}
 static void host_copy(VkCommandBuffer,VkImage,VkImageLayout,VkBuffer,uint32_t,const VkBufferImageCopy *) {}
 static VkResult host_fence(VkDevice,const VkFenceCreateInfo *,const VkAllocationCallbacks *,VkFence *out) { native_created++;*out=(VkFence)(uintptr_t)75;return VK_SUCCESS; }
 static VkResult host_timeout(VkDevice,uint32_t,const VkFence *,VkBool32,uint64_t) { fence_block.wait();return host_wait_result; }
@@ -82,6 +119,7 @@ static PFN_vkVoidFunction host_proc(const char *name) {
    HOST(ResetCommandPool,host_reset_pool);HOST(ResetFences,host_reset_fences);HOST(DestroyImage,host_destroy_image);
    HOST(DestroyCommandPool,host_release_pool);HOST(DestroyFence,host_release_fence);
    HOST(DestroyBuffer,host_release_buffer);HOST(FreeMemory,host_release_memory);
+   HOST(GetMemoryHostPointerPropertiesEXT,host_pointer_properties);
 #undef HOST
    return nullptr;
 }
@@ -117,6 +155,14 @@ static PFN_vkVoidFunction fake_gdpa(VkDevice,const char *name) {
 }
 static void fake_properties(VkPhysicalDevice,VkPhysicalDeviceProperties *out) { *out={};strcpy(out->deviceName,"host fixture"); }
 static void fake_memory_properties(VkPhysicalDevice,VkPhysicalDeviceMemoryProperties *out) { *out={}; }
+static bool advertise_host_memory=false;
+static int host_property_queries{};
+static VkDeviceSize host_import_alignment=4096;
+static void fake_properties2(VkPhysicalDevice physical,VkPhysicalDeviceProperties2 *out) {
+   fake_properties(physical,&out->properties);host_property_queries++;
+   assert(out->pNext && ((VkBaseOutStructure *)out->pNext)->sType==VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTERNAL_MEMORY_HOST_PROPERTIES_EXT);
+   ((VkPhysicalDeviceExternalMemoryHostPropertiesEXT *)out->pNext)->minImportedHostPointerAlignment=host_import_alignment;
+}
 static VkResult fake_create_device(VkPhysicalDevice,const VkDeviceCreateInfo *,const VkAllocationCallbacks *,VkDevice *out) {
    *out=(VkDevice)(uintptr_t)0x100;return VK_SUCCESS;
 }
@@ -125,13 +171,16 @@ static void fake_families(VkPhysicalDevice,uint32_t *count,VkQueueFamilyProperti
    *count=1;
 }
 static VkResult fake_device_extensions(VkPhysicalDevice,const char *,uint32_t *count,VkExtensionProperties *out) {
-   return enumerate(std::vector<VkExtensionProperties>{extension("VK_EXT_hdr_metadata",1),
+   std::vector<VkExtensionProperties> available{extension("VK_EXT_hdr_metadata",1),
       extension("VK_KHR_external_memory_fd",1),extension("VK_KHR_external_semaphore_fd",1),
       extension("VK_KHR_external_fence_fd",1),extension("VK_EXT_transform_feedback",1),
-      extension("VK_KHR_swapchain",1)},count,out);
+      extension("VK_KHR_swapchain",1)};
+   if(advertise_host_memory)available.push_back(extension(VK_EXT_EXTERNAL_MEMORY_HOST_EXTENSION_NAME,1));
+   return enumerate(available,count,out);
 }
 static PFN_vkVoidFunction fake_gipa(VkInstance,const char *name) {
    if (!strcmp(name,"vkGetPhysicalDeviceProperties")) return (PFN_vkVoidFunction)fake_properties;
+   if (!strcmp(name,"vkGetPhysicalDeviceProperties2")) return (PFN_vkVoidFunction)fake_properties2;
    if (!strcmp(name,"vkGetPhysicalDeviceMemoryProperties")) return (PFN_vkVoidFunction)fake_memory_properties;
    if (!strcmp(name,"vkCreateDevice")) return (PFN_vkVoidFunction)fake_create_device;
    if (!strcmp(name,"vkGetDeviceProcAddr")) return (PFN_vkVoidFunction)fake_gdpa;
@@ -205,6 +254,38 @@ int main() { @autoreleasepool {
    auto s=std::make_shared<Surface>();
    VkSurfaceKHR surface=(VkSurfaceKHR)(uintptr_t)3;
    physicals[p]=i;surfaces[surface]=s;
+   {
+      auto topology=std::make_shared<Device>();topology->physical=p;topology->instance=i;
+      auto &m=topology->memory;
+      constexpr VkDeviceSize gib=1ull<<30;
+      m.memoryHeapCount=2;m.memoryHeaps[0]={8*gib,VK_MEMORY_HEAP_DEVICE_LOCAL_BIT};m.memoryHeaps[1]={12*gib,0};
+      m.memoryTypeCount=3;m.memoryTypes[0]={VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,0};
+      m.memoryTypes[1]={VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT|VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT|VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,0};
+      m.memoryTypes[2]={VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT|VK_MEMORY_PROPERTY_HOST_COHERENT_BIT|VK_MEMORY_PROPERTY_HOST_CACHED_BIT,1};
+      std::vector<const char *> extensions{VK_KHR_EXTERNAL_MEMORY_FD_EXTENSION_NAME};
+      advertise_host_memory=true;const int before=host_property_queries;
+      assert(!limited_bar_memory(m));enable_host_present(topology,extensions);
+      assert(!topology->host_present_alignment && host_property_queries==before && extensions.size()==1);
+      // The old limited-BAR layout has a small visible heap; the new one has
+      // no visible VRAM type. Both permit the same presentation recovery.
+      m.memoryHeapCount=3;m.memoryHeaps[2]={256ull<<20,VK_MEMORY_HEAP_DEVICE_LOCAL_BIT};m.memoryTypes[1].heapIndex=2;
+      assert(limited_bar_memory(m));enable_host_present(topology,extensions);
+      assert(topology->host_present_alignment==4096 && extensions.size()==2);
+      enable_host_present(topology,extensions);assert(extensions.size()==2);
+      m.memoryTypes[1]=m.memoryTypes[2];m.memoryTypeCount=2;m.memoryHeapCount=2;
+      assert(limited_bar_memory(m));
+      topology->host_present_alignment=0;extensions.resize(1);advertise_host_memory=false;
+      enable_host_present(topology,extensions);assert(!topology->host_present_alignment && extensions.size()==1);
+      advertise_host_memory=true;
+      for(auto bad:{0ull,3ull}) {
+         host_import_alignment=bad;enable_host_present(topology,extensions);
+         assert(!topology->host_present_alignment && extensions.size()==1);
+      }
+      host_import_alignment=4096;enable_host_present(topology,extensions);assert(topology->host_present_alignment==4096);
+      m.memoryHeaps[0].size=0;assert(!limited_bar_memory(m));
+      advertise_host_memory=false;
+      puts("PASS limited-BAR host recovery capability checks; full BAR leaves extensions and queries unchanged");
+   }
    {
       float priority=1;
       VkDeviceQueueCreateInfo queueInfo{VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO};
@@ -336,6 +417,61 @@ int main() { @autoreleasepool {
    host_reset_result=VK_SUCCESS;c->images[0].acquired=true;
    assert(queue_present(q->raw,&present)==VK_SUCCESS);
    puts("PASS cached-resource reset failure releases idle resources and preserves handoff/retry rules");
+   {
+      release_images(c);c->images[0].raw=(VkImage)(uintptr_t)76;
+      d->memory.memoryTypeCount=2;
+      d->memory.memoryTypes[1].propertyFlags=VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT|VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
+      host_memory_bits=3;fd_import_result=VK_ERROR_INVALID_EXTERNAL_HANDLE;
+      bool consumed=false;
+      int imports_before=host_imports,locks_before=surface_locks;
+      // Full BAR, unsupported host import and unrelated allocation errors
+      // keep the original failure; only the precise limited-BAR refusal retries.
+      assert(copy_frame(c,0,VK_NULL_HANDLE,consumed)==VK_ERROR_INVALID_EXTERNAL_HANDLE);
+      assert(host_imports==imports_before && surface_locks==locks_before);
+      d->host_present_alignment=64;fd_import_result=VK_ERROR_OUT_OF_DEVICE_MEMORY;
+      assert(copy_frame(c,0,VK_NULL_HANDLE,consumed)==VK_ERROR_OUT_OF_DEVICE_MEMORY);
+      assert(host_imports==imports_before && surface_locks==locks_before);
+      fd_import_result=VK_ERROR_INVALID_EXTERNAL_HANDLE;
+      const int dirty_before=dirty_called,presented_before=drawable_presented,barriers_before=host_barriers;
+      const uint32_t seed_before=IOSurfaceGetSeed(cpu);
+      assert(copy_frame(c,0,VK_NULL_HANDLE,consumed)==VK_SUCCESS);
+      assert(host_imports==imports_before+1 && host_barriers==barriers_before+1);
+      assert(surface_locks==locks_before+1 && surface_unlocks==surface_locks);
+      assert(dirty_called==dirty_before && drawable_presented==presented_before+1 && IOSurfaceGetSeed(cpu)!=seed_before);
+      auto cached=*std::find_if(c->present_cache.begin(),c->present_cache.end(),[](auto &entry){return bool(entry);});
+      assert(cached->host_pointer && !cached->host_locked && !cached->drawable);cached.reset();
+      assert(copy_frame(c,0,VK_NULL_HANDLE,consumed)==VK_SUCCESS);
+      assert(host_imports==imports_before+1 && host_barriers==barriers_before+2);
+      assert(surface_locks==locks_before+2 && surface_unlocks==surface_locks && dirty_called==dirty_before);
+      release_images(c);c->images[0].raw=(VkImage)(uintptr_t)76;d->reuse_present_resources=false;
+      for(auto failure:{VK_ERROR_OUT_OF_HOST_MEMORY,VK_ERROR_OUT_OF_DEVICE_MEMORY}) {
+         host_import_result=failure;const int before=native_released;
+         assert(copy_frame(c,0,VK_NULL_HANDLE,consumed)==failure);
+         assert(surface_locks==surface_unlocks && native_released==before+2);
+      }
+      host_import_result=VK_SUCCESS;host_bind_result=VK_ERROR_OUT_OF_DEVICE_MEMORY;
+      const int before_bind=native_released;
+      assert(copy_frame(c,0,VK_NULL_HANDLE,consumed)==VK_ERROR_OUT_OF_DEVICE_MEMORY);
+      assert(surface_locks==surface_unlocks && native_released==before_bind+3);
+      host_bind_result=VK_SUCCESS;host_pointer_bits=0;
+      assert(copy_frame(c,0,VK_NULL_HANDLE,consumed)==VK_ERROR_INVALID_EXTERNAL_HANDLE);
+      assert(surface_locks==surface_unlocks);host_pointer_bits=2;
+      host_requirement_bytes=UINT64_MAX;
+      assert(copy_frame(c,0,VK_NULL_HANDLE,consumed)==VK_ERROR_OUT_OF_DEVICE_MEMORY);
+      assert(surface_locks==surface_unlocks);host_requirement_bytes=256;
+      const int before_timeout=native_released,before_unlock=surface_unlocks;
+      host_wait_result=VK_TIMEOUT;
+      assert(copy_frame(c,0,VK_NULL_HANDLE,consumed)==VK_ERROR_DEVICE_LOST);
+      assert(d->uncertain && quarantine.size()==1 && native_released==before_timeout+1);
+      assert(surface_locks==surface_unlocks+1 && surface_unlocks==before_unlock);
+      assert(quarantine.back()->host_locked && quarantine.back()->host_pointer);
+      assert(dirty_called==dirty_before && drawable_presented==presented_before+2);
+      // Only the fixture's later proof of completion permits releasing pages.
+      d->uncertain=false;quarantine.clear();assert(surface_locks==surface_unlocks);
+      d->host_present_alignment=0;d->reuse_present_resources=true;host_memory_bits=1;
+      fd_import_result=VK_SUCCESS;host_wait_result=VK_SUCCESS;
+      puts("PASS limited-BAR host GPU-copy recovery, publication, cache re-lock, failed-import cleanup and timeout page quarantine");
+   }
    // The actual bridge worker must release submit during both kinds of wait.
    d->presenter=std::make_unique<nvkbridge::PresentWorker>([device=d.get()](std::exception_ptr){fail_presenter(device);});
    drawable_block.enable();c->images[0].acquired=true;c->images[1].acquired=true;

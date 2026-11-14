@@ -73,6 +73,10 @@ out/native-vulkan-smoke /absolute/runtime/lib/libnvk_minecraft.dylib /absolute/l
 
 Set `NVKBRIDGE_VERIFY_PIXELS=1` only for the diagnostic readback test. Its cost is not representative of gameplay.
 
+For limited-BAR upload placement and drawable-import recovery, see the
+[memory and presentation checks](../../docs/NATIVE-NVK-SMALL-BAR.md). Full-BAR
+memory placement and the original drawable import path are preserved.
+
 To test the standard Vulkan loader route, set `VK_DRIVER_FILES` to the runtime's
 `nvk_bridge_icd.json`, pass `libvulkan.1.dylib` as the smoke entry, and set
 `NVKBRIDGE_TEST_FRONTEND` to the absolute frontend path. The probe requires that

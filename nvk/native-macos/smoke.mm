@@ -78,6 +78,8 @@ int main(int argc,char **argv) { @autoreleasepool { try {
    require(argc>=2,"Usage: smoke entry.dylib [SDL3.dylib [images=3 [frames=90]]]");
    bool windowed=argc>=3;
    void *entry=dlopen(argv[1],RTLD_NOW|RTLD_LOCAL|RTLD_FIRST);require(entry!=nullptr,dlerror()?:"entry load");
+   const bool force_host_present=getenv("NVKBRIDGE_TEST_HOST_PRESENT")!=nullptr;
+   if(force_host_present)sym<void(*)()>(entry,"nvkbridgeTestHostPresent")();
    auto gipa=sym<PFN_vkGetInstanceProcAddr>(entry,"vkGetInstanceProcAddr");
    auto create=(PFN_vkCreateInstance)gipa(nullptr,"vkCreateInstance");require(create!=nullptr,"global create");
    auto enumerate=(PFN_vkEnumerateInstanceExtensionProperties)gipa(nullptr,"vkEnumerateInstanceExtensionProperties");
@@ -236,7 +238,8 @@ int main(int argc,char **argv) { @autoreleasepool { try {
    check(DeviceWaitIdle(device),"final idle");DestroySwapchainKHR(device,chain,nullptr);
    uint64_t stats[7]{};sym<void(*)(uint64_t *)>(test_entry,"nvkbridgeGetStats")(stats);
    printf("STATS copies=%llu bytes=%llu import_failures=%llu cpu_readback=%llu cpu_upload=%llu\n",
-      stats[0],stats[1],stats[4],stats[5],stats[6]);require(stats[0]==frames && stats[4]==0 && !stats[5] && !stats[6],"copy accounting");
+      stats[0],stats[1],stats[4],stats[5],stats[6]);require(stats[0]==frames && stats[4]<=frames && !stats[5] && !stats[6],"copy accounting");
+   if(force_host_present)require(stats[4]>0,"refused VRAM imports must recover through host pages");
    if(auto present_stats=(void(*)(uint64_t *))dlsym(test_entry,"nvkbridgeGetPresentStats")) {
       uint64_t detail[16]{};present_stats(detail);
       printf("PRESENT_STATS frames=%llu total_ns=%llu drawable_ns=%llu prepare_ns=%llu record_ns=%llu submit_ns=%llu fence_ns=%llu publish_ns=%llu cleanup_ns=%llu created=%llu hits=%llu evicted=%llu errors=%llu bytes=%llu lock_ns=%llu\n",

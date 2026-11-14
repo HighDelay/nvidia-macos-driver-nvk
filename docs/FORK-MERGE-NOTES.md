@@ -1,5 +1,26 @@
 # Retained fork changes for upstream merges
 
+## Native NVK limited-BAR mapped memory, 2026-11-14
+
+Preserve the [native mapped-memory repair](NATIVE-NVK-SMALL-BAR.md). On Darwin,
+expose host-visible device-local VRAM only when BAR1 covers VRAM; limited-BAR
+devices use the coherent system-memory type for CPU uploads. Do not advertise
+an unused BAR heap. Preserve the original memory layouts and placement for
+full-BAR devices, device-only rendering memory, non-Darwin backends and the
+GPU-copy presentation path. Keep the patch in the matched `2.8` release chain,
+the actual-initializer topology comparison and the LWJGL/VMA GPU readback test.
+Physical small-BAR and full-BAR application results must remain separately stated.
+
+Retain the limited-BAR drawable fallback for exact invalid-external-handle
+refusals: GPU-copy into imported coherent IOSurface host pages, with checked
+alignment/size, transfer visibility, lock/seed publication, cache re-lock and
+timeout quarantine. Full-BAR devices skip its capability query and extension
+addition and keep the original import/publication path. Preserve both the
+sanitizer lifecycle fixtures and the real GPU forced-import pixel/resize test.
+Minecraft startup, world rendering and resize were user-confirmed on the
+physical 256 MiB BAR1 desktop after restarting the launcher. This does not
+qualify the complete staged package or replace a physical full-BAR rerun.
+
 ## Modern upstream 3.0 integration, 2026-11-14
 
 The merge of `87e524ab36f12d17c04626d6cf7fc3bde1cc63e4` uses

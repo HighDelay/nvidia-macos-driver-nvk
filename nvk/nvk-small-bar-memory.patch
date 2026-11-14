@@ -1,0 +1,38 @@
+--- a/src/nouveau/vulkan/nvk_physical_device.c
++++ b/src/nouveau/vulkan/nvk_physical_device.c
+@@ -1697,6 +1697,17 @@
+    }
+ 
+    if (pdev->info.vram_size_B > 0) {
++      bool has_mappable_vram = pdev->info.cls_eng3d >= MAXWELL_A;
++#ifdef __APPLE__
++      /* A partial BAR1 aperture is shared with the display driver. Allocating
++       * VRAM does not reserve space for a later CPU map, so a host-visible BAR
++       * type can fail at vkMapMemory despite available VRAM. Use the coherent
++       * system-memory type for uploads on these devices. Full-BAR placement
++       * and device-only VRAM retain their existing behavior.
++       */
++      if (pdev->info.bar_size_B < pdev->info.vram_size_B)
++         has_mappable_vram = false;
++#endif
+       uint32_t vram_heap_idx = pdev->mem_heap_count++;
+       uint32_t bar_heap_idx = vram_heap_idx;
+       pdev->mem_heaps[vram_heap_idx] = (struct nvk_memory_heap) {
+@@ -1706,7 +1717,7 @@
+ 
+       if (pdev->info.bar_size_B > 0 &&
+           pdev->info.bar_size_B < pdev->info.vram_size_B &&
+-          pdev->info.cls_eng3d >= MAXWELL_A) {
++          has_mappable_vram) {
+          bar_heap_idx = pdev->mem_heap_count++;
+          pdev->mem_heaps[bar_heap_idx] = (struct nvk_memory_heap) {
+             .size = pdev->info.bar_size_B,
+@@ -1723,7 +1734,7 @@
+          .heapIndex = vram_heap_idx,
+       };
+ 
+-      if (pdev->info.cls_eng3d >= MAXWELL_A) {
++      if (has_mappable_vram) {
+          pdev->mem_types[pdev->mem_type_count++] = (VkMemoryType) {
+             .propertyFlags = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT |
+                              VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |

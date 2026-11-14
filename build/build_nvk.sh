@@ -45,7 +45,7 @@ case $REL in
   2.9) FIXES=$NVK/nvk-fixes-after-def16.patch
        CHAIN="nvk-macos @FIXES nvk-620-kernel nvk-recycle nvk-slab nvk-slabdef nvk-hubfix nvk-perf-boost-burst nvk-rated-tdp nvk-gps-maxpower nvk-metal-wsi nvk-card-select hwrt/ttu-nak hwrt/ttu-rq curves/curves hwrt/wide nvk-warnings nvk-unbound-stage nvk-diag-nofollow" ;;
   2.8) FIXES=$NVK/release-2.8/nvk-fixes-after-def16.patch
-       CHAIN="nvk-macos @FIXES nvk-620-kernel nvk-recycle nvk-slab nvk-slabdef nvk-warnings nvk-macos-frameworks nvk-stream-uncached" ;;
+       CHAIN="nvk-macos @FIXES nvk-620-kernel nvk-recycle nvk-slab nvk-slabdef nvk-warnings nvk-macos-frameworks nvk-small-bar-memory nvk-stream-uncached" ;;
   *) echo "STOP: release must be 2.9 or 2.8"; exit 2 ;;
 esac
 
