@@ -1,5 +1,21 @@
 # Retained fork changes for upstream merges
 
+## Native NVK D3D12 descriptor sets, 2026-11-14
+
+Keep the matched vkd3d-nvk `3.1-nvk.2` pair, source patch, licenses and build
+provenance in the driver-owned Wine provider. The patch gates descriptor sets
+on both `VK_DRIVER_ID_MESA_NVK` and Wine's Darwin host before device creation;
+other drivers/hosts retain their existing paths. Preserve the upstream
+`skip_driver_workarounds` diagnostic opt-out and explicit extension disabling.
+The DXVK pair and launcher contract remain unchanged. Review the
+[VKD3D notes](https://github.com/HighDelay/vkd3d-nvk/blob/master/docs/NATIVE-NVK.md)
+before changing the binding policy or replacing the source-identified pair.
+
+The user confirmed that the descriptor-set configuration trial restores ZZZ's
+missing player character. The compiled pair passed automatic default/opt-out,
+DXIL compute/readback, rendering, presentation and resize checks. Full staged
+package and compiled-pair game testing remain pending; publication stays held.
+
 ## Native NVK limited-BAR mapped memory, 2026-11-14
 
 Preserve the [native mapped-memory repair](NATIVE-NVK-SMALL-BAR.md). On Darwin,

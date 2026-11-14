@@ -23,6 +23,9 @@ CRITICAL = (
 VKD3D_VERSION = "3.1"
 VKD3D_COMMIT = "4522cc1a8b1347f1ab1b0f7b14a23ed9444d95d1"
 VKD3D_ARCHIVE_SHA256 = "b85ea8219b71093a3924913dd7aae6172333dc0c069983ed510816d67f02120b"
+VKD3D_NVK_VERSION = "3.1-nvk.2"
+VKD3D_NVK_COMMIT = "495c43e17029bd12b70be0b76d09ef8529bf8264"
+VKD3D_NVK_ARCHIVE_SHA256 = "b2943e7391a0174ff68a73338577b8f943e2810fbb64fa74adf5bd16153b0f5d"
 NVAPI_COMMIT = "f9fdf268e888d17ae9875a4f01908164ff05f740"
 NVAPI_ARCHIVE_SHA256 = "60c284223530d643c446c263f1e1a96c6de7b5ff21796219646da734d97a70d6"
 NGX_ARCHIVE_SHA256 = "c210d0f81b2cc80be65192a56135ce22ee3cb46ab2eb22eb520ee78e6ad9c13f"
@@ -74,6 +77,8 @@ def validate_frontend(frontend, base_renderer, renderer_source=None):
 
 
 def add_vkd3d(root, archive, source):
+    if digest(archive) == VKD3D_NVK_ARCHIVE_SHA256:
+        return add_vkd3d_nvk(root, archive, source)
     if digest(archive) != VKD3D_ARCHIVE_SHA256:
         raise ValueError("Unrecognized vkd3d-proton release archive")
     revision = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=source, text=True).strip()
@@ -105,6 +110,64 @@ def add_vkd3d(root, archive, source):
     (root / "VKD3D-BUILD.json").write_text(json.dumps(record, indent=2) + "\n")
     return {"version": VKD3D_VERSION, "source_revision": revision, "modified": False,
             "archive_sha256": VKD3D_ARCHIVE_SHA256, "build_record": "VKD3D-BUILD.json"}, paths + ["VKD3D-BUILD.json"]
+
+
+def add_vkd3d_nvk(root, archive, source):
+    """Accept only the pinned matched fork build, including its runtime patch."""
+    if digest(archive) != VKD3D_NVK_ARCHIVE_SHA256:
+        raise ValueError("Unrecognized native-NVK vkd3d archive")
+    revision = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=source, text=True).strip()
+    if subprocess.check_output(["git", "status", "--porcelain", "--untracked-files=no"], cwd=source, text=True).strip():
+        raise ValueError("Use the clean matching vkd3d-nvk source")
+    prefix = "vkd3d-nvk-" + VKD3D_NVK_VERSION + "/"
+    with tarfile.open(archive) as package:
+        def read(name):
+            member = package.getmember(prefix + name)
+            if not member.isfile() or member.size > 64 * 1024 * 1024:
+                raise ValueError("Invalid vkd3d-nvk archive entry: " + name)
+            with package.extractfile(member) as stream:
+                return stream.read()
+        metadata = json.loads(read("BUILD.json"))
+        if (metadata.get("version") != VKD3D_NVK_VERSION
+                or metadata.get("packaging_revision") != revision
+                or metadata.get("runtime_source_revision") != VKD3D_NVK_COMMIT
+                or metadata.get("upstream_revision") != VKD3D_COMMIT
+                or metadata.get("runtime_modified") is not True):
+            raise ValueError("Native-NVK vkd3d source/build identity mismatch")
+        files = {}
+        entries = {"x64/" + name: "vkd3d/x64/" + name for name in ("d3d12.dll", "d3d12core.dll")}
+        entries.update({name: "LICENSES/vkd3d-proton-" + name + ".txt"
+                        for name in ("LICENSE", "COPYING", "AUTHORS")})
+        entries["source-changes.patch"] = "vkd3d/source-changes.patch"
+        for original, relative in entries.items():
+            data = read(original)
+            if hashlib.sha256(data).hexdigest() != metadata["files"].get(original):
+                raise ValueError("Native-NVK vkd3d artifact hash mismatch: " + original)
+            if original in ("LICENSE", "COPYING", "AUTHORS") and data != (source / original).read_bytes():
+                raise ValueError("Native-NVK vkd3d license/source mismatch")
+            if original.endswith(".dll"):
+                offset = int.from_bytes(data[60:64], "little")
+                if data[:2] != b"MZ" or data[offset:offset+6] != b"PE\0\0\x64\x86":
+                    raise ValueError("Expected an x64 vkd3d DLL")
+                if metadata["build"]["files"].get(original) != hashlib.sha256(data).hexdigest():
+                    raise ValueError("Native-NVK vkd3d compiler output mismatch")
+            target = root / relative
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(data)
+            target.chmod(0o755 if original.endswith(".dll") else 0o644)
+            files[relative] = digest(target)
+    patch = subprocess.check_output(["git", "diff", "--binary", VKD3D_COMMIT,
+        VKD3D_NVK_COMMIT, "--", "libs", "include", "khronos", "subprojects", "meson.build", "meson_options.txt"], cwd=source)
+    if hashlib.sha256(patch).hexdigest() != files["vkd3d/source-changes.patch"]:
+        raise ValueError("Native-NVK vkd3d runtime patch differs from source")
+    record = {"version": VKD3D_VERSION, "fork_version": VKD3D_NVK_VERSION,
+              "source_revision": VKD3D_NVK_COMMIT, "upstream_revision": VKD3D_COMMIT,
+              "modified": True, "source_url": "https://github.com/HighDelay/vkd3d-nvk/tree/" + VKD3D_NVK_COMMIT,
+              "archive_sha256": VKD3D_NVK_ARCHIVE_SHA256, "files": files, "build": metadata["build"],
+              "binding_policy": "Descriptor sets for NVK on Wine Darwin; other drivers/hosts unchanged"}
+    (root / "VKD3D-BUILD.json").write_text(json.dumps(record, indent=2) + "\n")
+    return {key: record[key] for key in ("version", "fork_version", "source_revision", "upstream_revision", "modified", "archive_sha256", "binding_policy")} | {
+        "build_record": "VKD3D-BUILD.json"}, list(files) + ["VKD3D-BUILD.json"]
 
 
 def add_dlss(root, nvapi_archive, nvapi_source, ngx_archive):
@@ -282,7 +345,8 @@ def build(base, output, vkd3d_archive=None, vkd3d_source=None, frontend=None,
             "source_build_sha256": digest(base / "BUILD.json"),
             "source_files": {name: digest(REPO / name) for name in
                              ("nvk/wine-macos/setup.mm", "nvk/wine-macos/provider.py", "nvk/wine-macos/INSTALL.md")},
-            "commands": commands, "files": files,
+            "commands": [[part.replace(str(REPO), "$SOURCE").replace(str(root), "$PROVIDER")
+                          for part in command] for command in commands], "files": files,
         }
         if renderer_update:
             record["renderer_update"] = renderer_update
@@ -302,8 +366,8 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--base", type=Path, required=True, help="validated full Wine/NVK runtime with repaired DXVK")
     parser.add_argument("--output", type=Path, required=True, help="new compact provider directory")
-    parser.add_argument("--vkd3d-archive", type=Path, help="optional pinned vkd3d-proton 3.1 release archive")
-    parser.add_argument("--vkd3d-source", type=Path, help="matching clean upstream source for license/provenance records")
+    parser.add_argument("--vkd3d-archive", type=Path, help="optional pinned upstream or native-NVK vkd3d release archive")
+    parser.add_argument("--vkd3d-source", type=Path, help="matching clean source for license/provenance records")
     parser.add_argument("--frontend", type=Path, help="optional Wine frontend build using the same renderer")
     parser.add_argument("--renderer-source", type=Path, help="explicit verified upstream renderer for a frontend/backend upgrade")
     parser.add_argument("--nvapi-archive", type=Path, help="optional pinned DXVK-NVAPI 0.9.2 archive")

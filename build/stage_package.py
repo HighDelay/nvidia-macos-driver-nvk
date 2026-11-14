@@ -308,6 +308,10 @@ def validate_wine_runtime(root, checker):
         required.update({"vkd3d/x64/d3d12.dll", "vkd3d/x64/d3d12core.dll", "VKD3D-BUILD.json",
                          "LICENSES/vkd3d-proton-LICENSE.txt", "LICENSES/vkd3d-proton-COPYING.txt",
                          "LICENSES/vkd3d-proton-AUTHORS.txt"})
+        if fields["vkd3d"].get("modified"):
+            require(fields["vkd3d"].get("fork_version") == "3.1-nvk.2",
+                    "unexpected native-NVK vkd3d fork build")
+            required.add("vkd3d/source-changes.patch")
     if fields.get("frontend_build") is not None:
         require(fields["frontend_build"] == "FRONTEND-BUILD.json", "unexpected frontend provenance record")
         required.add("FRONTEND-BUILD.json")

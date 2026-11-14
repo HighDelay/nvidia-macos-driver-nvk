@@ -237,6 +237,14 @@ YAAGL route uses `-use-d3d12` and removes `-force-d3d11`. These generic commands
 supply graphics components; they do not replace a game's required launcher,
 patches or other setup. Ray tracing is disabled for this tested configuration.
 
+Providers containing vkd3d-nvk `3.1-nvk.2` select descriptor sets automatically
+for NVK on macOS. This avoids the missing ZZZ player character seen with
+descriptor buffers; no extra environment variable or YAAGL update is needed.
+Other drivers and Wine hosts retain their existing binding path. The
+`skip_driver_workarounds` diagnostic option bypasses this policy and upstream's
+other driver workarounds; keep it unset for normal play. The patched pair is
+part of the locally staged driver candidate, pending complete package testing.
+
 ### Optional DLSS Super Resolution
 
 The provider includes the unmodified NVIDIA Wine NGX pair (`nvngx.dll` and

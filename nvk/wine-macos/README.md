@@ -120,6 +120,15 @@ shaders, a 1,024-word readback, fences, 120 presentations, rendered-pixel checks
 and resize. The user confirmed ZZZ world, character and UI rendering on RTX
 2060 SUPER / Tahoe 26.7.1 / YAAGL Wine 11.0-1. D3D11 regression probes passed.
 
+The staged provider adds vkd3d-nvk `3.1-nvk.2`: NVK on Wine's macOS host uses
+descriptor sets automatically. The descriptor-buffer route could hide ZZZ's
+player character while NPCs, scenery and its shadow remained visible; the
+descriptor-set configuration trial restored it, confirmed by the user.
+The compiled pair passed its automatic default, diagnostic opt-out, compute,
+rendered-pixel, 120-frame presentation and resize checks. Full package testing
+and a game rerun with the compiled pair remain pending. The existing DXVK pair
+and YAAGL are unchanged. See the [VKD3D fork notes](https://github.com/HighDelay/vkd3d-nvk/blob/master/docs/NATIVE-NVK.md).
+
 Optional DLSS support supplies the unmodified NVIDIA Wine NGX pair and
 DXVK-NVAPI. The game supplies its original `nvngx_dlss.dll`. A real DLSS SR
 probe evaluated three 320×180 → 640×360 frames and checked 4,680 colour values
