@@ -188,29 +188,31 @@ than using that emulated vendor alone to identify the rendering GPU.
 
 The source is in this driver repository. YAAGL integration is in
 [YAAGL NVK](https://github.com/HighDelay/yaagl-nvk). DXVK and Wine
-source are pinned as dependencies. Wine's binary code is unchanged. DXVK 3.1.1
-needs the local shared-resource fallback repair below for ZZZ startup. Compiled
-runtime archives belong in release assets.
+sources are pinned as dependencies. Wine's binary code is unchanged. DXVK and
+VKD3D repairs are maintained in their component forks; the driver imports their
+verified packages. Compiled runtime archives belong in release assets.
 
 YAAGL release archives contain neither Wine nor NVK/DXVK. They require the
 driver's installed provider and download only the pinned Wine build on setup.
 Updating the driver's matched pair and manifests updates the pair YAAGL installs;
 there is no second DXVK release pin in the launcher.
 
-The build needs Xcode command line tools, Python 3.12 or newer, Vulkan headers,
-the matching private NVK renderer, the exact vendor archives below, and their
-license/source records. Use an output directory that does not already exist.
+For a fresh developer bundle, the build needs Xcode command line tools, Python
+3.12 or newer, Vulkan headers, the matching private NVK renderer, the pinned Wine
+archive and repaired DXVK fork package below, and their license/source records.
+Use an output directory that does not already exist. Normal driver packaging
+reuses a validated compact provider as described in the next section.
 
 ```sh
 python3 nvk/wine-macos/package.py \
-  --output /absolute/new/nvk-wine-runtime \
-  --renderer /absolute/minecraft-runtime/lib/libnvk_renderer.dylib \
-  --headers /absolute/Vulkan-Headers/include \
-  --wine-archive /absolute/wine-crossover-11.0-1-osx64-signed.tar.xz \
-  --dxvk-archive /absolute/dxvk-3.1.1.tar.gz \
-  --dxvk-source /absolute/dxvk-v3.1.1 \
-  --mesa-license /absolute/Mesa-license.rst \
-  --wine-cert-fragment /absolute/yaagl-wine-cert.inf.fragment
+  --output out/developer-wine-runtime \
+  --renderer inputs/minecraft-runtime/lib/libnvk_renderer.dylib \
+  --headers inputs/Vulkan-Headers/include \
+  --wine-archive inputs/wine-crossover-11.0-1-osx64-signed.tar.xz \
+  --dxvk-archive inputs/dxvk-nvk-3.1.1-1-x64.tar.gz \
+  --dxvk-source inputs/dxvk-nvk \
+  --mesa-license inputs/Mesa-license.rst \
+  --wine-cert-fragment inputs/yaagl-wine-cert.inf.fragment
 ```
 
 For YAAGL, the last argument is the existing launcher's Wine INF certificate
@@ -222,10 +224,10 @@ The frontend alone can be built with `build.py --output ... --renderer ...
 | Dependency | Pinned identity |
 |---|---|
 | Wine archive | YAAGL `wine-crossover-11.0-1-signed`, SHA-256 `89fa7e90fb626523a90d5867a03c6be785d017176739c6320a3b86c7838c3a35` |
-| DXVK | v3.1.1, commit `b1a1c99ab52b687cf950d62c88bc2fa316b41663` |
-| DXVK archive | SHA-256 `40565b4a724aadc4433fa4e010b4b23916d9b1f1baeee64e17186db94f54e608` |
+| DXVK fork package | [`v3.1.1-nvk.1`](https://github.com/HighDelay/dxvk-nvk/releases/tag/v3.1.1-nvk.1), `dxvk-nvk-3.1.1-1-x64.tar.gz` |
+| DXVK package SHA-256 | `b7cb40774f1209e8b014a2ae9c2faed374ff4ebeec2dbb7f49cf3589c6aed88e` |
 | YAAGL NVK integration | `eb42ac6f596b3b3686f3f8b58b9c46ed56937f01`, on base `4543cc5c5a66e8d1a702111fb095682019948fcb` |
-| Repaired DXVK fork | `e1c9938a60e1fbdb89a265e1087b2395ca17933e`, branch `nvk-3.1.1` |
+| DXVK source checkout | Release commit `c8add916913a407b71482fe85e86bf8e68bf538f`; runtime repair `e1c9938a60e1fbdb89a265e1087b2395ca17933e` |
 
 The Wine binary release does not identify its exact CrossOver patch revision.
 Its archive hash and reference source are recorded; a fully reproducible Wine
@@ -239,23 +241,44 @@ No boot arguments, global loader selection or installed CrossOver files change.
 
 ### Compact runtime for driver packages
 
-After building the repaired full bundle below, extract its matched Vulkan/DXVK
-libraries and rebuild the setup helper for use with an external Wine installation:
+Use an existing validated compact provider, or the developer bundle above, as
+`--base`. With no component arguments, the builder preserves both installed DLL
+pairs, their source patches, build records and licenses byte-for-byte:
 
 ```sh
 python3 nvk/wine-macos/provider.py \
-  --base /absolute/repaired-runtime --output /absolute/new/wine-provider
+  --base inputs/validated-provider --output out/wine-provider
 ```
 
-To include the optional D3D12 component, add both
-`--vkd3d-archive /absolute/vkd3d-proton-3.1.tar.zst` and
-`--vkd3d-source /absolute/vkd3d-proton-3.1-source`. Reading the `.zst` archive
-requires Python 3.14+ with Zstandard support. The builder checks upstream commit
-`4522cc1a8b1347f1ab1b0f7b14a23ed9444d95d1` and release archive SHA-256
-`b85ea8219b71093a3924913dd7aae6172333dc0c069983ed510816d67f02120b`.
-It preserves the existing DXVK pair and adds matched `vkd3d/x64/d3d12.dll` and
-`d3d12core.dll`, license notices and `VKD3D-BUILD.json`. It can also rebuild a
-validated compact provider without a bundled Wine installation.
+DXVK and VKD3D use the same explicit update interface. Supply a pinned fork
+package and its matching clean source checkout for either component or both:
+
+```sh
+python3 nvk/wine-macos/provider.py \
+  --base inputs/validated-provider --output out/updated-provider \
+  --dxvk-archive inputs/dxvk-nvk-3.1.1-1-x64.tar.gz \
+  --dxvk-source inputs/dxvk-nvk \
+  --vkd3d-archive inputs/vkd3d-nvk-3.1-nvk.2-x64.tar.gz \
+  --vkd3d-source inputs/vkd3d-nvk
+```
+
+The shared importer, [component_packages.py](component_packages.py), pins both
+packages and verifies archive/internal checksums, clean source identity, runtime
+patches, compiler-output hashes, x64 DLL pairs and licenses before copying them.
+It accepts the repaired fork packages, rather than replacing them with stock
+upstream DLLs. The output is staged privately and checked before it is finalized.
+
+DXVK's package is available from its release linked above. The qualified VKD3D
+`3.1-nvk.2` package is built and packaged in its fork using the
+[VKD3D build guide](https://github.com/HighDelay/vkd3d-nvk/blob/master/docs/NATIVE-NVK.md).
+Its older public `3.1-nvk.1` archive lacks the NVK descriptor-set repair and is
+not a substitute. Unchanged VKD3D bytes can be inherited from the existing provider
+without obtaining that build archive again.
+
+Both packages supply `source-changes.patch`; the importer places them under
+`dxvk/` and `vkd3d/`, alongside their matched pairs. `DXVK-BUILD.json` and
+`VKD3D-BUILD.json` retain the component build provenance. These are generated
+package artifacts, not duplicate patches maintained in this driver's source tree.
 
 `nvk-runtime install` continues to install only D3D11/DXGI. The explicit
 `install-d3d12` command installs both graphics pairs, preserving independent
@@ -289,28 +312,12 @@ actually made shareable. It also refuses optional shared semaphore/keyed-mutex
 creation when Win32 semaphore sharing is unavailable. Ordinary texture rendering
 and DXVK's local-storage fallback remain available; external handles are not faked.
 
-Apply [the DXVK patch](patches/dxvk-3.1.1-shared-fallback.patch) to the pinned DXVK
-v3.1.1 checkout. Build its x64 `d3d11.dll` and `dxgi.dll` together with Meson/Ninja,
-an x64 MinGW cross compiler, glslang and the pinned recursive DXVK submodules.
-The local test used llvm-mingw 20261020, glslang 16.6.0, Meson 1.12.1 and Ninja
-1.13.2, release optimization with debug symbols retained in the build directory.
-
-```sh
-git -C /absolute/dxvk-v3.1.1 apply /absolute/driver/nvk/wine-macos/patches/dxvk-3.1.1-shared-fallback.patch
-meson setup /absolute/dxvk-build /absolute/dxvk-v3.1.1 \
-  --cross-file /absolute/win64-cross-file.txt --buildtype release -Ddebug=true \
-  -Denable_d3d8=false -Denable_d3d9=false -Denable_d3d10=false
-ninja -C /absolute/dxvk-build
-python3 nvk/wine-macos/replace-dxvk.py \
-  --base /absolute/base-runtime --output /absolute/new/repaired-runtime \
-  --dxvk-source /absolute/dxvk-v3.1.1 --dxvk-build /absolute/dxvk-build \
-  --strip /absolute/llvm-mingw/bin/llvm-strip
-```
-
-The last command creates a new runtime, retains the base, strips only delivered
-DLL debug sections, records source/submodules/compiler/options in `DXVK-BUILD.json`
-and updates its runtime identity and checksums. Close the game and restore the
-old prefix DLL journal before installing a different runtime identity.
+The repair is maintained in [HighDelay/dxvk-nvk](https://github.com/HighDelay/dxvk-nvk/tree/nvk-3.1.1).
+Build and package changes in that fork, then import its matched archive and clean
+source through `provider.py --dxvk-archive ... --dxvk-source ...`, just as for
+VKD3D. The developer bootstrap uses the same importer. The driver no longer
+applies a second local patch or strips/rebuilds component DLLs during import.
+Close the game and restore the prefix DLL journal before changing runtime identity.
 
 The original DLLs reproduce an execute-at-null crash on the first shared texture.
 The repaired pair passes eight GPU readbacks across feature levels 11.0/11.1 and
@@ -321,10 +328,8 @@ Wine 11.0-1 build. A preceding second crash was in `MHYPBase.dll`, separate from
 the DXVK fault. ZZZ gameplay later rendered correctly with descriptor sets;
 sustained stability and a performance comparison remain unqualified.
 
-The patch changes DXVK code covered by its zlib license; preserve the DXVK license
-and attribution when distributing it. The same repair is published on the
-`nvk-3.1.1` branch of [HighDelay/dxvk-nvk](https://github.com/HighDelay/dxvk-nvk).
-Use either that commit or the patch on v3.1.1, not both.
+The repair changes DXVK code covered by its zlib license; preserve the DXVK
+license and attribution when distributing it.
 
 `nvk-wine-runtime.json` records the package identity and critical file hashes;
 `BUILD.json` records source and build provenance; `SHA256SUMS` covers delivered
@@ -368,21 +373,24 @@ download these libraries. Provider construction accepts an existing compact
 provider and a rebuilt Wine frontend using the exact same NVK renderer:
 
 ```sh
-python3 nvk/wine-macos/provider.py --base /absolute/base-provider \
-  --frontend /absolute/wine-frontend-build --output /absolute/new-provider \
-  --vkd3d-archive /absolute/vkd3d-proton-3.1.tar.zst \
-  --vkd3d-source /absolute/clean-vkd3d-proton-3.1 \
-  --nvapi-archive /absolute/dxvk-nvapi-v0.9.2.tar.gz \
-  --nvapi-source /absolute/clean-dxvk-nvapi-0.9.2 \
-  --ngx-archive /absolute/nvidia_driver-linux-x86_64-610.57.04-archive.tar.xz
+python3 nvk/wine-macos/provider.py --base inputs/validated-provider \
+  --frontend inputs/wine-frontend-build --output out/wine-provider \
+  --vkd3d-archive inputs/vkd3d-nvk-3.1-nvk.2-x64.tar.gz \
+  --vkd3d-source inputs/vkd3d-nvk \
+  --nvapi-archive inputs/dxvk-nvapi-v0.9.2.tar.gz \
+  --nvapi-source inputs/dxvk-nvapi-0.9.2 \
+  --ngx-archive inputs/nvidia_driver-linux-x86_64-610.57.04-archive.tar.xz
 ```
 
-All archives, revisions and individual NGX/NVAPI DLL hashes are pinned in
-`provider.py`. The NVIDIA archive is downloaded from NVIDIA's redistribution
-server; only its unmodified Wine DLL pair and full driver license are extracted.
+DXVK/VKD3D package pins are in `component_packages.py`; NGX/NVAPI archives,
+revisions and individual DLL hashes remain pinned in `provider.py`. The NVIDIA
+archive is downloaded from NVIDIA's redistribution server; only its unmodified
+Wine DLL pair and full driver license are extracted.
 DXVK-NVAPI's MIT license, vkd3d's LGPL/license/AUTHORS records and separate
 `VKD3D-BUILD.json`, `DLSS-BUILD.json`, `FRONTEND-BUILD.json` are included and
 covered by provider checksums. Preserve those records when updating dependencies.
+A newly qualified component package needs reviewed source/archive pins; importing
+a different build never updates the pins automatically.
 The game's DLSS feature library is not redistributed by this package.
 
 The compiled registry-aware helper passes `tools/wine-nvk/test_setup.py` and

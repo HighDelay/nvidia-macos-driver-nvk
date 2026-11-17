@@ -1971,6 +1971,18 @@ wait from GPU copy execution time. See the
 Keep the existing driver-owned provider contract; no YAAGL runtime bundle or
 launcher setting is required.
 
+## Wine component package imports, 2026-11-18
+
+Keep the shared DXVK/VKD3D fork-package importer in
+`nvk/wine-macos/component_packages.py` and the symmetric archive/source inputs in
+`provider.py`. The developer bootstrap uses that same DXVK import path. Each
+component fork owns its runtime patch and compiler records; the driver verifies
+and bundles those artifacts without a second local patch or DLL build/strip step.
+Preserve archive pins, source/patch/license verification, complete matched x64
+pairs and atomic provider staging. The default inherits existing pairs and records;
+explicit inputs must retain both the DXVK fallback and VKD3D descriptor-set repairs.
+This tooling cleanup does not require replacing an installed provider or release.
+
 ## Native NVK runtime for Wine / DXVK
 
 Retain `nvk/wine-macos/`, `tools/wine-nvk/` and the shared frontend's

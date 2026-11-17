@@ -53,3 +53,5 @@ jobs:
             test_tree_layout.py
       - name: Per-display scale ownership
         run: python3 tools/rotation/native_attributes_test.py
+      - name: Wine component package provenance
+        run: python3 tools/wine-nvk/test_provider_packages.py

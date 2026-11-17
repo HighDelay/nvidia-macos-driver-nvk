@@ -18,16 +18,12 @@ import tempfile
 REPO = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO / "build"))
 from stage_package import validate_wine_frontend
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from component_packages import import_component
 CRITICAL = (
     "lib/libnvk_wine.dylib", "lib/libnvk_renderer.dylib",
     "bin/nvk-runtime", "dxvk/x64/d3d11.dll", "dxvk/x64/dxgi.dll",
 )
-VKD3D_VERSION = "3.1"
-VKD3D_COMMIT = "4522cc1a8b1347f1ab1b0f7b14a23ed9444d95d1"
-VKD3D_ARCHIVE_SHA256 = "b85ea8219b71093a3924913dd7aae6172333dc0c069983ed510816d67f02120b"
-VKD3D_NVK_VERSION = "3.1-nvk.2"
-VKD3D_NVK_COMMIT = "495c43e17029bd12b70be0b76d09ef8529bf8264"
-VKD3D_NVK_ARCHIVE_SHA256 = "b2943e7391a0174ff68a73338577b8f943e2810fbb64fa74adf5bd16153b0f5d"
 NVAPI_COMMIT = "f9fdf268e888d17ae9875a4f01908164ff05f740"
 NVAPI_ARCHIVE_SHA256 = "60c284223530d643c446c263f1e1a96c6de7b5ff21796219646da734d97a70d6"
 NGX_ARCHIVE_SHA256 = "c210d0f81b2cc80be65192a56135ce22ee3cb46ab2eb22eb520ee78e6ad9c13f"
@@ -76,100 +72,6 @@ def validate_frontend(frontend, base_renderer, renderer_source=None):
             raise ValueError("Frontend renderer does not derive from --renderer-source")
     return record, {"source_path": str(renderer_source), "source_sha256": digest(renderer_source),
                     "private_sha256": record["renderer"]["sha256"], "commands": commands}
-
-
-def add_vkd3d(root, archive, source):
-    if digest(archive) == VKD3D_NVK_ARCHIVE_SHA256:
-        return add_vkd3d_nvk(root, archive, source)
-    if digest(archive) != VKD3D_ARCHIVE_SHA256:
-        raise ValueError("Unrecognized vkd3d-proton release archive")
-    revision = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=source, text=True).strip()
-    if revision != VKD3D_COMMIT or subprocess.check_output(
-            ["git", "status", "--porcelain", "--untracked-files=no"], cwd=source, text=True).strip():
-        raise ValueError("Use the clean vkd3d-proton 3.1 source for license/provenance records")
-    paths = []
-    for name in ("d3d12.dll", "d3d12core.dll"):
-        relative = "vkd3d/x64/" + name
-        target = root / relative
-        target.parent.mkdir(parents=True, exist_ok=True)
-        with tarfile.open(archive) as package:
-            with package.extractfile("vkd3d-proton-3.1/x64/" + name) as stream:
-                target.write_bytes(stream.read())
-        target.chmod(0o755)
-        paths.append(relative)
-    for name in ("LICENSE", "COPYING", "AUTHORS"):
-        relative = "LICENSES/vkd3d-proton-" + name + ".txt"
-        shutil.copyfile(source / name, root / relative)
-        paths.append(relative)
-    record = {
-        "version": VKD3D_VERSION, "source_revision": revision, "modified": False,
-        "source_url": "https://github.com/HansKristian-Work/vkd3d-proton/tree/" + revision,
-        "archive_url": "https://github.com/HansKristian-Work/vkd3d-proton/releases/download/v3.1/vkd3d-proton-3.1.tar.zst",
-        "archive_sha256": VKD3D_ARCHIVE_SHA256,
-        "files": {path: digest(root / path) for path in paths},
-        "validation": "Packaging verifies identity and architecture; execution must be tested separately",
-    }
-    (root / "VKD3D-BUILD.json").write_text(json.dumps(record, indent=2) + "\n")
-    return {"version": VKD3D_VERSION, "source_revision": revision, "modified": False,
-            "archive_sha256": VKD3D_ARCHIVE_SHA256, "build_record": "VKD3D-BUILD.json"}, paths + ["VKD3D-BUILD.json"]
-
-
-def add_vkd3d_nvk(root, archive, source):
-    """Accept only the pinned matched fork build, including its runtime patch."""
-    if digest(archive) != VKD3D_NVK_ARCHIVE_SHA256:
-        raise ValueError("Unrecognized native-NVK vkd3d archive")
-    revision = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=source, text=True).strip()
-    if subprocess.check_output(["git", "status", "--porcelain", "--untracked-files=no"], cwd=source, text=True).strip():
-        raise ValueError("Use the clean matching vkd3d-nvk source")
-    prefix = "vkd3d-nvk-" + VKD3D_NVK_VERSION + "/"
-    with tarfile.open(archive) as package:
-        def read(name):
-            member = package.getmember(prefix + name)
-            if not member.isfile() or member.size > 64 * 1024 * 1024:
-                raise ValueError("Invalid vkd3d-nvk archive entry: " + name)
-            with package.extractfile(member) as stream:
-                return stream.read()
-        metadata = json.loads(read("BUILD.json"))
-        if (metadata.get("version") != VKD3D_NVK_VERSION
-                or metadata.get("packaging_revision") != revision
-                or metadata.get("runtime_source_revision") != VKD3D_NVK_COMMIT
-                or metadata.get("upstream_revision") != VKD3D_COMMIT
-                or metadata.get("runtime_modified") is not True):
-            raise ValueError("Native-NVK vkd3d source/build identity mismatch")
-        files = {}
-        entries = {"x64/" + name: "vkd3d/x64/" + name for name in ("d3d12.dll", "d3d12core.dll")}
-        entries.update({name: "LICENSES/vkd3d-proton-" + name + ".txt"
-                        for name in ("LICENSE", "COPYING", "AUTHORS")})
-        entries["source-changes.patch"] = "vkd3d/source-changes.patch"
-        for original, relative in entries.items():
-            data = read(original)
-            if hashlib.sha256(data).hexdigest() != metadata["files"].get(original):
-                raise ValueError("Native-NVK vkd3d artifact hash mismatch: " + original)
-            if original in ("LICENSE", "COPYING", "AUTHORS") and data != (source / original).read_bytes():
-                raise ValueError("Native-NVK vkd3d license/source mismatch")
-            if original.endswith(".dll"):
-                offset = int.from_bytes(data[60:64], "little")
-                if data[:2] != b"MZ" or data[offset:offset+6] != b"PE\0\0\x64\x86":
-                    raise ValueError("Expected an x64 vkd3d DLL")
-                if metadata["build"]["files"].get(original) != hashlib.sha256(data).hexdigest():
-                    raise ValueError("Native-NVK vkd3d compiler output mismatch")
-            target = root / relative
-            target.parent.mkdir(parents=True, exist_ok=True)
-            target.write_bytes(data)
-            target.chmod(0o755 if original.endswith(".dll") else 0o644)
-            files[relative] = digest(target)
-    patch = subprocess.check_output(["git", "diff", "--binary", VKD3D_COMMIT,
-        VKD3D_NVK_COMMIT, "--", "libs", "include", "khronos", "subprojects", "meson.build", "meson_options.txt"], cwd=source)
-    if hashlib.sha256(patch).hexdigest() != files["vkd3d/source-changes.patch"]:
-        raise ValueError("Native-NVK vkd3d runtime patch differs from source")
-    record = {"version": VKD3D_VERSION, "fork_version": VKD3D_NVK_VERSION,
-              "source_revision": VKD3D_NVK_COMMIT, "upstream_revision": VKD3D_COMMIT,
-              "modified": True, "source_url": "https://github.com/HighDelay/vkd3d-nvk/tree/" + VKD3D_NVK_COMMIT,
-              "archive_sha256": VKD3D_NVK_ARCHIVE_SHA256, "files": files, "build": metadata["build"],
-              "binding_policy": "Descriptor sets for NVK on Wine Darwin; other drivers/hosts unchanged"}
-    (root / "VKD3D-BUILD.json").write_text(json.dumps(record, indent=2) + "\n")
-    return {key: record[key] for key in ("version", "fork_version", "source_revision", "upstream_revision", "modified", "archive_sha256", "binding_policy")} | {
-        "build_record": "VKD3D-BUILD.json"}, list(files) + ["VKD3D-BUILD.json"]
 
 
 def add_dlss(root, nvapi_archive, nvapi_source, ngx_archive):
@@ -227,15 +129,18 @@ def add_dlss(root, nvapi_archive, nvapi_source, ngx_archive):
 
 
 def build(base, output, vkd3d_archive=None, vkd3d_source=None, frontend=None,
-          nvapi_archive=None, nvapi_source=None, ngx_archive=None, renderer_source=None):
+          nvapi_archive=None, nvapi_source=None, ngx_archive=None, renderer_source=None,
+          dxvk_archive=None, dxvk_source=None):
     base, output = base.resolve(strict=True), output.absolute()
     if output.exists() or output.is_symlink():
         raise ValueError("Output exists; choose a new directory")
     output = output.resolve()
     if base == output or base in output.parents:
         raise ValueError("Output must be outside the base runtime")
-    if bool(vkd3d_archive) != bool(vkd3d_source):
-        raise ValueError("Supply both --vkd3d-archive and --vkd3d-source")
+    for name, archive, checkout in (("dxvk", dxvk_archive, dxvk_source),
+                                    ("vkd3d", vkd3d_archive, vkd3d_source)):
+        if bool(archive) != bool(checkout):
+            raise ValueError("Supply both --" + name + "-archive and --" + name + "-source")
     if renderer_source and not frontend:
         raise ValueError("--renderer-source requires --frontend")
     dlss_inputs = [nvapi_archive, nvapi_source, ngx_archive]
@@ -255,7 +160,9 @@ def build(base, output, vkd3d_archive=None, vkd3d_source=None, frontend=None,
     with tempfile.TemporaryDirectory(prefix=".wine-nvk-", dir=output.parent) as temporary:
         root = Path(temporary) / "provider"
         root.mkdir()
-        paths = [*CRITICAL, "dxvk/source-changes.patch", "DXVK-BUILD.json"]
+        paths = list(CRITICAL[:3])
+        if not dxvk_archive:
+            paths.extend([*CRITICAL[3:], "dxvk/source-changes.patch", "DXVK-BUILD.json"])
         if source.get("frontend_build"):
             if source["frontend_build"] != "FRONTEND-BUILD.json":
                 raise ValueError("Unknown frontend build record")
@@ -296,9 +203,13 @@ def build(base, output, vkd3d_archive=None, vkd3d_source=None, frontend=None,
             paths.append("FRONTEND-BUILD.json")
             frontend_record = "FRONTEND-BUILD.json"
             presentation = {**presentation, **record["presentation"]}
+        dxvk = source["dxvk"]
+        if dxvk_archive:
+            dxvk, additions = import_component(root, "dxvk", dxvk_archive.resolve(strict=True), dxvk_source.resolve(strict=True))
+            paths.extend(additions)
         vkd3d = source.get("vkd3d")
         if vkd3d_archive:
-            vkd3d, additions = add_vkd3d(root, vkd3d_archive.resolve(strict=True), vkd3d_source.resolve(strict=True))
+            vkd3d, additions = import_component(root, "vkd3d", vkd3d_archive.resolve(strict=True), vkd3d_source.resolve(strict=True))
             paths.extend(additions)
         dlss = source.get("dlss")
         if all(dlss_inputs):
@@ -331,14 +242,15 @@ def build(base, output, vkd3d_archive=None, vkd3d_source=None, frontend=None,
             "source_runtime_id": source["runtime_id"], "platform": source["platform"],
             "entry": {"path": CRITICAL[0], "sha256": files[CRITICAL[0]]},
             "renderer": {"path": CRITICAL[1], "sha256": files[CRITICAL[1]]},
-            "files": files, "dxvk": source["dxvk"], "presentation": presentation,
+            "files": files, "dxvk": dxvk, "presentation": presentation,
             "launch_defaults": {"DXVK_CONFIG": "dxvk.enableDescriptorBuffer = False",
                                 "DXVK_HUD": "devinfo,fps,frametimes,scale=1.25",
                                 "WINEDLLOVERRIDES": "d3d11,dxgi=n"},
-            "validation": {"inherited_binaries": ("DXVK/D3D12/NGX unchanged; refreshed Vulkan frontend/backend recorded in FRONTEND-BUILD.json and BUILD.json"
-                                                   if renderer_update else
-                                                   "Renderer/DXVK/D3D12/NGX unchanged; refreshed Vulkan frontend recorded in FRONTEND-BUILD.json"
-                                                   if frontend else "Vulkan and DXVK binaries copied byte-for-byte from source_runtime_id"),
+            "validation": {"component_inputs": {
+                               "dxvk": "Verified fork archive" if dxvk_archive else "Inherited byte-for-byte",
+                               "vkd3d": "Verified fork archive" if vkd3d_archive else "Inherited byte-for-byte" if vkd3d else "Absent",
+                               "dlss": "Verified archives" if all(dlss_inputs) else "Inherited byte-for-byte" if dlss else "Absent"},
+                           "native_libraries": "Validated frontend build" if frontend else "Inherited byte-for-byte",
                            "helper": "Rebuilt; run the setup/rollback tests on this output",
                            "external_wine_crossover": "Not qualified by packaging"},
         }
@@ -354,7 +266,8 @@ def build(base, output, vkd3d_archive=None, vkd3d_source=None, frontend=None,
             "source_runtime_id": source["runtime_id"], "source_manifest_sha256": digest(base / "nvk-wine-runtime.json"),
             "source_build_sha256": digest(base / "BUILD.json"),
             "source_files": {name: digest(REPO / name) for name in
-                             ("nvk/wine-macos/setup.mm", "nvk/wine-macos/provider.py", "nvk/wine-macos/INSTALL.md")},
+                             ("nvk/wine-macos/setup.mm", "nvk/wine-macos/provider.py",
+                              "nvk/wine-macos/component_packages.py", "nvk/wine-macos/INSTALL.md")},
             "commands": [[part.replace(str(REPO), "$SOURCE").replace(str(root), "$PROVIDER")
                           for part in command] for command in commands], "files": files,
         }
@@ -374,10 +287,11 @@ def build(base, output, vkd3d_archive=None, vkd3d_source=None, frontend=None,
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--base", type=Path, required=True, help="validated full Wine/NVK runtime with repaired DXVK")
+    parser.add_argument("--base", type=Path, required=True, help="validated compact provider or full Wine/NVK runtime with repaired DXVK")
     parser.add_argument("--output", type=Path, required=True, help="new compact provider directory")
-    parser.add_argument("--vkd3d-archive", type=Path, help="optional pinned upstream or native-NVK vkd3d release archive")
-    parser.add_argument("--vkd3d-source", type=Path, help="matching clean source for license/provenance records")
+    for name in ("dxvk", "vkd3d"):
+        parser.add_argument("--" + name + "-archive", type=Path, help="optional pinned " + name + "-nvk fork package")
+        parser.add_argument("--" + name + "-source", type=Path, help="matching clean fork source for license/provenance records")
     parser.add_argument("--frontend", type=Path, help="optional Wine frontend build using the same renderer")
     parser.add_argument("--renderer-source", type=Path, help="explicit verified upstream renderer for a frontend/backend upgrade")
     parser.add_argument("--nvapi-archive", type=Path, help="optional pinned DXVK-NVAPI 0.9.2 archive")
@@ -386,7 +300,8 @@ def main():
     args = parser.parse_args()
     try:
         print(json.dumps(build(args.base, args.output, args.vkd3d_archive, args.vkd3d_source, args.frontend,
-                               args.nvapi_archive, args.nvapi_source, args.ngx_archive, args.renderer_source), indent=2))
+                               args.nvapi_archive, args.nvapi_source, args.ngx_archive, args.renderer_source,
+                               args.dxvk_archive, args.dxvk_source), indent=2))
     except (OSError, ValueError, KeyError, tarfile.TarError, subprocess.CalledProcessError) as error:
         print("STOP: " + str(error), file=sys.stderr)
         return 1
