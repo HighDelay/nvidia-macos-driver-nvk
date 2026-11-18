@@ -223,11 +223,16 @@ The frontend alone can be built with `build.py --output ... --renderer ...
 
 | Dependency | Pinned identity |
 |---|---|
-| Wine archive | YAAGL `wine-crossover-11.0-1-signed`, SHA-256 `89fa7e90fb626523a90d5867a03c6be785d017176739c6320a3b86c7838c3a35` |
+| Wine archive | Download `wine-crossover-11.0-1-osx64-signed.tar.xz` from [YAAGL's Wine releases](https://github.com/yaagl/anime-game-wine/releases), [tested tag](https://github.com/yaagl/anime-game-wine/releases/tag/wine-crossover-11.0-1-signed); SHA-256 `89fa7e90fb626523a90d5867a03c6be785d017176739c6320a3b86c7838c3a35` |
 | DXVK fork package | [`v3.1.1-nvk.1`](https://github.com/HighDelay/dxvk-nvk/releases/tag/v3.1.1-nvk.1), `dxvk-nvk-3.1.1-1-x64.tar.gz` |
 | DXVK package SHA-256 | `b7cb40774f1209e8b014a2ae9c2faed374ff4ebeec2dbb7f49cf3589c6aed88e` |
 | YAAGL NVK integration | `eb42ac6f596b3b3686f3f8b58b9c46ed56937f01`, on base `4543cc5c5a66e8d1a702111fb095682019948fcb` |
 | DXVK source checkout | Release commit `c8add916913a407b71482fe85e86bf8e68bf538f`; runtime repair `e1c9938a60e1fbdb89a265e1087b2395ca17933e` |
+
+For standalone Wine, use the unsigned archive linked in the
+[setup guide](INSTALL.md#standalone-wine); it is available directly from the same
+Wine releases page. The developer recipe above keeps its existing signed-archive
+pin and private-loader preparation.
 
 The Wine binary release does not identify its exact CrossOver patch revision.
 Its archive hash and reference source are recorded; a fully reproducible Wine

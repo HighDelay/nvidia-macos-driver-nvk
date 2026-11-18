@@ -123,6 +123,11 @@ for a compatible Wine build, prefix/bottle creation, DXVK installation and launc
 commands. D3D12/DLSS are optional steps **after** that setup. The provider lives at
 `/Library/GPUBundles/nvmtl/wine`; Wine itself is installed separately.
 
+For standalone use, download **Wine Crossover 11.0-1 osx64** (the unsigned
+archive) directly from [YAAGL's Wine releases](https://github.com/yaagl/anime-game-wine/releases).
+The setup guide covers extraction and prefix setup; getting the Wine binary
+does not require the YAAGL-NVK launcher.
+
 For **ZZZ, Genshin Impact or Honkai: Star Rail**, use
 [YAAGL NVK](https://github.com/HighDelay/yaagl-nvk/releases) and its
 [setup guide](https://github.com/HighDelay/yaagl-nvk/blob/main/docs/NVK.md).

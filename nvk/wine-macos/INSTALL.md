@@ -128,11 +128,26 @@ standalone runtime. Driver packages install the compact provider at
 Wine itself**. YAAGL downloads its Wine installation separately on first setup.
 Close applications in the prefix before installing or restoring the DLL pair.
 
-Choose a compatible Wine executable and create a dedicated 64-bit prefix:
+Download **Wine Crossover 11.0-1 osx64** from
+[YAAGL's Wine releases](https://github.com/yaagl/anime-game-wine/releases).
+Choose the [unsigned release](https://github.com/yaagl/anime-game-wine/releases/tag/wine-crossover-11.0-1):
+`wine-crossover-11.0-1-osx64.tar.xz` (without `-signed`), SHA-256
+`6695910d290505712177c48db1963d9028a2f73efe3199d1cb94d7e15cf645d7`.
+Extract the complete archive into a dedicated folder and keep its `wine/bin`,
+`wine/lib` and `wine/share` directories together. Use the extracted `wine/bin/wine`;
+this unsigned option needs no manual re-signing step or YAAGL-NVK download.
+
+The [signed release](https://github.com/yaagl/anime-game-wine/releases/tag/wine-crossover-11.0-1-signed)
+is also available. YAAGL's automatic setup and the game validation described above
+use that archive with YAAGL's private-loader preparation; the unsigned archive
+has not been separately retested here.
+
+Create a dedicated 64-bit prefix with this Wine executable:
 
 ```sh
 nvk_runtime=/Library/GPUBundles/nvmtl/wine
-nvk_wine=/absolute/path/to/wine
+nvk_wine_root=/absolute/path/to/extracted/wine
+nvk_wine="$nvk_wine_root/bin/wine"
 nvk_prefix="$HOME/Library/Application Support/Wine/NVK"
 export WINEMSYNC=1
 "$nvk_runtime/bin/nvk-runtime" check "$nvk_runtime"
@@ -140,10 +155,10 @@ env WINEPREFIX="$nvk_prefix" WINEARCH=win64 "$nvk_wine" wineboot.exe --init
 "$nvk_runtime/bin/nvk-runtime" install "$nvk_runtime" "$nvk_prefix"
 ```
 
-For the verified Wine build, you can use YAAGL's prepared
-`launcher-data/wine-nvk/bin/wine` after first setup. Install any game prerequisites
-in this same prefix. Launch a
-D3D11 executable with the runtime selected **for this process only**:
+Install any game prerequisites in this same prefix. YAAGL also prepares
+title-specific Wine certificate prerequisites; games that need its patch/setup
+flow should continue using that launcher. For standalone use, launch a D3D11
+executable with the runtime selected **for this process only**:
 
 ```sh
 cd /absolute/path/to/game
@@ -171,7 +186,8 @@ replace Wine's/CrossOver's installed MoltenVK library.
 Commercial CrossOver is **not tested**. Its Wine version, library validation or
 Vulkan loader may differ; these steps describe a scoped test, not guaranteed
 compatibility with every release. If it still loads MoltenVK or rejects the
-provider, use the verified YAAGL Wine package rather than modifying CrossOver.app.
+provider, use the Wine archive linked in [Standalone Wine](#standalone-wine)
+rather than modifying CrossOver.app.
 
 1. Duplicate the game's **64-bit** bottle for the NVK test. Close its applications.
 2. Select **Wine** as its graphics backend (or disable the DXVK/DXMT/D3DMetal
@@ -312,7 +328,8 @@ Launch with the corresponding D3D12 or DLSS environment above, substituting
 Keep other bottle arguments/environment from Open Shell. The helper verifies
 Wine's `C:\windows\system32` resolves to the requested prefix before changing
 NGX. No files inside CrossOver.app are replaced. Commercial CrossOver remains
-untested; use the verified YAAGL Wine if its loader rejects the native provider.
+untested; use the Wine archive linked in [Standalone Wine](#standalone-wine)
+if its loader rejects the native provider.
 
 ## Verify, update and restore
 
