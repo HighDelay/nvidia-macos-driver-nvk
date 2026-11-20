@@ -11,6 +11,7 @@
 #define NVRM_VRAM_FN_FREE     "nvFreeVram"
 
 #define NVRM_VRAM_FN_SCANOUT  "nvScanoutInfo"
+#define NVRM_VRAM_SCANOUT_30BIT 0x1u // Reply format is X2B10G10R10.
 
 #define NVRM_VRAM_BAR1_BUDGET (192ull * 1024ull * 1024ull)
 

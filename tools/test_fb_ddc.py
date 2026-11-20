@@ -13,7 +13,7 @@ assert filecmp.cmp(root / 'kexts/NVRMFB/nvrm_ddc_abi.h', root / 'kexts/NVRM/nvrm
 assert 'IOReturn NVRMNVDAFramebuffer::doI2CRequest(' in fb and 'kIOFBI2CInterfaceInfoKey' in fb, 'the framebuffer no longer publishes an I2C bus'
 assert 'PE_parse_boot_argn("nvrmfbddc"' in fb and 'PE_parse_boot_argn("nvrmfbddc"' in rm, 'DDC must be opt-in on both kexts'
 assert fb.index('publishDdcBus();') < fb.index('if (!super::start(provider))'), 'the bus must be published before super::start'
-assert 'isEqualTo("NVRMDdcTransfer")' in hook and 'nvrm_ddc_transfer' in hook, 'NVRM does not answer NVRMDdcTransfer'
+assert 'isEqualTo(NVRM_DDC_FN)' in hook and 'nvrm_ddc_transfer' in hook, 'NVRM does not answer NVRMDdcTransfer'
 assert 'ddcSetPowered(ordinal != 0)' in fb, 'isPowered() is never made true'
 s = fb.index('IOReturn NVRMNVDAFramebuffer::doI2CRequest(')
 method = fb[s:fb.index('\n}\n', s) + 3]
@@ -25,7 +25,7 @@ fixture = r'''
 #include <vector>
 #include "nvrm_ddc_abi.h"
 typedef int IOReturn; typedef uint32_t UInt32; typedef uint32_t IOOptionBits;
-enum { kIOReturnSuccess=0, kIOReturnUnsupported=-1, kIOReturnUnsupportedMode=-2, kIOReturnBadArgument=-3, kIOReturnNoDevice=-4, kIOReturnBadArgumentX=-9 };
+enum { kIOReturnSuccess=0, kIOReturnUnsupported=-1, kIOReturnUnsupportedMode=-2, kIOReturnBadArgument=-3, kIOReturnNoDevice=-4, kIOReturnNotReady=-9 };
 enum { kIOI2CNoTransactionType=0, kIOI2CSimpleTransactionType=1, kIOI2CDDCciReplyTransactionType=2, kIOI2CUseSubAddressCommFlag=2 };
 struct IOI2CBusTiming; struct IOI2CRequest {
     IOOptionBits sendTransactionType, replyTransactionType; uint32_t sendAddress, replyAddress; uint8_t sendSubAddress, replySubAddress;
@@ -36,7 +36,12 @@ static void absolutetime_to_nanoseconds(uint64_t a, uint64_t *n) { *n = a; }
 static unsigned gSlept; static void IOSleep(unsigned ms) { gSlept += ms; }
 struct Call { unsigned op, addr, len; std::vector<unsigned char> w; };
 static std::vector<Call> gCalls; static IOReturn gFail = 0; static std::vector<unsigned char> gReply;
+struct NVRMDisplayGate { bool valid() { return true; } };
+static int OSAddAtomic(int, const int *n) { return *n; }
 struct FB {
+    bool fInternal = false, awake = true;
+    int fStopping = 0;
+    bool rmGpuReady() { return awake; }
     bool fDdcOn = true, fDpyLost = false; void *fKms = this;
     IOReturn ddcTransfer(unsigned op, unsigned addr, unsigned char *d, unsigned len) {
         Call c{op, addr, len, {}};

@@ -4,6 +4,7 @@ import argparse
 import os
 from pathlib import Path
 import re
+import shutil
 import subprocess
 import tempfile
 
@@ -12,7 +13,6 @@ p = argparse.ArgumentParser(description=__doc__)
 p.add_argument('--ogkm', type=Path, default=os.environ.get('OGKM'), required=not os.environ.get('OGKM'),
                help='Pristine NVIDIA 620.70.06 source tree')
 a = p.parse_args()
-source = (a.ogkm / 'src/nvidia-modeset/kapi/src/nvkms-kapi.c').read_text()
 
 
 def function(text, name):
@@ -38,9 +38,12 @@ fixture = r'''
 #define nvEvoLog(...) ((void)0)
 #define nvkms_memset memset
 #define nvkms_memcpy memcpy
+#define nvKmsKapiCalloc calloc
+#define nvKmsKapiFree free
 static NvKmsConnectorType connectorType=NVKMS_CONNECTOR_TYPE_DVI_D;
 static NvKmsConnectorSignalFormat signalFormat=NVKMS_CONNECTOR_SIGNAL_FORMAT_TMDS;
 static enum NvYuv420Mode disposition=NV_YUV420_MODE_NONE;
+static NvBool rgbRefused;
 static NvBool staticOk=NV_TRUE,connectorOk=NV_TRUE,queryOk=NV_TRUE,modeOk=NV_TRUE;
 static unsigned validationCalls,policyCalls;
 static NvBool GetStaticDisplayInfo(struct NvKmsKapiDevice *d,NvKmsKapiDisplay display,
@@ -59,9 +62,9 @@ static NvBool isDvi(void) {
     return staticOk && connectorOk && signalFormat==NVKMS_CONNECTOR_SIGNAL_FORMAT_TMDS &&
         (connectorType==NVKMS_CONNECTOR_TYPE_DVI_D || connectorType==NVKMS_CONNECTOR_TYPE_DVI_I);
 }
-static void checkColor(const struct NvKmsDpyOutputColorParams *c) {
+static void checkColor(const struct NvKmsDpyOutputColorParams *c,NvKmsKapiDisplay display) {
     ++policyCalls;
-    if(isDvi()) {
+    if(display==0x100 && isDvi()) {
         assert(c->formatSpecified && c->format==NV_KMS_DPY_ATTRIBUTE_REQUESTED_COLOR_FORMAT_RGB);
         assert(c->bpcSpecified && c->bpc==NV_KMS_DPY_ATTRIBUTE_CURRENT_COLOR_BPC_8);
     } else {
@@ -73,7 +76,7 @@ static NvBool fakeIoctl(struct nvkms_per_open *open,NvU32 cmd,void *data,size_t 
     (void)open;++validationCalls;
     if(cmd==NVKMS_IOCTL_VALIDATE_MODE_INDEX) {
         assert(size==sizeof(struct NvKmsValidateModeIndexParams));
-        struct NvKmsValidateModeIndexParams *v=data;checkColor(&v->request.dpyOutputColor);
+        struct NvKmsValidateModeIndexParams *v=data;checkColor(&v->request.dpyOutputColor,nvDpyIdToNvU32(v->request.dpyId));
         assert(v->request.modeValidation.overrides==NVKMS_MODE_VALIDATION_NO_RRX1K_CHECK);
         if(!queryOk)return NV_FALSE;
         v->reply.end=v->request.modeIndex>=2;v->reply.valid=modeOk;
@@ -83,9 +86,9 @@ static NvBool fakeIoctl(struct nvkms_per_open *open,NvU32 cmd,void *data,size_t 
         return NV_TRUE;
     }
     assert(cmd==NVKMS_IOCTL_VALIDATE_MODE && size==sizeof(struct NvKmsValidateModeParams));
-    struct NvKmsValidateModeParams *v=data;checkColor(&v->request.dpyOutputColor);
+    struct NvKmsValidateModeParams *v=data;checkColor(&v->request.dpyOutputColor,nvDpyIdToNvU32(v->request.dpyId));
     if(!queryOk)return NV_FALSE;
-    v->reply.valid=modeOk;v->reply.yuv420Mode=disposition;return NV_TRUE;
+    v->reply.valid=modeOk && (!rgbRefused || v->request.modeValidation.preferYUV420);v->reply.yuv420Mode=disposition;return NV_TRUE;
 }
 #define nvkms_ioctl_from_kapi fakeIoctl
 static void NvKmsKapiCursorConfigToKms(const struct NvKmsKapiCursorRequestedConfig *c,
@@ -161,23 +164,37 @@ int main(void) {
         assert(!hdmi->colorBpcSpecified && hdmi->colorBpc==NV_KMS_DPY_ATTRIBUTE_CURRENT_COLOR_BPC_UNKNOWN);
     }
     free(c);free(out);assert(policyCalls>=216);
+    connectorType=NVKMS_CONNECTOR_TYPE_HDMI;
+    signalFormat=NVKMS_CONNECTOR_SIGNAL_FORMAT_TMDS;
+    rgbRefused=NV_TRUE;
+    disposition=NV_YUV420_MODE_HW;
+    assert(ValidateDisplayMode(&d,0x100,&m));
+    disposition=NV_YUV420_MODE_SW;
+    assert(!ValidateDisplayMode(&d,0x100,&m));
+    connectorType=NVKMS_CONNECTOR_TYPE_DVI_D;
+    disposition=NV_YUV420_MODE_HW;
+    assert(!ValidateDisplayMode(&d,0x100,&m));
     puts("PASS: production indexed/explicit validation and full modeset; DVI RGB8 and YUV disposition; HDMI/DP/LVDS/VGA/analog isolation; query errors; null guards");
 }
 '''
 names = ['NvKmsModeToKapi', 'InitNvKmsModeValidationParams', 'KapiDviRgb8',
-         'GetDisplayMode', 'NvKmsKapiDisplayModeToKapi', 'ValidateDisplayMode',
+         'Y420HdmiConnector', 'Y420SameTiming', 'GetDisplayMode', 'NvKmsKapiDisplayModeToKapi',
+         'Y420HwValidateMode', 'ValidateDisplayModeRgb', 'ValidateDisplayMode',
          'NvKmsKapiRequestedModeSetConfigToKms']
 with tempfile.TemporaryDirectory(prefix='nv-kapi-dvi-') as directory:
     temp = Path(directory)
     file = temp / 'kapi/src/nvkms-kapi.c'
-    file.parent.mkdir(parents=True)
-    file.write_text(source)
     for patch in sorted((ROOT / 'kexts/NVRM/patches').glob('*.patch')):
-        if 'nvkms-kapi.c' not in patch.read_text():
+        diff = patch.read_text()
+        if 'nvkms-kapi.c' not in diff:
             continue
-        # Completion uses paths from the NVIDIA root; the other KAPI patches
-        # are relative to src/nvidia-modeset.
-        strip = 3 if 'a/src/nvidia-modeset/' in patch.read_text() else 1
+        strip = 3 if 'a/src/nvidia-modeset/' in diff else 1
+        for header in re.findall(r'^--- (a/[^\s]+)', diff, re.M):
+            relative = Path(*Path(header).parts[strip:])
+            target = temp / relative
+            target.parent.mkdir(parents=True, exist_ok=True)
+            if not target.exists():
+                shutil.copyfile(a.ogkm / 'src/nvidia-modeset' / relative, target)
         subprocess.run(['patch', '--batch', '--fuzz=0', '--no-backup-if-mismatch',
                         '-p'+str(strip), '-i', str(patch)], cwd=temp, check=True,
                        stdout=subprocess.DEVNULL)
@@ -191,9 +208,12 @@ with tempfile.TemporaryDirectory(prefix='nv-kapi-dvi-') as directory:
         'src/common/sdk/nvidia/inc', 'src/common/inc', 'src/common/shared/inc',
         'src/common/unix/common/inc', 'src/common/unix/common/utils/interface',
         'src/common/unix/nvidia-push/interface', 'src/common/modeset']]
+    includes.insert(0, temp / 'kapi/interface')
     variants = {'candidate': text,
                 'without_disposition_filter': text.replace(
                     '(!dviRgb8 || paramsValidate.reply.yuv420Mode == NV_YUV420_MODE_NONE)', 'NV_TRUE'),
+                'without_hdmi_fallback': text.replace(
+                    'Y420HwValidateMode(device, display, mode);', 'NV_FALSE;'),
                 'without_modeset_policy': text.replace(
                     'if (KapiDviRgb8(device, headModeSetConfig->displays[0], &color))', 'if (0)')}
     for name, code in variants.items():

@@ -83,10 +83,13 @@ arm("the patch touches only the stream allocator", patch.count("diff -ruN") == 1
 arm("stream chunks are plain system memory, never the cached kind",
     "return NVKMD_MEM_GART;" in plus and not any("NVK69_MEM_GPU_CACHED" in l for l in plus))
 arm("the cached return is the line removed", any("NVK69_MEM_GPU_CACHED" in l and "return" in l for l in minus))
-c28 = next((l for l in bld.splitlines() if l.strip().startswith("CHAIN=") and "nvk-stream-uncached" in l), "")
-arm("the matched 2.8 set applies it last", c28.rstrip().endswith('nvk-stream-uncached" ;;'))
-arm("the build defaults to the matched 2.8 set", 'REL=${4:-2.8}' in bld)
-arm("incompatible upstream chains remain guarded", '[ "$REL" = 2.8 ] ||' in bld)
-arm("the release build keeps the matched kernel interface", '"$OUT/nvk-build" 2.8 ||' in inputs)
+chains = [line.strip() for line in bld.splitlines() if line.strip().startswith('CHAIN="nvk-macos')]
+arm("both supported patch sets retain the uncached stream",
+    len(chains) == 2 and all(line.endswith('nvk-stream-uncached" ;;') for line in chains))
+arm("the build defaults to the matched 3.0 set", 'REL=${4:-3.0}' in bld)
+arm("the release uses the matched 3.0 set", '"$OUT/nvk-build" 3.0 ||' in inputs)
+arm("both builds honor the stable Mesa pin", bld.count('BASE=') == 1 and 'BASE=$(cat "$NVK/MESA_BASE")' in bld)
+arm("the release patch sets leave the software Metal presenter disabled",
+    all('nvk-metal-wsi' not in line for line in chains))
 print("FAILED" if fails else "all ok")
 sys.exit(1 if fails else 0)

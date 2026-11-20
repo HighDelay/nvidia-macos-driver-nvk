@@ -350,6 +350,12 @@ static void nvmtl_gpu_uses_lower(NVMTLCommandBuffer *cb) {
     nvmtl_gpu_uses_adjust(uses, -1);
 }
 
+static NSError *nvmtl_device_removed_error(void)
+{
+    return [NSError errorWithDomain:MTLCommandBufferErrorDomain code:MTLCommandBufferErrorDeviceRemoved
+        userInfo:@{NSLocalizedDescriptionKey: @"The GPU stopped accepting work."}];
+}
+
 @implementation NVMTLCommandBuffer (EventSubmission)
 - (void)nvmtlReserveQueue {
     if (_reservation) return;
@@ -386,12 +392,14 @@ static void nvmtl_gpu_uses_lower(NVMTLCommandBuffer *cb) {
     // nvk_UpdateDescriptorSets: mediaanalysisd, Safari, wallpapers).
     if (restart) for (id o in (NVMTLResSet *)part->resources) [(NVMTLResSet *)_resources addObject:o];
     if (restart && nvmtl_vk_cmd_begin(&_queue->_q, &_c)) {
-        _cbError = [NSError errorWithDomain:MTLCommandBufferErrorDomain code:MTLCommandBufferErrorOutOfMemory
-            userInfo:@{NSLocalizedDescriptionKey:@"Could not allocate recording after event boundary"}];
+        _recordingUnavailable = YES;
+        _cbError = nvmtl_vk_device_removed() ? nvmtl_device_removed_error() :
+            [NSError errorWithDomain:MTLCommandBufferErrorDomain code:MTLCommandBufferErrorOutOfMemory
+                userInfo:@{NSLocalizedDescriptionKey:@"Could not allocate recording after event boundary"}];
     }
 }
 - (void)nvmtlRecordWait:(id)event value:(uint64_t)value {
-    if (!event || _committed) return;
+    if (!event || _committed || _recordingUnavailable) return;
     if (nvmtl_g79_on(NVMTL_G79_EV)) {
         BOOL self_ = NO;
         for (NSArray *p in _g79Promised) if (p[0] == event && [p[1] unsignedLongLongValue] >= value) { self_ = YES; break; }
@@ -410,7 +418,7 @@ static void nvmtl_gpu_uses_lower(NVMTLCommandBuffer *cb) {
     part->waitEvent = event; part->value = value; [_parts addObject:part];
 }
 - (void)nvmtlRecordSignal:(id)event value:(uint64_t)value {
-    if (!event || _committed) return;
+    if (!event || _committed || _recordingUnavailable) return;
     if (nvmtl_g79_on(NVMTL_G79_EV)) {
         if (!_g79Sig) _g79Sig = [NSMutableArray new];
         if (!_g79Promised) _g79Promised = [NSMutableArray new];
@@ -792,7 +800,8 @@ static void nvmtl_gsub_ahead_pass1(void) {
                 for (NVMTLBuffer *buffer in nvmtl_submission_copies(part->resources, YES)) nvmtl_buffer_sync_out(buffer);
         }
         if (!published) {
-            [self nvmtlFinishExecution:[NSError errorWithDomain:MTLCommandBufferErrorDomain code:MTLCommandBufferErrorInternal
+            [self nvmtlFinishExecution:result == -2 && nvmtl_vk_device_removed() ? nvmtl_device_removed_error() :
+                [NSError errorWithDomain:MTLCommandBufferErrorDomain code:MTLCommandBufferErrorInternal
                 userInfo:@{NSLocalizedDescriptionKey:result ? @"GPU event segment submission failed" : @"Could not publish event segment writes"}]];
             return YES;
         }
@@ -826,8 +835,10 @@ static void nvmtl_gsub_ahead_pass1(void) {
         _committed = YES; _commitMarking = YES;
         if (!__atomic_load_n(&_rep, __ATOMIC_ACQUIRE)) __atomic_store_n(&_rep, nvmtl_ep_enter(), __ATOMIC_RELEASE);
         [_completionCondition lock]; _cbstatus = MTLCommandBufferStatusCommitted; [_completionCondition unlock];
-        [self nvmtlSealPartWithSignal:nil value:0 restart:NO];
-        nvmtl_gpu_uses_raise(self, _parts.lastObject);
+        if (!_recordingUnavailable) {
+            [self nvmtlSealPartWithSignal:nil value:0 restart:NO];
+            nvmtl_gpu_uses_raise(self, _parts.lastObject);
+        }
     }
     // the commit's kernel marks can wait for the accelerator lock, so they go in outside the class lock (see
     // nvmtl_ws_mark_pending). This command buffer is committed and holds its queue reservation, but nothing submits it

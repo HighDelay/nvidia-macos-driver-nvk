@@ -913,6 +913,16 @@ elif [ -f "$HERE/dlss_fetch.sh" ]; then
   fi
 fi
 
+
+if [ "${NULLMOTH_GPU_BOOST:-}" = 1 ]; then
+  boost=Optional/GPU-Boost
+  if [ -f "$HERE/$boost/boost_daemon.sh" ] && [ -f "$HERE/$boost/nvmtl-boost" ]; then
+    step "Optional GPU boost"
+    /bin/bash "$HERE/$boost/boost_daemon.sh" install "$HERE" ||
+      echo "   NOTE: GPU boost setup failed. Use Optional/GPU-Boost/README.md."
+  fi
+fi
+
 # Optional WebKit helper lives in OpenCore, never the system kext repositories.
 # This runs after the driver transaction. EFI failures retain the working driver.
 webkit_manual() {

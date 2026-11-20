@@ -55,15 +55,16 @@ if hdr.exists():
         if r.returncode: failures.append("aspm harness")
 arm("ASPM L1 is enabled once the adapter is up", "fPassDone = 2;\n        enableAspmL1();" in nvrm)
 arm("ASPM L1 is enabled again after a wake", "if (ok) enableAspmL1();" in nvrm)
-arm("the firmware's ASPM setting is put back at shutdown", "restoreAspm();\n    super::systemWillShutdown" in nvrm)
+arm("the firmware's ASPM setting is put back at shutdown", "void NVRM::restoreShutdownBars()\n{\n    restoreAspm();" in nvrm)
 arm("-nvrmnoaspm switches it off", '"-nvrmnoaspm"' in nvrm)
 body = nvrm[nvrm.index("void NVRM::enableAspmL1()"):nvrm.index("void NVRM::restoreAspm()")]
 arm("L1 is asked for only with nvrmaspm=1: the opt-in is read before any config register",
     'PE_parse_boot_argn("nvrmaspm"' in body and "on != 1" in body and body.index('"nvrmaspm"') < body.index("configRead"))
-sd = nvrm[nvrm.index("void NVRM::systemWillShutdown"):nvrm.index("// ---- PCIe link power")]
-arm("shutdown keeps the interrupt on through the standby and turns it off before the BAR writes",
-    sd.count("fIntSrc->disable()") == 1 and sd.index("kernel_thread_start") < sd.index("fIntSrc->disable()") < sd.index("nvrmBuildShutdownPlan"))
-arm("the BAR facts are published for the app", all(k in nvrm for k in ('"nvrm-bar1-mb"', '"nvrm-bar1-firmware-mb"', '"nvrm-rebar"', '"nvrm-rebar-max-mb"', '"nvrm-above-4g"', '"nvrm-aspm"')))
+sd = nvrm[nvrm.index("bool NVRM::quiesceForShutdown()"):nvrm.index("void NVRM::restoreShutdownBars()")]
+arm("shutdown keeps the interrupt on through the standby and disables it after success",
+    sd.count("fIntSrc->disable()") == 1 and sd.index("rm_power_management") < sd.index("fIntSrc->disable()") < sd.index("return true"))
+restore = nvrm[nvrm.index("void NVRM::restoreAspm()"):nvrm.index("void NVRM::free()")]
+arm("restoring ASPM retains current non-ASPM link bits", restore.count("& ~3u") == 2)
 if failures:
     print("FAILED:", ", ".join(failures)); sys.exit(1)
 print("PASS")

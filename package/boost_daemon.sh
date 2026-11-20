@@ -4,7 +4,7 @@
 # The opt-in GPU boost daemon (tools/nvmtl-boost): one resource-manager client that holds the system-wide "boost to maximum"
 # request while /Library/NullMoth/gpuboost says gpuboost=1, so the boost can be switched at run time (the Mac app's driver
 # settings toggle runs "set on" / "set off"). OFF unless the installer is run with NULLMOTH_GPU_BOOST=1, and the daemon is
-# not loaded at all until then. install copies the binary from <pkgroot>/Library/NullMoth/boost to
+# not loaded at all until then. install copies the binary from <pkgroot>/Optional/GPU-Boost to
 # /Library/NullMoth/boost/nvmtl-boost, writes the setting (gpuboost=1: the user asked for it), writes the LaunchDaemon plist
 # itself (it names only that path) and loads it; remove undoes exactly that; set only edits the setting and does nothing
 # when the daemon is not installed.
@@ -90,11 +90,17 @@ status)
   else echo "not installed"; fi ;;
 install)
   ROOTDIR=${2:?pkgroot}
-  SRC="$ROOTDIR/Library/NullMoth/boost/nvmtl-boost"
+  SRC="$ROOTDIR/Optional/GPU-Boost/nvmtl-boost"
   [ -f "$SRC" ] || { echo "gpu boost: this package carries no boost daemon; nothing installed"; exit 0; }
-  if [ -z "$P" ]; then lipo -archs "$SRC" 2>/dev/null | grep -qx x86_64 || { echo "gpu boost: the daemon is not an x86_64 binary; nothing installed"; exit 1; }; fi
-  make_dir "$P/Library/NullMoth" && make_dir "$DIR" || exit 1
-  safe_chain "$DIR" || exit 1
+  if [ -z "$P" ]; then
+    lipo -verify_arch x86_64 "$SRC" && codesign --verify --strict "$SRC" || exit 1
+  fi
+  safe_chain "$P/Library" || exit 1
+  make_dir "$P/Library/NullMoth" && safe_chain "$P/Library/NullMoth" || exit 1
+  make_dir "$DIR" && safe_chain "$DIR" || exit 1
+  for target in "$BIN" "$CONF" "$PLIST"; do
+    if [ -e "$target" ] || [ -L "$target" ]; then safe_chain "$target" || exit 1; fi
+  done
   safe_chain "$(dirname "$PLIST")" || exit 1
   launch bootout "system/$LABEL"
   put_file "$SRC" "$BIN" 755 || { echo "gpu boost: copy failed; nothing left behind"; exit 1; }
@@ -103,7 +109,7 @@ install)
   safe_chain "$PLIST" || { rm -f "$PLIST"; exit 1; }
   [ -f "$CONF" ] || write_conf 1 || exit 1
   rm -f "$LEGACY"
-  launch bootstrap system "$PLIST"
+  launch bootstrap system "$PLIST" || exit 1
   echo "gpu boost: installed (turn off with: sudo $0 set off; remove with: sudo $0 remove)" ;;
 set)
   v=${2:-}; case "$v" in on) v=1;; off) v=0;; *) echo "usage: $0 set on|off"; exit 2;; esac

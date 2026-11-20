@@ -2700,7 +2700,7 @@ NSArray<NVMTLArgument *> *nvmtl_arguments_for_function(NVMTLFunction *fn)
                 [seenBuf addObject:@(idx)];
                 [out addObject:nvmtl_build_buffer_argument(fn, idx, b, refl, names)];
             } else if ([kind isEqualToString:@"Texture"] || [kind isEqualToString:@"TextureArray"] || [kind isEqualToString:@"StorageImage"]) {
-                NVMTLArgument *a = [NVMTLTextureArgument new]; a->_type = MTLArgumentTypeTexture; a->_index = idx; a->_active = nvmtl_binding_active(b);
+                NVMTLArgument *a = [NVMTLTextureArgument new]; a->_type = MTLBindingTypeTexture; a->_index = idx; a->_active = nvmtl_binding_active(b);
                 NSString *key = [NSString stringWithFormat:@"texture:%lu", (unsigned long)idx];
                 a->_name = names[@"args"][key] ?: [NSString stringWithFormat:@"texture%lu", (unsigned long)idx];
                 a->_access = nvmtl_access_for_air(names[@"access"][key], [kind isEqualToString:@"StorageImage"] ? MTLBindingAccessReadWrite : nvmtl_access_for(b[@"access"]));
@@ -4172,6 +4172,13 @@ static BOOL nvmtl_pixel_sampler_update(NSMutableDictionary *states, NSString *in
     // _ps is already in the command buffer's resources (setRenderPipelineState); only a sampler variant needs adding
     if (selected != _ps) { if(!_cb->_resources)_cb->_resources=[NVMTLResSet new];[_cb->_resources addObject:selected]; }
     if (selected->_p.fetch_copy && _begun && ![self nvmtlFetchCopy:&selected->_p]) return NO;
+    // A native fetch from an active tiled shadow must see earlier writes from this pass.
+    const uint32_t nativeFetch = selected->_p.fetch_mask & ~selected->_p.fetch_copy;
+    if (nativeFetch && _begun && _passWritten && _cb->_c.active_render_shadows &&
+        (nativeFetch & nvmtl_vk_pass_shadowed_mask(&_pass))) {
+        [self nvmtlHzRestart:NO];
+        if (!_begun) return NO;
+    }
     nvmtl_vk_cmd_bind_pipeline(&_cb->_c,&selected->_p);
     nvmtl_bind_embedded(_cb, NVMTL_SET_VERTEX,   _ps->_descVert, _vbufAt, _vbufOff);
     nvmtl_bind_embedded(_cb, NVMTL_SET_FRAGMENT, _ps->_descFrag, _fbufAt, _fbufOff);
@@ -7615,6 +7622,7 @@ destinationBytesPerImage:(NSUInteger)img options:(MTLBlitOption)opt {
     @synchronized ([NVMTLCommandBuffer class]) { if (!_userDictionary) _userDictionary = [NSMutableDictionary new]; return _userDictionary; }
 }
 - (id<MTLParallelRenderCommandEncoder>)parallelRenderCommandEncoderWithDescriptor:(MTLRenderPassDescriptor *)d {
+    if (_recordingUnavailable) return nil;
     nvmtl_g79_flush(self);
     NVMTLParallelRenderCommandEncoder *p = [NVMTLParallelRenderCommandEncoder new];
     _nEnc++;
@@ -7627,6 +7635,7 @@ destinationBytesPerImage:(NSUInteger)img options:(MTLBlitOption)opt {
     return p;
 }
 - (id<MTLRenderCommandEncoder>)renderCommandEncoderWithDescriptor:(MTLRenderPassDescriptor *)d {
+    if (_recordingUnavailable) return nil;
     nvmtl_g79_flush(self);
     NVMTLRenderCommandEncoder *e = [NVMTLRenderCommandEncoder new];
     _nEnc++;
@@ -7696,7 +7705,7 @@ static void nvmtl_late_present(void) {
     if (kr != KERN_SUCCESS) { state = 0; nvlog("late-frame report refused (0x%x): reporting is off for this process", kr); }
 }
 - (void)nvmtlRecordDrawable:(id<MTLDrawable>)drawable presentation:(dispatch_block_t)action {
-    if (!drawable || _committed) return;
+    if (!drawable || _committed || _recordingUnavailable) return;
     nvmtl_late_present();
     {
         // Frame-rate limiter (NVMTL_FPS_LIMIT in the user's conf block; see nvmtl_fps_limit.h). The wait happens on the
@@ -7837,24 +7846,30 @@ static void nvmtl_late_present(void) {
         [self waitUntilCompleted]; nvtrace("CB done #%lu status %ld", k, (long)self.status); }
 }
 - (id<MTLComputeCommandEncoder>)computeCommandEncoder {
+    if (_recordingUnavailable) return nil;
     NVMTLComputeCommandEncoder *e = [NVMTLComputeCommandEncoder new]; e->_cb = self; _nEnc++; return e;
 }
 - (id<MTLComputeCommandEncoder>)computeCommandEncoderWithDispatchType:(MTLDispatchType)t {
     NVMTLComputeCommandEncoder *e = (NVMTLComputeCommandEncoder *)[self computeCommandEncoder];
-    e->_e78Concurrent = t == MTLDispatchTypeConcurrent; return e; }
+    if (e) e->_e78Concurrent = t == MTLDispatchTypeConcurrent;
+    return e;
+}
 - (id<MTLComputeCommandEncoder>)computeCommandEncoderWithDescriptor:(MTLComputePassDescriptor *)d {
     return [self computeCommandEncoderWithDispatchType:d ? d.dispatchType : MTLDispatchTypeSerial]; }
 - (id<MTLBlitCommandEncoder>)blitCommandEncoderWithDescriptor:(MTLBlitPassDescriptor *)d { return [self blitCommandEncoder]; }
 - (id<MTLResourceStateCommandEncoder>)resourceStateCommandEncoder {
+    if (_recordingUnavailable) return nil;
     if (!nvmtl_vk_sparse_textures_ok()) return nil;   // sparse mapping is the only thing this encoder does
     NVMTLResourceStateCommandEncoder *e = [NVMTLResourceStateCommandEncoder new]; e->_cb = self; _nEnc++; return e;
 }
 - (id<MTLResourceStateCommandEncoder>)resourceStateCommandEncoderWithDescriptor:(MTLResourceStatePassDescriptor *)d { return [self resourceStateCommandEncoder]; }
 - (id<MTLBlitCommandEncoder>)blitCommandEncoder {
+    if (_recordingUnavailable) return nil;
     nvmtl_g79_flush(self);
     NVMTLBlitCommandEncoder *e = [NVMTLBlitCommandEncoder new]; e->_cb = self; e->_owner = self; _nEnc++; return e;
 }
 - (id<MTLAccelerationStructureCommandEncoder>)accelerationStructureCommandEncoder {
+    if (_recordingUnavailable) return nil;
     nvmtl_g79_flush(self);
     NVMTLAccelerationStructureCommandEncoder *e = [NVMTLAccelerationStructureCommandEncoder new]; e->_cb = self; e->_owner = self; _nEnc++; return e;
 }
@@ -7974,8 +7989,12 @@ static void nvmtl_late_present(void) {
     // The set itself takes a lock for every operation; only its creation was unguarded. The first-use checks now never fire.
     cb->_resources = [NVMTLResSet new];
     if (nvmtl_vk_cmd_begin(&_q, &cb->_c)) {
-        // WindowServer asserts on this nil ("Failed to get a MTLCommandBuffer"); the cause is the "vk: command buffer
-        // refused" line just above, and for a disabled backend the "disabling backend" line before it.
+        if (nvmtl_vk_device_removed()) {
+            cb->_recordingUnavailable = YES;
+            [cb nvmtlRecordEncodingError:nvmtl_device_removed_error()];
+            return cb;
+        }
+        // The refusal above distinguishes a failed backend start from a recording allocation failure.
         nvlog("queue: command buffer begin FAILED in %s - the caller gets nil", getprogname());
         return nil;
     }

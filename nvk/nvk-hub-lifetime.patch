@@ -1,0 +1,58 @@
+--- a/src/nouveau/vulkan/nvkmd/nvrm/nvrm_xnu.c
++++ b/src/nouveau/vulkan/nvkmd/nvrm/nvrm_xnu.c
+@@ -313,13 +313,14 @@
+     if (h->fd < 0) {
+         int fd = nvrm_xnu_open(node);
+         if (fd < 0) { pthread_mutex_unlock(&h->mu); return -1; }
+-        h->fd = fd; h->conn = gConn[fd];
++        __atomic_store_n(&h->conn, gConn[fd], __ATOMIC_RELAXED);
++        __atomic_store_n(&h->fd, fd, __ATOMIC_RELEASE);
+     }
+     return h->fd;
+ }
+ static struct nvrm_hub *hub_of_fd(int fd)
+ {
+-    for (int t = 0; t < 2; t++) for (int i = 0; i < NVRM_XNU_HUBS_MAX; i++) if (gHub[t][i].fd == fd) return &gHub[t][i];
++    for (int t = 0; t < 2; t++) for (int i = 0; i < NVRM_XNU_HUBS_MAX; i++) if (__atomic_load_n(&gHub[t][i].fd, __ATOMIC_ACQUIRE) == fd) return &gHub[t][i];
+     return NULL;
+ }
+ // Map the context RM just put on this hub (caller holds the hub from nvrm_xnu_hub_begin). On MAP_FAILED, *fallback = 1
+@@ -371,7 +372,11 @@
+ {
+     struct nvrm_hub *h = hub_of_fd(fd);
+     if (!h) return;
+-    if (stale) { uint64_t in = (uint64_t)fd; IOConnectCallScalarMethod(h->conn, SEL_BINDFD, &in, 1, NULL, NULL); }
++    if (stale) {
++        const uint64_t in = (uint64_t)fd;
++        if (IOConnectCallScalarMethod(h->conn, SEL_BINDFD, &in, 1, NULL, NULL) != KERN_SUCCESS)
++            __atomic_store_n(&h->retired, 1, __ATOMIC_RELEASE);
++    }
+     pthread_mutex_unlock(&h->mu);
+ }
+ void nvrm_xnu_hub_stats(uint64_t *maps, uint64_t *fallbacks, int *hubs)
+@@ -405,7 +410,7 @@
+         }
+         uint64_t in = token; IOConnectCallScalarMethod(conn, SEL_FORGET_TOKEN, &in, 1, NULL, NULL);
+         for (int t = 0; t < 2; t++) for (int i = 0; i < NVRM_XNU_HUBS_MAX; i++)
+-            if (gHub[t][i].conn == conn) __atomic_sub_fetch(&gHub[t][i].live, 1, __ATOMIC_RELAXED);
++            if (__atomic_load_n(&gHub[t][i].conn, __ATOMIC_RELAXED) == conn) __atomic_sub_fetch(&gHub[t][i].live, 1, __ATOMIC_RELAXED);
+         return kr == KERN_SUCCESS ? 0 : (errno = EIO, -1);
+     }
+     IOConnectUnmapMemory64(conn, 0, mach_task_self(), (mach_vm_address_t)(uintptr_t)addr);
+--- a/src/nouveau/vulkan/nvkmd/nvrm/nvRmApi.c
++++ b/src/nouveau/vulkan/nvkmd/nvrm/nvRmApi.c
+@@ -245,9 +245,12 @@
+ 			// mapping is made again on a connection of its own, the path every map took before hubs.
+ 			NVOS34_PARAMETERS u = { .hClient = api->hClient, .hDevice = hDevice, .hMemory = hMemory,
+ 			                        .pLinearAddress = mapping->stubLinearAddress, .flags = 0 };
+-			if (nvRmIoctl(api->fd, NV_ESC_RM_UNMAP_MEMORY, &u, sizeof(u)) < 0 || u.status != NV_OK)
++			const int undo = nvRmIoctl(api->fd, NV_ESC_RM_UNMAP_MEMORY, &u, sizeof(u));
++			nvrm_xnu_hub_end(hubFd, 0);
++			if (undo < 0 || u.status != NV_OK) {
+ 				fprintf(stderr, "nvrm: undoing the RM map before the own-connection retry failed (status 0x%x)\n", u.status);
+-			nvrm_xnu_hub_end(hubFd, 0);
++				return undo < 0 ? NV_ERR_GENERIC : u.status;
++			}
+ 			return nvrm_map_memory_on(api, hDevice, hMemory, offset, length, isSysMem, registers, flags, mapping, false);
+ 		}
+ #endif

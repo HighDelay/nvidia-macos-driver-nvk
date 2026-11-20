@@ -133,6 +133,7 @@ extern id gNVMTLMainDevice;
   NSError *_cbError;
   NSMutableDictionary *_userDictionary;
   @public nvk_cmdbuf _c; NVMTLCommandQueue *_queue; BOOL _committed, _commitMarking, _partsRetiring; BOOL _capacityHeld; MTLCommandBufferStatus _cbstatus;
+  BOOL _recordingUnavailable;
   NVMTLTexture *_present;
   NSMutableArray *_presentations;
   NSMutableArray *_handlers;

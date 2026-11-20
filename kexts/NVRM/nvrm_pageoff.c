@@ -65,19 +65,23 @@ static NV_STATUS _nvrmCopyLocked(OBJGPU *pGpu, NvU32 hClient, NvU32 hMemory, con
     for (i = 1; i < pageCount; i++) if (pages[i] != pages[i - 1] + RM_PAGE_SIZE) runs++;
     nvrm_pageoff_last_runs = runs; nvrm_pageoff_last_pages = pageCount;
     if (runs * 2 <= pageCount) {
-        NvU64 off = 0, workId = 0, n;
+        NvU64 off = 0, lastSubmitted = 0, n;
         nvrm_pageoff_coalesced++;
         for (i = 0; off < length && i < pageCount; i += n) {
             for (n = 1; i + n < pageCount && pages[i + n] == pages[i] + n * RM_PAGE_SIZE; n++) {}
             NvU64 bytes = n * RM_PAGE_SIZE;
             if (bytes > length - off) bytes = length - off;
+            NvU64 workId = 0;
             st = _nvrmCopyRun(pGpu, pMemoryManager->pCeUtils, pMemory->pMemDesc, off, pages[i], bytes, &workId);
+            if (workId) lastSubmitted = workId;
             if (st != NV_OK) break;
             off += bytes;
         }
-        if (st == NV_OK) {
+        // A later run can fail after earlier DMA was queued. The caller can
+        // free or reuse those destinations only after the last run retires.
+        if (lastSubmitted) {
             NvU32 spins = 0;
-            while (ceutilsUpdateProgress(pMemoryManager->pCeUtils) < workId) {
+            while (ceutilsUpdateProgress(pMemoryManager->pCeUtils) < lastSubmitted) {
                 if (++spins > 200000) { st = NV_ERR_TIMEOUT; break; }
                 osDelayUs(10);
             }

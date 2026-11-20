@@ -227,6 +227,7 @@ int  nvmtl_vk_depth_create(uint32_t w, uint32_t h, nvk_image *out);
 void nvmtl_vk_cmd_set_depth(nvk_cmdbuf *c, int test, int write, int compare);
 int  nvmtl_vk_queue_create(nvk_queue *out);
 int  nvmtl_vk_cmd_begin(nvk_queue *q, nvk_cmdbuf *out);
+int  nvmtl_vk_device_removed(void);
 int  nvmtl_vk_cmd_begin_render(nvk_cmdbuf *c, nvk_image *img, nvk_pipeline *p, const float clear[4]);
 int  nvmtl_vk_cmd_begin_render_ex(nvk_cmdbuf *c, nvk_image *img, nvk_pipeline *p, const float clear[4], uint32_t load);
 int  nvmtl_vk_cmd_begin_render_ms(nvk_cmdbuf *c, nvk_image *img, nvk_pipeline *p, const float clear[4], uint32_t load, nvk_image *resolve);
@@ -413,6 +414,7 @@ void nvmtl_vk_pipeline_try_gl_uniform(const void *vs, size_t vn, const void *fs,
                                      const nvk_rt *rt, const void *vin, uint32_t samples, nvk_pipeline *base);
 int  nvmtl_vk_cmd_begin_pass(nvk_cmdbuf *c, const nvk_pass *ps, nvk_pipeline *p);
 int  nvmtl_vk_pass_render_shadowed(const nvk_pass *ps);
+uint32_t nvmtl_vk_pass_shadowed_mask(const nvk_pass *ps);
 int  nvmtl_vk_cmd_empty_pass(nvk_cmdbuf *c, const nvk_pass *ps);
 int  nvmtl_vk_pass_kind(const nvk_pass *ps);
 void nvmtl_vk_cmd_set_stencil(nvk_cmdbuf *c, int enable, const uint32_t *front6, const uint32_t *back6);

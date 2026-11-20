@@ -1490,7 +1490,9 @@ IOReturn NVDisplayPipe::performTransaction(IOAccelDisplayPipeTransaction2 *txn)
     } else ret = a->askFramebufferForScanout(&q, fb);
     if (ret != kIOReturnSuccess || !q.kva || q.pitch < 4 || !q.height) NVIOP_FAIL(kIOReturnNotReady, "framebuffer would not describe its scanout (0x%x kva %p pitch %u)", (unsigned)ret, q.kva, q.pitch);
     if (w != q.width || h != q.height) NVIOP_FAIL(kIOReturnBadArgument, "source %ux%u is not the scanout's %ux%u", w, h, q.width, q.height);
-    if (from10 && (q.pitch < 4ull * w || (q.pitch & 3))) NVIOP_FAIL(kIOReturnBadArgument, "l10r scanout pitch %u is under 4*%u or not word-aligned", q.pitch, w);
+    const bool dst30 = !intelFrame.active() && (q.flags & NVRM_VRAM_SCANOUT_30BIT);
+    if ((from10 || dst30) && (q.pitch < 4ull * w || (q.pitch & 3) || pitch < 4ull * w || (pitch & 3)))
+        NVIOP_FAIL(kIOReturnBadArgument, "invalid pitch for 10-bit scanout: source %u destination %u width %u", pitch, q.pitch, w);
 
     nvAccelIopHome(fb, head);
     const unsigned words = (((pitch < q.pitch) ? pitch : q.pitch) & ~3u) / 4;
@@ -1502,9 +1504,14 @@ IOReturn NVDisplayPipe::performTransaction(IOAccelDisplayPipeTransaction2 *txn)
         for (unsigned y = 0; y < h; y++) {
             const volatile unsigned int *sp = src + (unsigned long)y * spr;
             volatile unsigned int *dp = d + (unsigned long)y * dpr;
-            // l10r is ARGB2101010; keep each channel's top eight bits without copying row padding.
-            if (from10) for (unsigned x = 0; x < w; x++) dp[x] = nv_iop_l10r_to_x8r8g8b8(sp[x]);
-            else        for (unsigned x = 0; x < words; x++) dp[x] = sp[x];
+            if (dst30) {
+                if (from10) for (unsigned x = 0; x < w; x++) dp[x] = nv_iop_l10r_to_x2b10g10r10(sp[x]);
+                else        for (unsigned x = 0; x < w; x++) dp[x] = nv_iop_bgra_to_x2b10g10r10(sp[x]);
+            } else if (from10) {
+                for (unsigned x = 0; x < w; x++) dp[x] = nv_iop_l10r_to_x8r8g8b8(sp[x]);
+            } else {
+                for (unsigned x = 0; x < words; x++) dp[x] = sp[x];
+            }
         }
     }
     if (intelFrame.active() && intelFrame.finish(NMINTELFB_CPU_READY) != kIOReturnSuccess) return kIOReturnSuccess;
@@ -1704,6 +1711,8 @@ SYSCTL_INT(_debug, OID_AUTO, nvaccel_surface_gpu_on, CTLFLAG_RW | CTLFLAG_LOCKED
 NVACCEL_CNT(nvaccel_surface_gpu_marks,    gCntSurfMarks,    "pending/ready marks from WindowServer");
 NVACCEL_CNT(nvaccel_surface_gpu_waits,    gCntSurfWaits,    "swaps that waited here for their composite to finish");
 NVACCEL_CNT(nvaccel_surface_gpu_timeouts, gCntSurfTimeouts, "swaps whose composite did not finish within 100 ms");
+static SInt64 gCntPageoffPooled;
+NVACCEL_CNT(nvaccel_pageoff_pooled, gCntPageoffPooled, "large page-offs staged through 4 MiB chunks");
 SYSCTL_INT(_debug, OID_AUTO, nvaccel_surface_gpu_wait_max_us, CTLFLAG_RD | CTLFLAG_LOCKED, &gSurfWaitMaxUs, 0, "longest swap wait for a composite, us");
 static SInt64 gCntIopAsync, gCntIopAsyncRefused, gCntIopAsyncDrop;
 SYSCTL_INT(_debug, OID_AUTO, nvaccel_iop_async, CTLFLAG_RW | CTLFLAG_LOCKED, &gIopAsync, 0, "1 = the swap runs on a thread call and completes through signalTransactionInterrupt (Apple's shape); 0 = the earlier synchronous flip");
@@ -1780,7 +1789,8 @@ static void nvaccelInstallSysctl(void)
     { extern struct sysctl_oid sysctl__debug_nvaccel_svdiag; sysctl_register_oid(&sysctl__debug_nvaccel_svdiag); }
     sysctl_register_oid(&sysctl__debug_nvaccel_surface_gpu);    sysctl_register_oid(&sysctl__debug_nvaccel_surface_gpu_on);
     sysctl_register_oid(&sysctl__debug_nvaccel_surface_gpu_marks); sysctl_register_oid(&sysctl__debug_nvaccel_surface_gpu_waits);
-    sysctl_register_oid(&sysctl__debug_nvaccel_surface_gpu_timeouts); sysctl_register_oid(&sysctl__debug_nvaccel_surface_gpu_wait_max_us);
+    sysctl_register_oid(&sysctl__debug_nvaccel_surface_gpu_timeouts);
+    sysctl_register_oid(&sysctl__debug_nvaccel_pageoff_pooled); sysctl_register_oid(&sysctl__debug_nvaccel_surface_gpu_wait_max_us);
     sysctl_register_oid(&sysctl__debug_nvaccel_iop_async_refused); sysctl_register_oid(&sysctl__debug_nvaccel_iop_async_drop);
     sysctl_register_oid(&sysctl__debug_nvaccel_iop_late);
     sysctl_register_oid(&sysctl__debug_nvaccel_iop_ok_h0);      sysctl_register_oid(&sysctl__debug_nvaccel_iop_ok_h1);
@@ -2091,6 +2101,85 @@ static IOBufferMemoryDescriptor *nvSVStage(unsigned long long len)
     return b;
 }
 
+// A full staging allocation stops at 64 MiB. Issue one RM request using
+// smaller contiguous runs for a larger surface. The stage lock limits
+// concurrent wired memory and protects the timeout quarantine.
+static bool nvSVStageLarge(IOMemoryDescriptor *target, NVRMSurfPageoff &request,
+                           unsigned long long &cpuUs)
+{
+    constexpr IOByteCount chunkBytes = 4ull << 20;
+    constexpr unsigned maxChunks = 128;
+    constexpr unsigned pageBytes = 4096;
+    static bool timedOut = false;
+    if (timedOut || request.length <= (64ull << 20) ||
+        request.length > chunkBytes * maxChunks) return false;
+
+    auto *pages = static_cast<unsigned long long *>(IOMalloc(request.pageCount * sizeof(*request.pages)));
+    if (!pages) return false;
+    IOBufferMemoryDescriptor *chunks[maxChunks] = {};
+    const unsigned need = (unsigned)((request.length + chunkBytes - 1) / chunkBytes);
+    unsigned ready = 0;
+    unsigned long long page = 0;
+    for (; ready < need; ++ready) {
+        IOBufferMemoryDescriptor *chunk = IOBufferMemoryDescriptor::withOptions(
+            kIODirectionInOut | kIOMemoryPhysicallyContiguous, chunkBytes, PAGE_SIZE);
+        if (!chunk) break;
+        if (chunk->prepare() != kIOReturnSuccess) {
+            chunk->release();
+            break;
+        }
+        IOByteCount bytes = 0;
+        const addr64_t addr = chunk->getPhysicalSegment(0, &bytes, kIOMemoryMapperNone);
+        if (!addr || bytes < chunkBytes || !chunk->getBytesNoCopy()) {
+            chunk->complete();
+            chunk->release();
+            break;
+        }
+        chunks[ready] = chunk;
+        for (IOByteCount offset = 0; offset < chunkBytes && page < request.pageCount; offset += pageBytes)
+            pages[page++] = addr + offset;
+    }
+
+    const bool attempted = ready == need && page == request.pageCount;
+    if (attempted) {
+        request.pages = pages;
+        IOService *nvrm = nvAccelNVRM();
+        const OSSymbol *op = OSSymbol::withCStringNoCopy(NVRM_SS_FN_PAGEOFF);
+        if (nvrm && op) nvrm->callPlatformFunction(op, false, &request, nullptr, nullptr, nullptr);
+        if (op) op->release();
+        request.pages = nullptr;
+        if (request.status == 0) {
+            const uint64_t start = mach_absolute_time();
+            for (unsigned i = 0; i < ready; ++i) {
+                const IOByteCount offset = i * chunkBytes;
+                const IOByteCount remaining = (IOByteCount)request.length - offset;
+                const IOByteCount bytes = remaining < chunkBytes ? remaining : chunkBytes;
+                if (target->writeBytes(offset, chunks[i]->getBytesNoCopy(), bytes) != bytes) {
+                    request.status = NVRM_SS_TOO_SMALL;
+                    break;
+                }
+            }
+            uint64_t ns = 0;
+            absolutetime_to_nanoseconds(mach_absolute_time() - start, &ns);
+            cpuUs = ns / 1000;
+            if (!request.status) OSAddAtomic64(1, &gCntPageoffPooled);
+        } else if (request.status == 0x65u) {
+            // DMA into these chunks may still be active. Limit quarantine to
+            // this request and leave subsequent large transfers on the fallback.
+            timedOut = true;
+            ALOG("surfvram pageoff: CE timeout; retaining %u wired staging chunks", ready);
+        }
+    }
+    if (!timedOut) {
+        for (unsigned i = 0; i < ready; ++i) {
+            chunks[i]->complete();
+            chunks[i]->release();
+        }
+    }
+    IOFree(pages, request.pageCount * sizeof(*request.pages));
+    return attempted && (!request.status || timedOut);
+}
+
 void NVResource::pageoff(IOAccelEvent *ev, bool a1, bool *out, unsigned long long a3)
 {
     volatile unsigned char *r = (volatile unsigned char *)this;
@@ -2152,6 +2241,21 @@ void NVResource::pageoff(IOAccelEvent *ev, bool a1, bool *out, unsigned long lon
             }
             staged = true;
             IOFree(spa, pages * sizeof *spa);
+        }
+        if (!staged) {
+            NVRMSurfPageoff request = {};
+            request.version = NVRM_SS_RM_VERSION;
+            request.status = NVRM_SS_OFF;
+            request.kapiDevice = h.kapiDevice;
+            request.kapiMemory = vm->fRmHandle;
+            request.pageCount = pages;
+            request.length = len;
+            if (nvSVStageLarge(md, request, cpuUs)) {
+                staged = true;
+                st = request.status;
+                usec = request.usec;
+                ok = st == 0;
+            }
         }
         IOLockUnlock(lk);
     }

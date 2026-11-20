@@ -5,7 +5,7 @@
 // Panel brightness through the eDP DPCD (VESA eDP 1.4 section on backlight control), for internal panels the resource manager
 // registers no backlight for: no ACPI brightness method and nothing the firmware knows how to drive, so NVKMS reports no
 // backlight and macOS shows no slider. Many such panels take brightness over the AUX channel: the sink advertises it in
-// DPCD 0x702 bit 1 and the source writes the level to 0x722/0x723. This is what Linux does for the same panels (drm_edp_backlight_*).
+// DPCD 0x702 bit 1 and the source can write levels to 0x722/0x723 while the panel is in DPCD mode.
 // A panel that only has the PWM pin (0x702 bit 0 without bit 1) stays out of reach: its PWM comes from the card's firmware tables.
 // Identical copies live in kexts/NVRMFB and kexts/NVRM only through nvrm_ddc_abi.h's request; this header is NVRMFB's.
 #pragma once
@@ -32,18 +32,4 @@ static inline unsigned edpBacklightLevel(unsigned percent, bool twoBytes)
 {
     if (percent > 100) percent = 100;
     return twoBytes ? (percent * 0xFFFFu + 50) / 100 : (percent * 0xFFu + 50) / 100;
-}
-// DPCD write sequence to set a level: mode = DPCD control, backlight enabled, level. `mode` and `ctl` are the current register
-// contents (read first, so other bits are preserved). Returns the number of (addr, value) writes put in out[] (max 5).
-struct EdpWrite { unsigned addr; unsigned char value; };
-static inline unsigned edpBacklightPlan(const EdpBacklightCaps &c, unsigned char mode, unsigned char ctl, unsigned percent, EdpWrite out[5])
-{
-    unsigned n = 0;
-    if (!c.auxSet) return 0;
-    const unsigned lvl = edpBacklightLevel(percent, c.twoBytes);
-    if ((mode & kEdpModeMask) != kEdpModeDpcd) out[n++] = { kEdpBacklightMode, (unsigned char)((mode & ~kEdpModeMask) | kEdpModeDpcd) };
-    if (c.twoBytes) { out[n++] = { kEdpBacklightMsb, (unsigned char)(lvl >> 8) }; out[n++] = { kEdpBacklightLsb, (unsigned char)(lvl & 0xff) }; }
-    else out[n++] = { kEdpBacklightMsb, (unsigned char)lvl };
-    if (!(ctl & kEdpCtlBacklightEnable)) out[n++] = { kEdpDisplayCtl, (unsigned char)(ctl | kEdpCtlBacklightEnable) };
-    return n;
 }

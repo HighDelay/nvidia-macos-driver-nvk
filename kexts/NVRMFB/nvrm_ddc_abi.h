@@ -65,3 +65,11 @@ struct NVRMDpAuxRequest {
     unsigned status;           // out: resource manager status (0 = ok)
     unsigned char data[kNvrmDpAuxMax];
 };
+
+#define NVRM_EDP_BACKLIGHT_FN "NVRMEdpBacklight"
+struct NVRMEdpBacklightRequest {
+    unsigned gpuId;
+    unsigned displayId;
+    bool set;
+    unsigned percent;
+};

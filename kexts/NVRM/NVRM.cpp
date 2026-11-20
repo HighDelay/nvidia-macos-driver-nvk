@@ -9,7 +9,12 @@
 #include "nvrm_power.h"
 #include "nvrm_utilization.h"
 #include "nvrm_bar_limits.h"
+#include "nvrm_aspm.h"
+#include "nvrm_shutdown_plan.h"
+#include "nvrm_ddc_abi.h"
 
+extern "C" int nvrm_ddc_transfer(struct NVRMDdcRequest *);
+extern "C" int nvrm_edp_backlight(struct NVRMEdpBacklightRequest *);
 extern "C" void nv_xnu_power_refresh(void);   // nv_xnu_power.cpp
 #include <IOKit/IOService.h>
 #include <IOKit/IOUserClient.h>
@@ -134,6 +139,7 @@ public:
     virtual IOReturn callPlatformFunction(const OSSymbol *fn, bool wait,
                                          void *p1, void *p2, void *p3, void *p4) override;
     virtual IOReturn setPowerState(unsigned long ordinal, IOService *device) override;
+    void systemWillShutdown(IOOptionBits specifier) override;
 private:
     // System sleep (S3). NVRM is a power child of the GPU's IOPCIDevice, so it is told to power off before the slot
     // loses power and to power on once IOPCIFamily has the device back in D0.
@@ -146,6 +152,17 @@ private:
         UInt32 bar[6]; UInt16 cmd;
         IOPCIDevice *rp; UInt32 rpWin[6]; UInt16 rpCmd;   // root port 0x18..0x2c and command
     } fPciSave = {};
+    UInt16 fOrigEpLnkCtl = 0xffff, fOrigUpLnkCtl = 0;
+    NvrmBarUndo fBarUndo = {};
+    enum { kShutdownPending = 0, kShutdownQuiesced = 1, kShutdownFailed = 2 };
+    volatile SInt32 fShutdownHandled = 0;
+    volatile SInt32 fShutdownDone = kShutdownPending;
+    bool fShutdownFullRequested = false;
+    static void shutdownAdapter(void *p, wait_result_t);
+    bool quiesceForShutdown();
+    void restoreShutdownBars();
+    void enableAspmL1();
+    void restoreAspm();
     void gpuSuspend();
     void gpuResume();
     void pciSaveForSleep();
@@ -163,6 +180,7 @@ private:
     uint32_t     fPassDone = 0;
     IOWorkLoop  *fWorkLoop = NULL;
     IOFilterInterruptEventSource *fIntSrc = NULL;
+    void clearInterruptSource();
     void readBARs();
     void publishGpuProfile();
     bool placeLargeBar1();
@@ -341,6 +359,14 @@ private:
     // pending length is applied only while the generation it was recorded at is still current.
     NvU64 fMapGen = 0;
     nv_alloc_mapping_list_node_t *fMapHeadAtAcquire = nullptr;   // list head when RM took the write hold
+    // Token mappings (selector 7 advertises them, selector 8 forgets one; see clientMemoryForType). A memory type with
+    // kNvMapTokenBit set names one mapping: its first clientMemoryForType consumes the pending context and keeps the
+    // descriptor it built under that token, so the unmap - which IOKit resolves by calling clientMemoryForType again
+    // with the same type and looking the mapping up on the descriptor it gets back - finds it. Under fMapLock.
+    struct NvMapToken { uint32_t token; IOOptionBits options; IOMemoryDescriptor *md; };
+    NvMapToken *fTok = nullptr;
+    unsigned fNTok = 0;
+    unsigned fTokCap = 0;                // entries fTok has room for (nvrm_tok_table.h)
     bool fIsCtl = true;
     int  fFd = -1;
     int  fPid = 0;
@@ -348,7 +374,7 @@ private:
     int  fBound = -1;
     SInt32 fCleaned = 0;
     IOLock *fGate = nullptr;      // serialises this client's methods against its own teardown
-    // Guards fMapList and nothing else. It is separate from fGate because RM writes another client's context from inside
+    // Guards the mapping list and token table. It is separate from fGate because RM writes another client's context from inside
     // that client's neighbour's esc(), and because bind does not hold fGate. Nothing that takes another lock runs under it.
     IOLock *fMapLock = nullptr;
     // Held across stateful esc() calls, clientMemoryForType() and the teardown in clientClose. Stateless
@@ -367,6 +393,8 @@ private:
     static IOReturn sBindFd(OSObject *target, void *reference, IOExternalMethodArguments *args);
     static IOReturn sRetired(OSObject *target, void *reference, IOExternalMethodArguments *args);
     static IOReturn sWaitEvent(OSObject *target, void *reference, IOExternalMethodArguments *args);
+    static IOReturn sCaps(OSObject *target, void *reference, IOExternalMethodArguments *args);
+    static IOReturn sForgetToken(OSObject *target, void *reference, IOExternalMethodArguments *args);
 public:
     volatile UInt32 fEvtSeq = 0;
     UInt32 fEvtMagic = 0x4e564556u;
@@ -927,6 +955,8 @@ void NVRM::bootHoldCap(thread_call_param_t p0, thread_call_param_t)
     s->release();
 }
 
+extern "C" bool nv_xnu_fw_wait(unsigned capMs);
+
 void NVRM::autoGo(void *p0, wait_result_t)
 {
     NVRM *s = (NVRM *)p0;
@@ -955,11 +985,16 @@ void NVRM::autoGo(void *p0, wait_result_t)
     } else {
         IOSleep(s->fAutoGoSettleMs);
     }
+    // Allow the early firmware volume to mount within the existing bring-up deadline.
+    { uint64_t t; clock_get_uptime(&t); absolutetime_to_nanoseconds(t, &s->fBringUpStartNs); }
+    s->fBringUp = 1;
+    const unsigned fwWaitMs = s->fHoldCapMs / 4;
+    if (!nv_xnu_fw_wait(fwWaitMs))
+        LOG("GSP firmware still unavailable after %u ms; attempting normal startup", fwWaitMs);
+
     s->measureBootRaster();
     { thread_t hw = THREAD_NULL; s->retain();
       if (kernel_thread_start(&NVRM::headWatch, s, &hw) == KERN_SUCCESS) thread_deallocate(hw); else s->release(); }
-    { uint64_t t; clock_get_uptime(&t); absolutetime_to_nanoseconds(t, &s->fBringUpStartNs); }
-    s->fBringUp = 1;
     IOReturn r = s->go(2);
     // how long go(2) took, which says whether the cap was wide enough
     { uint64_t t, ns = 0; clock_get_uptime(&t); absolutetime_to_nanoseconds(t, &ns);
@@ -1455,6 +1490,8 @@ bool NVRM::placeLargeBar1()
     fPCI->configWrite16(0x04, cmd | 0x2);
 
     fPCI->setDeviceMemory(arr);
+    fBarUndo = { true, cmd, newSize != 0, rbCtlOff, rbCtlOld,
+                 lo14, old18, lo1c, hi20, rp24, rp28, rp2c };
     fPCI->setProperty("nvrm-bar1-placed", bar1Base, 64);
     LOG("bar1: PLACED — BAR1 %llu MB live at 0x%llx", bar1Size >> 20, bar1Base);
     {
@@ -1646,7 +1683,11 @@ IOReturn NVRM::go(uint32_t pass)
         fIntSrc = IOFilterInterruptEventSource::filterInterruptEventSource(this,
                     OSMemberFunctionCast(IOInterruptEventAction, this, &NVRM::interruptOccurred),
                     OSMemberFunctionCast(IOFilterInterruptAction, this, &NVRM::interruptFilter), fPCI, msi);
-        if (!fWorkLoop || !fIntSrc || fWorkLoop->addEventSource(fIntSrc) != kIOReturnSuccess) { LOG("interrupt source setup FAILED"); return kIOReturnError; }
+        if (!fWorkLoop || !fIntSrc || fWorkLoop->addEventSource(fIntSrc) != kIOReturnSuccess) {
+            LOG("interrupt source setup FAILED");
+            clearInterruptSource();
+            return kIOReturnError;
+        }
         fIntSrc->enable();
         nv->interrupt_line = (NvU32)msi;
         LOG("MSI %d armed; calling rm_init_adapter() — GSP boot from inside macOS", msi);
@@ -1654,10 +1695,14 @@ IOReturn NVRM::go(uint32_t pass)
         LOG("rm_init_adapter -> %s", ok ? "OK" : "FAILED");
         nv_xnu_dump_live_allocs();
         nv_xnu_dump_gsp_regs(nv);
-        if (!ok) return kIOReturnError;
+        if (!ok) {
+            clearInterruptSource();
+            return kIOReturnError;
+        }
         fAdapter = true;
         LOG("PASS 2 REACHED: the adapter is up — GSP-RM is running on the card under macOS");
         fPassDone = 2;
+        enableAspmL1();
         {
             NvU32 ramKb = 0, totalKb = 0, qst = 0;
             if (nvrm_query_vram_kb(nv->gpu_id, &ramKb, &totalKb, &qst) && ramKb) {
@@ -1676,6 +1721,17 @@ IOReturn NVRM::go(uint32_t pass)
         nvrm_power_start(fPower, &fNv);
     }
     return kIOReturnSuccess;
+}
+
+void NVRM::clearInterruptSource()
+{
+    if (fIntSrc) {
+        fIntSrc->disable();
+        if (fWorkLoop && fIntSrc->getWorkLoop() == fWorkLoop)
+            fWorkLoop->removeEventSource(fIntSrc);
+        OSSafeReleaseNULL(fIntSrc);
+    }
+    OSSafeReleaseNULL(fWorkLoop);
 }
 
 bool NVRM::interruptFilter(IOFilterInterruptEventSource *src)
@@ -1716,10 +1772,177 @@ void NVRM::stop(IOService *provider)
     }
     if (fPmJoined) { PMstop(); fPmJoined = false; }
     if (fAdapter) { rm_shutdown_adapter(NULL, &fNv); fAdapter = false; }
-    if (fIntSrc) { fIntSrc->disable(); if (fWorkLoop) fWorkLoop->removeEventSource(fIntSrc); fIntSrc->release(); fIntSrc = NULL; }
-    if (fWorkLoop) { fWorkLoop->release(); fWorkLoop = NULL; }
+    if (OSAddAtomic(0, &fGpuPm) == kGpuPmRunning) restoreAspm();
+    clearInterruptSource();
     if (fPrivateState) { rm_free_private_state(NULL, &fNv); fPrivateState = false; }
     super::stop(provider);
+}
+
+extern "C" void nvkms_xnu_suspend(NvU32 gpuId);
+
+void NVRM::shutdownAdapter(void *p, wait_result_t)
+{
+    NVRM *s = static_cast<NVRM *>(p);
+    const bool ok = s->quiesceForShutdown();
+    OSCompareAndSwap(kShutdownPending, ok ? kShutdownQuiesced : kShutdownFailed, &s->fShutdownDone);
+    s->release();
+    thread_terminate(current_thread());
+}
+
+bool NVRM::quiesceForShutdown()
+{
+    if (!OSCompareAndSwap(kGpuPmRunning, kGpuPmSuspended, &fGpuPm)) return false;
+    nvrm_power_suspend(fPower);
+    notifyFramebuffers(0);
+    nvkms_xnu_suspend(fNv.gpu_id);
+
+    const int busy = nv_xnu_pm_close(3000);
+    if (busy) {
+        LOG("shutdown: %d RM calls remain active", busy);
+        nv_xnu_pm_open();
+        return false;
+    }
+
+    const NV_STATUS stopped = rm_stop_user_channels(NULL, &fNv);
+    if (stopped != NV_OK) {
+        LOG("shutdown: stopping user channels failed (0x%x)", (unsigned)stopped);
+        nv_xnu_pm_open();
+        return false;
+    }
+
+    unsigned open = 0;
+    IOLockLock(gNvClientsLock);
+    for (auto *client : gNvClients) if (client) ++open;
+    IOLockUnlock(gNvClientsLock);
+    if (nvrmShutdownMode(fShutdownFullRequested, open, fAdapter) == kShutdownFull) {
+        rm_shutdown_adapter(NULL, &fNv);
+        fAdapter = false;
+    } else {
+        const NV_STATUS status = rm_power_management(NULL, &fNv, NV_PM_ACTION_STANDBY);
+        if (status != NV_OK) {
+            LOG("shutdown: RM standby failed (0x%x)", (unsigned)status);
+            nv_xnu_pm_open();
+            return false;
+        }
+    }
+    if (fIntSrc) fIntSrc->disable();
+    return true;
+}
+
+void NVRM::restoreShutdownBars()
+{
+    restoreAspm();
+    IOPCIDevice *root = nullptr;
+    if (IOService *bridge = fPCI->getProvider())
+        root = OSDynamicCast(IOPCIDevice, bridge->getProvider());
+
+    NvrmStep plan[16];
+    const unsigned count = root ? nvrmBuildShutdownPlan(&fBarUndo, plan, 16) : 0;
+    if (!count) {
+        fPCI->setBusMasterEnable(false);
+        return;
+    }
+    for (unsigned i = 0; i < count; ++i) {
+        const auto &step = plan[i];
+        switch (step.kind) {
+            case kStepCmd16: fPCI->configWrite16(step.off, (UInt16)step.value); break;
+            case kStepExt32: fPCI->extendedConfigWrite32(step.off, step.value); break;
+            case kStepCfg32: fPCI->configWrite32(step.off, step.value); break;
+            case kStepRootPort32: root->configWrite32(step.off, step.value); break;
+        }
+    }
+    LOG("shutdown: restored firmware BAR layout");
+}
+
+void NVRM::systemWillShutdown(IOOptionBits specifier)
+{
+    char mode[16] = {};
+    char off[8] = {};
+    const bool requested = PE_parse_boot_argn("nvrmshutdown", mode, sizeof mode) &&
+                           (!strcmp(mode, "standby") || !strcmp(mode, "full")) &&
+                           !PE_parse_boot_argn("-nvrmnoshutdown", off, sizeof off);
+    if (requested && fPmJoined && fAdapter && OSCompareAndSwap(0, 1, &fShutdownHandled)) {
+        fShutdownFullRequested = !strcmp(mode, "full");
+        thread_t thread = THREAD_NULL;
+        retain();
+        if (kernel_thread_start(&NVRM::shutdownAdapter, this, &thread) == KERN_SUCCESS) {
+            thread_deallocate(thread);
+            unsigned waited = 0;
+            while (OSAddAtomic(0, &fShutdownDone) == kShutdownPending && waited < 8000) {
+                IOSleep(10);
+                waited += 10;
+            }
+            // A timed-out worker may still be using the programmed apertures.
+            if (OSAddAtomic(0, &fShutdownDone) == kShutdownQuiesced)
+                restoreShutdownBars();
+            else
+                LOG("shutdown: GPU did not quiesce in %u ms; retaining the programmed BARs", waited);
+        } else {
+            release();
+            LOG("shutdown: could not start GPU quiesce");
+        }
+    } else if (!OSAddAtomic(0, &fShutdownHandled) && fAdapter &&
+               OSAddAtomic(0, &fGpuPm) == kGpuPmRunning) {
+        restoreAspm();
+    }
+    super::systemWillShutdown(specifier);
+}
+
+// ---- PCIe link power (ASPM L1) -------------------------------------------------------------------------------------
+// The PCI Express capability's offset in a device's config space, 0 when there is none.
+template <class D> static UInt8 nvrmPcieCap(D *d)
+{
+    for (UInt8 c = d->configRead8(0x34) & 0xfc, n = 0; c && n < 48; c = d->configRead8(c + 1) & 0xfc, n++)
+        if (d->configRead8(c) == 0x10) return c;
+    return 0;
+}
+
+void NVRM::enableAspmL1()
+{
+    char off[8] = { 0 };
+    if (PE_parse_boot_argn("-nvrmnoaspm", off, sizeof off)) { fPCI->setProperty("nvrm-aspm", "off (-nvrmnoaspm)"); return; }
+    // Opt-in (nvrmaspm=1). Linux's default policy keeps the link as the firmware set it, and NVIDIA's own driver turns
+    // L1 on only for chipsets it lists; a desktop link pushed into L1 without the common-clock, L1 substate and LTR set-up
+    // the PCI core does can drop the card off the bus when it idles. Laptop firmware that wants L1 has already set it.
+    { uint32_t on = 0; if (!PE_parse_boot_argn("nvrmaspm", &on, sizeof on) || on != 1) { fPCI->setProperty("nvrm-aspm", "as the firmware set it (nvrmaspm=1 asks for L1)"); return; } }
+    decltype(fPCI) up = NULL;   // the port above the card (IOPCIDevice is deprecated: spelled through fPCI)
+    if (IOService *pp = fPCI->getProvider())
+        if (IOService *u = pp->getProvider()) if (u->metaCast("IOPCIDevice")) up = static_cast<decltype(fPCI)>(u);
+    const UInt8 ec = nvrmPcieCap(fPCI), uc = up ? nvrmPcieCap(up) : 0;
+    NvrmAspmEnd ep = {}, ue = {};
+    if (ec) { ep.present = true; ep.devCap = fPCI->configRead32(ec + 4); ep.lnkCap = fPCI->configRead32(ec + 0x0c); ep.lnkCtl = fPCI->configRead16(ec + 0x10); }
+    if (uc) { ue.present = true; ue.devCap = up->configRead32(uc + 4); ue.lnkCap = up->configRead32(uc + 0x0c); ue.lnkCtl = up->configRead16(uc + 0x10); }
+    unsigned epCtl = 0, upCtl = 0;
+    const NvrmAspmWhy why = nvrmAspmPlan(&ep, &ue, &epCtl, &upCtl);
+    if (why == kAspmEnabled) {
+        if (fOrigEpLnkCtl == 0xffff) {
+            fOrigEpLnkCtl = (UInt16)(ep.lnkCtl & 3);
+            fOrigUpLnkCtl = (UInt16)(ue.lnkCtl & 3);
+        }
+        up->configWrite16(uc + 0x10, (UInt16)upCtl);   // upstream first, as the PCI core does
+        fPCI->configWrite16(ec + 0x10, (UInt16)epCtl);
+        const bool ok = (fPCI->configRead16(ec + 0x10) & 2) && (up->configRead16(uc + 0x10) & 2);
+        if (!ok) restoreAspm();
+        fPCI->setProperty("nvrm-aspm", ok ? "L1" : "L1 requested, not accepted");
+        LOG("aspm: L1 %s on the card's link (card Link Control 0x%04x, upstream 0x%04x)", ok ? "enabled" : "requested but not accepted",
+            fPCI->configRead16(ec + 0x10), up->configRead16(uc + 0x10));
+    } else {
+        fPCI->setProperty("nvrm-aspm", nvrmAspmWhyString(why));
+        LOG("aspm: L1 not changed - %s", nvrmAspmWhyString(why));
+    }
+}
+
+// Puts the firmware's ASPM setting back before power-off, so the next start sees the link as it left it.
+void NVRM::restoreAspm()
+{
+    if (fOrigEpLnkCtl == 0xffff) return;
+    decltype(fPCI) up = NULL;
+    if (IOService *pp = fPCI->getProvider())
+        if (IOService *u = pp->getProvider()) if (u->metaCast("IOPCIDevice")) up = static_cast<decltype(fPCI)>(u);
+    const UInt8 ec = nvrmPcieCap(fPCI), uc = up ? nvrmPcieCap(up) : 0;
+    if (ec) fPCI->configWrite16(ec + 0x10, (fPCI->configRead16(ec + 0x10) & ~3u) | fOrigEpLnkCtl);
+    if (uc) up->configWrite16(uc + 0x10, (up->configRead16(uc + 0x10) & ~3u) | fOrigUpLnkCtl);
+    fOrigEpLnkCtl = 0xffff;
 }
 
 void NVRM::free()
@@ -1733,6 +1956,7 @@ extern "C" { void nvkms_xnu_suspend(NvU32 gpuId); void nvkms_xnu_resume(NvU32 gp
 
 IOReturn NVRM::setPowerState(unsigned long ordinal, IOService *device)
 {
+    if (OSAddAtomic(0, &fShutdownHandled)) return kIOPMAckImplied;
     nv_xnu_power_refresh();        // a wake can be a change of power source; this runs before the firmware asks
     const SInt32 pm = OSAddAtomic(0, &fGpuPm);
     if (ordinal == 0 && pm == kGpuPmRunning && fAdapter) gpuSuspend();
@@ -1781,6 +2005,7 @@ void NVRM::gpuResume()
     if (fIntSrc) fIntSrc->enable();
     NV_STATUS st = ok ? rm_power_management(NULL, &fNv, NV_PM_ACTION_RESUME) : NV_ERR_GPU_IS_LOST;
     ok = st == NV_OK;
+    if (ok) enableAspmL1();
     NV_STATUS cst = ok ? rm_restart_user_channels(NULL, &fNv) : NV_ERR_GPU_IS_LOST;   // nv_restore_user_channels()
     OSCompareAndSwap(kGpuPmSuspended, ok ? kGpuPmRunning : kGpuPmLost, &fGpuPm);
     nvkms_xnu_resume(fNv.gpu_id, ok);
@@ -1963,6 +2188,16 @@ IOReturn NVRM::callPlatformFunction(const OSSymbol *fn, bool wait, void *p1, voi
         NvU32 *percent = (NvU32 *)p1; if (!percent) return kIOReturnBadArgument;
         return nvkms_xnu_backlight(p2 != NULL, percent) ? kIOReturnSuccess : kIOReturnNotFound;
     }
+    if (fn && (fn->isEqualTo(NVRM_DDC_FN) || fn->isEqualTo(NVRM_EDP_BACKLIGHT_FN))) {
+        if (!p1) return kIOReturnBadArgument;
+        int counted = 0;
+        if (!nv_xnu_pm_try_enter(&counted)) return kIOReturnNotReady;
+        const int result = fn->isEqualTo(NVRM_DDC_FN)
+            ? nvrm_ddc_transfer(static_cast<NVRMDdcRequest *>(p1))
+            : nvrm_edp_backlight(static_cast<NVRMEdpBacklightRequest *>(p1));
+        nv_xnu_pm_exit(counted);
+        return result ? kIOReturnIOError : kIOReturnSuccess;
+    }
     if (fn && fn->isEqualTo("NVRMGpuReady"))         // NVRMFB: may the display engine be touched (not in system sleep)?
         return OSAddAtomic(0, &fGpuPm) == kGpuPmRunning ? kIOReturnSuccess : kIOReturnNotReady;
     if (fn && fn->isEqualTo("NVRMGpuPower"))         // sent down to the framebuffers; an older NVRMFB passes it back up
@@ -2016,7 +2251,7 @@ IOReturn NVRM::callPlatformFunction(const OSSymbol *fn, bool wait, void *p1, voi
 bool NVRMUserClient::start(IOService *provider)
 {
     fOwner = OSDynamicCast(NVRM, provider);
-    if (!fOwner) return false;
+    if (!fOwner || OSAddAtomic(0, &fOwner->fShutdownHandled)) return false;
     return super::start(provider);
 }
 bool NVRMUserClient::initWithTask(task_t owningTask, void *securityID, UInt32 type, OSDictionary *properties)
@@ -2102,14 +2337,46 @@ void NVRMUserClient::free(void)
     if (fMapLock) IOLockLock(fMapLock);
     nvMapListFree(&fMapList);
     fMapLen = 0; fMapLenNode = nullptr; fMapGen++;
+    if (fTok) {
+        for (unsigned i = 0; i < fNTok; i++) if (fTok[i].md) fTok[i].md->release();
+        kern_os_free(fTok); fTok = nullptr; fNTok = 0; fTokCap = 0;
+    }
     if (fMapLock) IOLockUnlock(fMapLock);
     if (fGate) { IOLockFree(fGate); fGate = nullptr; }
     if (fMapLock) { IOLockFree(fMapLock); fMapLock = nullptr; }
     super::free();
 }
+// Token mappings - many CPU mappings on one connection.
+// Type 0 is the original contract: map whatever context is pending, and leave it pending (the userland driver opens
+// one connection per mapping and closes it with the mapping). That costs a user-client connection per live mapping;
+// Cyberpunk held ~275 of them. With a token type (kNvMapTokenBit set, chosen by the caller, unique per mapping on this
+// client) the first call consumes the pending context - the way Linux's per-file mapping list is used once per mmap -
+// so RM accepts the next RM_MAP_MEMORY on the same fd, and the descriptor is kept under the token. Every later call with
+// that token returns the SAME descriptor: IOKit's unmap (is_io_connect_unmap_memory_from_task) calls clientMemoryForType
+// with the type it is given and finds the mapping with kIOMapReference on the returned descriptor's own mapping list,
+// so a fresh descriptor would never match and the mapping would stay until the connection closed. That is the shape of
+// the 10-14 bug (8494d18): a cleared context made the unmap lookup fail and VRAM stayed mapped until exit.
+// The caller forgets the token (selector 8) after unmapping, which drops the descriptor. RM's own unmap
+// (NV_ESC_RM_UNMAP_MEMORY -> Nv04UnmapMemoryWithSecInfo, on the ctl fd, by hClient/hDevice/hMemory/pLinearAddress) never
+// reads the per-file list, and nv_free_user_mapping is a no-op here, so consuming the node takes nothing RM needs.
+// The pages stay alive through the descriptor, not the node (see nv_inc_alloc_refcount in os-xnu2.cpp).
+#include "nvrm_tok_table.h"
+static const uint32_t kNvMapTokenBit = 0x80000000u;
+static const unsigned kNvMapTokensPerClient = 4096;
 IOReturn NVRMUserClient::clientMemoryForType(UInt32 type, IOOptionBits *options, IOMemoryDescriptor **memory)
 {
     Gate g(fGate);
+    const bool tokenMode = (type & kNvMapTokenBit) != 0;
+    // any other type keeps the original behaviour (it was never checked, so nothing is refused that was accepted)
+    if (tokenMode) {
+        IOMemoryDescriptor *have = nullptr; IOOptionBits haveOpts = 0;
+        IOLockLock(fMapLock);
+        for (unsigned i = 0; i < fNTok; i++)
+            if (fTok[i].token == type) { have = fTok[i].md; haveOpts = fTok[i].options; have->retain(); break; }
+        IOLockUnlock(fMapLock);
+        if (have) { *options |= haveOpts; *memory = have; return kIOReturnSuccess; }
+    }
+    nv_alloc_mapping_list_node_t *snapNode = nullptr; NvU64 snapGen = 0;
     // Everything below reads this private copy. RM or a bind can replace the live context at any moment, and the ranges
     // that are checked must be the ranges that are mapped.
     nv_alloc_mapping_context_t snapshot;
@@ -2122,6 +2389,7 @@ IOReturn NVRMUserClient::clientMemoryForType(UInt32 type, IOOptionBits *options,
         return kIOReturnBadArgument;
     }
     snapshot = fMapList->context;
+    snapNode = fMapList; snapGen = fMapGen;
     snapLen = (fMapLenNode == fMapList) ? fMapLen : 0;   // a length belongs to one node only
     if (!fIsCtl) {
         const NvU64 count = snapshot.memArea.numRanges;
@@ -2182,10 +2450,74 @@ IOReturn NVRMUserClient::clientMemoryForType(UInt32 type, IOOptionBits *options,
         kprintf("NVRM-xnu: map fd %d: device %llu range(s) first 0x%llx+0x%llx caching %u\n", fFd, n, c->memArea.pRanges[0].start, c->memArea.pRanges[0].size, caching);
     }
     if (!md) return kIOReturnNoMemory;
-    if (caching == NV_MEMORY_UNCACHED) *options |= kIOMapInhibitCache;
-    else if (caching == NV_MEMORY_WRITECOMBINED) *options |= kIOMapWriteCombineCache;
-    if (!(c->prot & NV_PROTECT_WRITEABLE)) *options |= kIOMapReadOnly;
+    IOOptionBits add = 0;
+    if (caching == NV_MEMORY_UNCACHED) add |= kIOMapInhibitCache;
+    else if (caching == NV_MEMORY_WRITECOMBINED) add |= kIOMapWriteCombineCache;
+    if (!(c->prot & NV_PROTECT_WRITEABLE)) add |= kIOMapReadOnly;
+    if (tokenMode) {
+        IOReturn r = kIOReturnSuccess;
+        IOLockLock(fMapLock);
+        if (fMapList != snapNode || fMapGen != snapGen) r = kIOReturnBusy;   // RM replaced the context meanwhile
+        else {
+            // room for one more: the table grows with what the client holds (nvrm_tok_table.h says why)
+            const unsigned cap = nvrm_tok_next_capacity(fTokCap, fNTok, kNvMapTokensPerClient);
+            if (!cap) r = kIOReturnNoResources;
+            else if (cap != fTokCap) {
+                NvMapToken *grown = (NvMapToken *)kern_os_malloc(sizeof(NvMapToken) * cap);
+                if (!grown) r = kIOReturnNoMemory;
+                else {
+                    if (fTok) { nvu_memcpy(grown, fTok, sizeof(NvMapToken) * fNTok); kern_os_free(fTok); }
+                    fTok = grown; fTokCap = cap;
+                }
+            }
+        }
+        if (r == kIOReturnSuccess) {
+            nv_alloc_mapping_list_node_t *one = fMapList;
+            fMapList = one->pNext; one->pNext = nullptr;
+            nvMapListFree(&one);
+            fMapLen = 0; fMapLenNode = nullptr; fMapGen++;
+            md->retain();
+            fTok[fNTok].token = type; fTok[fNTok].options = add; fTok[fNTok].md = md; fNTok++;
+        }
+        IOLockUnlock(fMapLock);
+        if (r != kIOReturnSuccess) { md->release(); return r; }
+    }
+    *options |= add;
     *memory = md;
+    return kIOReturnSuccess;
+}
+// Selector 7: what this kext supports. bit0 = token mappings (clientMemoryForType above).
+IOReturn NVRMUserClient::sCaps(OSObject *target, void *reference, IOExternalMethodArguments *args)
+{
+    if (!OSDynamicCast(NVRMUserClient, target)) return kIOReturnNotAttached;
+    args->scalarOutput[0] = 1;
+    return kIOReturnSuccess;
+}
+// Selector 8: forget a token after its mapping is unmapped; drops the descriptor. An unknown token is not an error.
+IOReturn NVRMUserClient::sForgetToken(OSObject *target, void *reference, IOExternalMethodArguments *args)
+{
+    NVRMUserClient *me = OSDynamicCast(NVRMUserClient, target);
+    if (!me) return kIOReturnNotAttached;
+    Gate gate(me->fGate);
+    const uint64_t v = args->scalarInput[0];
+    if (v > 0xFFFFFFFFull || !((uint32_t)v & kNvMapTokenBit)) return kIOReturnBadArgument;
+    IOMemoryDescriptor *drop = nullptr;
+    NvMapToken *unused = nullptr;
+    IOLockLock(me->fMapLock);
+    for (unsigned i = 0; i < me->fNTok; i++) {
+        if (me->fTok[i].token != (uint32_t)v) continue;
+        drop = me->fTok[i].md;
+        me->fTok[i] = me->fTok[--me->fNTok];
+        if (!me->fNTok && me->fTokCap > kNvrmTokFirst) {
+            unused = me->fTok;
+            me->fTok = nullptr;
+            me->fTokCap = 0;
+        }
+        break;
+    }
+    IOLockUnlock(me->fMapLock);
+    if (drop) drop->release();
+    if (unused) kern_os_free(unused);
     return kIOReturnSuccess;
 }
 IOReturn NVRMUserClient::externalMethod(uint32_t selector, IOExternalMethodArguments *args,
@@ -2200,6 +2532,8 @@ IOReturn NVRMUserClient::externalMethod(uint32_t selector, IOExternalMethodArgum
         { sRetired, 0, 0, 0, 0 },
         { sRetired, 0, 0, 0, 0 },
         { sWaitEvent, 2, 0, 1, 0 },
+        { sCaps, 0, 0, 1, 0 },
+        { sForgetToken, 1, 0, 0, 0 },
     };
     if (selector >= sizeof tbl / sizeof tbl[0]) return kIOReturnBadArgument;
     IOExternalMethodDispatch d = tbl[selector];

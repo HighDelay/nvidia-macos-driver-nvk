@@ -67,11 +67,15 @@ int main() {
             failures.append("plan harness")
 
 arm("NVRM handles system power-off and restart", "void NVRM::systemWillShutdown(IOOptionBits specifier)" in nvrm)
-arm("the shutdown handler runs the plan placeLargeBar1's undo record feeds", "nvrmBuildShutdownPlan(&fBarUndo" in nvrm and "undo.valid = true; fBarUndo = undo;" in nvrm)
+arm("the shutdown handler runs the plan placeLargeBar1's undo record feeds", "nvrmBuildShutdownPlan(&fBarUndo" in nvrm and "fBarUndo = { true, cmd, newSize != 0," in nvrm)
 arm("the RM standby on shutdown is bounded", "waited < 8000" in nvrm)
-arm("a full RM shutdown runs only when asked for and every user client has closed", "nvrmShutdownMode(askedFull, open, fAdapter)" in nvrm and "rm_shutdown_adapter(NULL, &s->fNv)" in nvrm)
+arm("a full RM shutdown runs only when asked for and every user client has closed", "nvrmShutdownMode(fShutdownFullRequested, open, fAdapter)" in nvrm and "rm_shutdown_adapter(NULL, &fNv)" in nvrm)
 arm("-nvrmnoshutdown keeps the old behaviour", '"-nvrmnoshutdown"' in nvrm)
 
+handler = nvrm.split("void NVRM::systemWillShutdown(IOOptionBits specifier)\n", 1)[1].split("\n}", 1)[0]
+arm("BAR writes require an explicit opt-in and the worker's successful completion",
+    '"nvrmshutdown"' in handler and
+    'if (OSAddAtomic(0, &fShutdownDone) == kShutdownQuiesced)\n                restoreShutdownBars();' in handler)
 if failures:
     print("FAILED:", ", ".join(failures)); sys.exit(1)
 print("PASS")

@@ -6,8 +6,12 @@ set -euo pipefail
 ROOT=${1:?pkgroot}; BIN=${2:?nvmtl-boost binary}
 HERE=$(cd "$(dirname "$0")" && pwd)
 lipo -archs "$BIN" | grep -qx x86_64 || { echo "STOP: nvmtl-boost is not x86_64"; exit 1; }
-mkdir -p "$ROOT/Library/NullMoth/boost"
-cp "$BIN" "$ROOT/Library/NullMoth/boost/nvmtl-boost"
-codesign -f -s - "$ROOT/Library/NullMoth/boost/nvmtl-boost" >/dev/null 2>&1 || { echo "STOP: could not sign nvmtl-boost"; exit 1; }
-bash "$HERE/sums_refresh.sh" "$ROOT" Library/NullMoth/boost/nvmtl-boost
-echo "staged the GPU boost daemon $(shasum -a 256 "$ROOT/Library/NullMoth/boost/nvmtl-boost" | cut -c1-8)"
+REL=Optional/GPU-Boost
+mkdir -p "$ROOT/$REL"
+cp "$BIN" "$ROOT/$REL/nvmtl-boost"
+cp "$HERE/boost_daemon.sh" "$ROOT/$REL/"
+cp "$HERE/../docs/GPU-BOOST.md" "$ROOT/$REL/README.md"
+codesign -f -s - "$ROOT/$REL/nvmtl-boost"
+codesign --verify --strict "$ROOT/$REL/nvmtl-boost"
+bash "$HERE/sums_refresh.sh" "$ROOT" "$REL/nvmtl-boost" "$REL/boost_daemon.sh" "$REL/README.md"
+echo "staged the GPU boost daemon $(shasum -a 256 "$ROOT/$REL/nvmtl-boost" | cut -c1-8)"

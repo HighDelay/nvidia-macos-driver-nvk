@@ -1,5 +1,19 @@
 # Retained fork changes for upstream merges
 
+## Deferred upstream backports, 2026-11-20
+
+Keep NVK and Zink on stable Mesa **26.3.0** at
+`0a6fa60abb737d26ac8a316a4aad7c9ddf64f9e4` with the NVIDIA **620.70.06**
+core. The default renderer now uses the `3.0` patch profile matched to this
+NVRM. Keep capability negotiation and the one-connection-per-mapping path for
+an older NVRM. Keep the fork's uncached streams, small-BAR topology, GPU-copy
+presentation and separate Wine, Minecraft and Zink frontends. The software
+Metal WSI patch remains outside the release profile.
+
+Follow the [backport and validation notes](UPSTREAM-BACKPORTS.md) for the
+mapping, display, power and Metal changes. The `2.8` profile and earlier
+integration records describe the previous release baseline.
+
 ## Hardware vblank after partial modesets, 2026-11-17
 
 Retain `620-vblank-restore-unchanged-heads.patch`. NVIDIA 620.70.06 disables

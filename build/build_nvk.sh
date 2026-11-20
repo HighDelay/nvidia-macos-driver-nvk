@@ -1,20 +1,12 @@
 #!/bin/bash
 # Build NVK (Mesa Vulkan driver for NVIDIA + the NAK compiler) for x86_64 macOS from pristine Mesa plus the patches in nvk/.
 #
-# usage: build_nvk.sh <mesa git dir> <open-gpu-kernel-modules 610.57.04 tree> <out dir> [2.8]
+# Usage: build_nvk.sh <mesa git dir> <open-gpu-kernel-modules 610.57.04 tree> <out dir> [3.0|2.8]
 #
-# The release argument selects the kernel-compatible patch set (default 2.8).
-# It does not override nvk/MESA_BASE. The upstream 2.9 chain remains deferred:
-#   Both end with nvk/dlss/patch_dlss_cache.py.
-#   2.9  nvk-macos, nvk-fixes-after-def16, nvk-620-kernel, nvk-recycle, nvk-slab, nvk-slabdef, nvk-hubfix,
-#        nvk-perf-boost-burst, nvk-rated-tdp, nvk-gps-maxpower, nvk-metal-wsi (VK_EXT_metal_surface: windows), nvk-card-select (NVK_ACCEL_ID),
-#        hwrt/ttu-nak + hwrt/ttu-rq (ray queries on the RT cores, compiled in, off unless NVK_HWRT_QUERY=1; docs/HWRT.md)
-#        ... nvk-warnings, nvk-unbound-stage (a read of an empty binding by an earlier stage is reported; the shipped outcome is kept,
-#        NVK_UNBOUND_STAGE_STRICT=1 refuses it)
-#        nvk-diag-nofollow (the opt-in diagnostic log is created without following a link, for its owner alone)
-#   2.8  the set the 2.8 / 2.8.1 package was built from: the same chain without hubfix, perf-boost-burst, rated-tdp and
-#        gps-maxpower, and with nvk/release-2.8/nvk-fixes-after-def16.patch (the copy-engine retry still logged to stderr)
-#        plus the compatible warning/bounded-name fixes, without changing its kernel mapping protocol.
+# Both patch sets use the stable Mesa revision in nvk/MESA_BASE.
+# 3.0 adds capability-negotiated mapping hubs, opt-in power controls and RT traversal.
+# 2.8 retains one connection per mapping for comparison or recovery.
+# Both use the fork's native GPU-copy frontend and uncached command streams.
 # The NAK changes (nvk/speed267) are already part of nvk-macos.patch; the scripts there are the history of how they
 # were made and are not run here.
 #
@@ -31,22 +23,18 @@
 # present and the binary carries no git sha. Rebuilding is deterministic: the same inputs give the same LC_UUID.
 set -euo pipefail
 
-MESA_GIT=${1:?mesa git dir}; OGKM=${2:?open-gpu-kernel-modules 610.57.04 tree}; OUT=${3:?output dir}; REL=${4:-2.8}
+MESA_GIT=${1:?mesa git dir}; OGKM=${2:?open-gpu-kernel-modules 610.57.04 tree}; OUT=${3:?output dir}; REL=${4:-3.0}
 HERE=$(cd "$(dirname "$0")/.." && pwd); NVK=$HERE/nvk
-# This fork's candidate deliberately retains the validated 2.8 mapping protocol.
-# The incoming 2.9 patch chain expects a different kernel/token interface and is
-# retained as source for later review, not an alternate compatible release input.
-[ "$REL" = 2.8 ] || { echo "STOP: the upstream 2.9 NVK patch chain is deferred in this fork; use the recorded 2.8 renderer (docs/UPSTREAM-2.9-INTEGRATION.md)"; exit 2; }
 BASE=$(cat "$NVK/MESA_BASE")
 JOBS=${NVK_JOBS:-6}
 [ -n "${NVK_PATH:-}" ] && export PATH="$NVK_PATH:$PATH"
 
 case $REL in
-  2.9) FIXES=$NVK/nvk-fixes-after-def16.patch
-       CHAIN="nvk-macos @FIXES nvk-620-kernel nvk-recycle nvk-slab nvk-slabdef nvk-hubfix nvk-perf-boost-burst nvk-rated-tdp nvk-gps-maxpower nvk-metal-wsi nvk-card-select hwrt/ttu-nak hwrt/ttu-rq curves/curves hwrt/wide nvk-warnings nvk-unbound-stage nvk-diag-nofollow" ;;
+  3.0) FIXES=$NVK/nvk-fixes-after-def16.patch
+       CHAIN="nvk-macos @FIXES nvk-620-kernel nvk-recycle nvk-slab nvk-slabdef nvk-hubfix nvk-perf-boost-burst nvk-rated-tdp nvk-gps-maxpower nvk-card-select hwrt/ttu-nak hwrt/ttu-rq curves/curves hwrt/wide nvk-warnings nvk-unbound-stage nvk-diag-nofollow nvk-hub-lifetime nvk-macos-frameworks nvk-small-bar-memory nvk-stream-uncached" ;;
   2.8) FIXES=$NVK/release-2.8/nvk-fixes-after-def16.patch
        CHAIN="nvk-macos @FIXES nvk-620-kernel nvk-recycle nvk-slab nvk-slabdef nvk-warnings nvk-macos-frameworks nvk-small-bar-memory nvk-stream-uncached" ;;
-  *) echo "STOP: release must be 2.9 or 2.8"; exit 2 ;;
+  *) echo "STOP: release must be 3.0 or 2.8"; exit 2 ;;
 esac
 
 # NVK_EXTRA_PATCHES="nvk-upstream-nak" appends patch files from nvk/ to the chain (upstream NAK/NVK fixes newer than
@@ -151,7 +139,7 @@ echo "warnings $WARN (ceiling $WMAX)"
 
 # Licence texts of the Rust crates Mesa fetched for NAK (meson setup downloads them into subprojects/packagecache).
 # licenses/nvk-rust-crates.txt in the package must equal this; a different crate set stops the build until it is updated.
-python3 -I "$HERE/build/gen_nvk_rust_crates.py" "$S/subprojects/packagecache" "$OUT/nvk-rust-crates.txt"
+python3 -I "$HERE/build/gen_nvk_rust_crates.py" "${MESON_PACKAGE_CACHE_DIR:-$S/subprojects/packagecache}" "$OUT/nvk-rust-crates.txt"
 cmp -s "$OUT/nvk-rust-crates.txt" "$HERE/licenses/nvk-rust-crates.txt" || { echo "STOP: licenses/nvk-rust-crates.txt is out of date; copy $OUT/nvk-rust-crates.txt over it"; exit 6; }
 
 D=$B/src/nouveau/vulkan/libvulkan_nouveau.dylib

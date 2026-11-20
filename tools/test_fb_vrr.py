@@ -10,7 +10,10 @@ import pathlib, subprocess, tempfile
 root = pathlib.Path(__file__).resolve().parents[1]
 src = (root / 'kexts/NVRMFB/fb/nvrm-fb.cpp').read_text()
 for need in ['kIORangeSupportsVRR', 'verticalBlankingExtension = nvrmVrrBlankExtension', 'attribute == kIOFBVariableRefreshRate) return setVrr',
-             'vh->modeSetConfig.vrrEnabled = NV_TRUE;', 'if (vh->flags.modeChanged || vh->flags.activeChanged) vh->flags.vrrEnabledChanged = NV_TRUE', 'PE_parse_boot_argn("nvfbvrr"', 'r->vrr = dd->vrrSupported']:
+             'head.modeSetConfig.vrrEnabled = fVrrOn ? NV_TRUE : NV_FALSE;',
+             'if (head.flags.modeChanged || head.flags.activeChanged) head.flags.vrrEnabledChanged = NV_TRUE',
+             'PE_parse_boot_argn("nvfbvrr"', 'r->vrr = dd->vrrSupported', 'if (!accepted) fVrrOn = previous;'
+]:
     assert need in src, 'missing: ' + need
 fixture = r'''
 #include <cassert>

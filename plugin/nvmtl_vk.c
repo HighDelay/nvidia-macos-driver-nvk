@@ -1593,10 +1593,13 @@ static pthread_once_t g_vk_once = PTHREAD_ONCE_INIT;
 static void nvmtl_vk_initialize_once(void) { (void)nvmtl_vk_initialize(); }
 /* 1 once the backend is down in this process: a failed submit or fence wait disabled it, or it never started. */
 int nvmtl_vk_lost(void) { return atomic_load(&g_state) == -1; }
-/* The device was up and then lost, as opposed to never starting. After a loss the Vulkan queue is dead for the rest of the
-   process, but the caller still gets command buffers: they record nothing and complete with a "device removed" error,
-   as Metal reports a removed GPU, instead of nil (WindowServer asserts on nil and the session goes). */
-/* Record a failure while retaining the fork's refusal/quarantine protocol and immutable Vulkan dispatch pointers. */
+/* Report device removal as soon as a running backend is disabled, even before loss logging finishes on its thread. */
+int nvmtl_vk_device_removed(void)
+{
+    return nvmtl_vk_lost() && atomic_load(&g_up_ns) != 0;
+}
+
+/* Keep Vulkan dispatch immutable: existing recordings can still own real Vulkan resources. */
 static void nvmtl_vk_note_loss(const char *where, int vkresult, long waited_ms)
 {
     if (atomic_exchange(&g_lost_after_up, 1)) return;
@@ -1604,7 +1607,7 @@ static void nvmtl_vk_note_loss(const char *where, int vkresult, long waited_ms)
     char cause[512];
     nvmtl_loss_cause(cause, sizeof cause, where, vkresult, waited_ms, g_last_submit_who, up ? (long)((now - up) / 1000000000ull) : -1, getprogname());
     nvlog("vk: %s", cause);
-    nvlog("vk: backend lost; retain the existing command refusal and uncertain-work quarantine");
+    nvlog("vk: backend lost; subsequent Metal command buffers complete with device-removed errors");
 }
 int nvmtl_vk_init(void) {
     pthread_once(&g_vk_once, nvmtl_vk_initialize_once);
@@ -7728,6 +7731,7 @@ static uint32_t nvmtl_pass_shadowed_attachments(const nvk_pass *ps)
 // A sampled view names the linear image, and the shadow only reaches that image when the pass ends, so a draw that
 // samples its own attachment reads the pass's starting contents. A render-target barrier has to end the pass.
 int nvmtl_vk_pass_render_shadowed(const nvk_pass *ps) { return nvmtl_pass_shadowed_attachments(ps) != 0; }
+uint32_t nvmtl_vk_pass_shadowed_mask(const nvk_pass *ps) { return nvmtl_pass_shadowed_attachments(ps); }
 
 static int nvmtl_vk_cmd_begin_pass_body(nvk_cmdbuf *c, const nvk_pass *ps, nvk_pipeline *p);
 int nvmtl_vk_cmd_begin_pass(nvk_cmdbuf *c, const nvk_pass *ps, nvk_pipeline *p)

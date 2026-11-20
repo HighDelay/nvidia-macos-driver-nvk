@@ -3,7 +3,22 @@ set -o pipefail
 SRC=$1; OUT=$2; mkdir -p "$OUT/NVAccel.kext/Contents/MacOS"
 OGKM=${OGKM:-$HOME/ogkm620}; RE=${RE:-$SRC/accel/re}   # NVIDIA 620.70.06; reconstructed accelerator headers ship in the repo
 PIN=e6a2e01579fbbd1ca2ed43fef2ee2589e9bd8bd9
-if [ "$(git -C "$OGKM" rev-parse HEAD 2>/dev/null || true)" != "$PIN" ]; then
+if [ -f "$OGKM/.nm-source.json" ]; then
+  python3 - "$OGKM" "$SRC" "$PIN" <<'CHECK_OGKM' || exit 1
+import hashlib
+import json
+from pathlib import Path
+import sys
+
+tree, source = map(Path, sys.argv[1:3])
+pin = sys.argv[3]
+sha = lambda path: hashlib.sha256(path.read_bytes()).hexdigest()
+identity = json.loads((tree / ".nm-source.json").read_text())
+assert identity["nvidia_commit"] == pin, "wrong NVIDIA source revision"
+assert identity["patches"] == {p.name: sha(p) for p in (source / "patches").glob("*.patch")}, "patch bytes changed"
+assert all(sha(tree / name) == digest for name, digest in identity["files"].items()), "NVIDIA source changed"
+CHECK_OGKM
+elif [ "$(git -C "$OGKM" rev-parse HEAD 2>/dev/null || true)" != "$PIN" ]; then
   echo "Set OGKM to open-gpu-kernel-modules 620.70.06 ($PIN)." >&2; exit 1
 fi
 SDK=$(xcrun --show-sdk-path); KHDR="$SDK/System/Library/Frameworks/Kernel.framework/Headers"; NV="$OGKM/src/nvidia"; KMS="$OGKM/src/nvidia-modeset"

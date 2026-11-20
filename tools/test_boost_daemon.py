@@ -41,7 +41,7 @@ def fresh(t, name):
 
 with tempfile.TemporaryDirectory() as t:
     t = pathlib.Path(t)
-    pk = t / "pkg/Library/NullMoth/boost"; pk.mkdir(parents=True)
+    pk = t / "pkg/Optional/GPU-Boost"; pk.mkdir(parents=True)
     (pk / "nvmtl-boost").write_text("#!/bin/sh\nexit 0\n")
 
     def run(sysroot, *a, owner=ME):
