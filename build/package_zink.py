@@ -79,6 +79,51 @@ def stage_optional_audio(payload):
             'provenance': 'unchanged audio payload from the checksum-verified base package'}
 
 
+def stage_amd_panel(payload, build_dir):
+    """Build the experimental GOP framebuffer as an optional kext."""
+    source = ROOT / 'kexts/NMGopFB'
+    run('/bin/bash', source/'build.sh', build_dir, '15.0')
+    candidate = build_dir/'NMGopFB.kext'
+    base_tools.bundle(candidate, 'NMGopFB')
+    bundle_id = 'com.nullmoth.NMGopFB'
+    info = plistlib.loads((candidate/'Contents/Info.plist').read_bytes())
+    if info.get('CFBundleIdentifier') != bundle_id:
+        raise ValueError('unexpected optional AMD panel bundle identity')
+
+    # Older inputs may carry the GOP experiment in the default repository.
+    # Move the feature to the optional path in this private package copy.
+    active = payload/'Library/Extensions/NMGopFB.kext'
+    if active.exists() or active.is_symlink():
+        base_tools.bundle(active, 'NMGopFB')
+        if plistlib.loads((active/'Contents/Info.plist').read_bytes()).get('CFBundleIdentifier') != bundle_id:
+            raise ValueError('unexpected AMD panel bundle in default extensions')
+        shutil.rmtree(active)
+    optional = payload/'Optional/NMGopFB.kext'
+    optional.parent.mkdir(exist_ok=True)
+    copy_bundle(candidate, optional)
+    binary = optional/'Contents/MacOS/NMGopFB'
+    run('lipo', binary, '-verify_arch', 'x86_64')
+    run('codesign', '--force', '--sign', '-', '--timestamp=none', optional)
+    run('codesign', '--verify', '--strict', optional)
+    shutil.copy2(ROOT/'docs/AMD-PANEL.md', optional.parent/'AMD-Panel.md')
+    inputs = [
+        *sorted(source.iterdir()),
+        ROOT/'build/warn_ceiling.sh', ROOT/'build/warnings.txt',
+        ROOT/'kexts/NMIntelFB/display_ids.inc', ROOT/'kexts/NMIntelFB/nvrm_vram_abi.h',
+        ROOT/'kexts/NVRM/accel/nm_hybrid.h', ROOT/'kexts/NVRM/accel/nm_hybrid_abi.h',
+        ROOT/'kexts/NVRM/accel/nv_iop_pixel.h', ROOT/'kexts/NVRMFB/nvrm_off.h',
+    ]
+    return {
+        'bundle_version': info['CFBundleVersion'],
+        'default_install': False,
+        'boot_opt_in': 'nmhybrid=1',
+        'source_sha256': {path.relative_to(ROOT).as_posix(): base_tools.digest(path)
+                          for path in inputs if path.is_file()},
+        'files': {path.relative_to(optional).as_posix(): base_tools.digest(path)
+                  for path in sorted(optional.rglob('*')) if path.is_file()},
+    }
+
+
 def stage(base, zink, output, components=None, native_gld=False, records=None, webkit_fixup_build=None):
     if components is not None:
         raise ValueError("Stage matched driver components with build/stage_package.py first; arbitrary Library overlays are unsupported")
@@ -144,6 +189,7 @@ def stage(base, zink, output, components=None, native_gld=False, records=None, w
         copy_bundle(base, payload)
         shutil.copy2(ROOT / 'docs/GPU-UTILIZATION.md', payload / 'GPU-UTILIZATION.md')
         audio_identity = stage_optional_audio(payload)
+        amd_panel_identity = stage_amd_panel(payload, Path(temp)/'amd-panel')
         webkit_identity = stage_webkit(payload, webkit_fixup_build, run)
         # Always bundle the real framebuffer, outside Library/Extensions. Only
         # an explicit installer choice copies it into the system repositories.
@@ -316,6 +362,7 @@ def stage(base, zink, output, components=None, native_gld=False, records=None, w
                     'source_dirty': bool(run('git', '-C', ROOT, 'status', '--porcelain', '--untracked-files=no').strip()),
                     'component_replacements': replacements, 'firmware': sorted(firmware_paths),
                     'optional_intel_panel': panel_identity,
+                    'optional_amd_panel': amd_panel_identity,
                     'optional_audio': audio_identity,
                     'optional_webkit_fixup': webkit_identity,
                     'native_dlss_support': native_dlss,

@@ -1,14 +1,13 @@
 // NMGopFB: panel provider for laptops whose built-in screen is wired to an integrated AMD GPU macOS has no driver for
-// (Rembrandt, Phoenix, Hawk Point, Strix and the like), so that the NVIDIA card can draw the desktop and show it there.
+// (Rembrandt, Phoenix, Hawk Point, Strix and the like).
 //
 // It writes nothing to the display engine. The firmware (GOP) lit the panel and left the GPU scanning out a plain 32-bit
-// framebuffer; this driver publishes that framebuffer as head 4 of the NVIDIA accelerator (the same slot NMIntelFB uses),
-// maps it write-combined, and NVAccel copies each composited frame into it (nm_hybrid.h: only the pixels that changed).
+// framebuffer. This driver maps it write-combined and publishes it with head 4 metadata, the same slot NMIntelFB uses.
+// NVIDIA copy presentation requires an accelerator that recognizes this framebuffer class.
 // If anything about the framebuffer is not what it expects, start() fails with the reason logged and the firmware
 // framebuffer keeps the device exactly as before.
 //
-// Level 1 (copy) only. Import (level 2) needs the display engine's translation table, which this driver does not touch;
-// the accelerator is told so and copies.
+// The framebuffer exposes a CPU mapping. Import (level 2) needs the display engine's translation table.
 //
 // The idea, and the way the firmware framebuffer is found, checked against the GPU's BAR and mapped write-combined, come
 // from PrimeBridge (https://github.com/myvoow/PrimeBridge, BootFramebuffer.cpp), MIT License, Copyright (c) 2026 myvoow.
@@ -36,6 +35,7 @@
 #include "nm_hybrid.h"
 #include "nm_hybrid_abi.h"
 #include "nm_gopfb.h"
+#include "../NVRMFB/nvrm_off.h"
 
 #define GFBLOG(fmt, ...) IOLog("NMGopFB: " fmt "\n", ##__VA_ARGS__)
 
@@ -171,6 +171,7 @@ OSDefineMetaClassAndStructors(NMGopFB, IOFramebuffer)
 
 IOService *NMGopFB::probe(IOService *provider, SInt32 *score)
 {
+    if (nvrm_driver_off()) return nullptr;
     if (version_major != 24 && version_major != 25) return nullptr;   // macOS 15 (Darwin 24) and macOS 26 (Darwin 25) only
     IOPCIDevice *pci = OSDynamicCast(IOPCIDevice, provider);
     if (!pci) return nullptr;
@@ -230,12 +231,12 @@ bool NMGopFB::adoptFirmwareFramebuffer(IOPCIDevice *pci)
 
 bool NMGopFB::start(IOService *provider)
 {
+    if (nvrm_driver_off()) return false;
     IOPCIDevice *pci = OSDynamicCast(IOPCIDevice, provider);
     if (!pci) return false;
     pci->setMemoryEnable(true);
     if (!adoptFirmwareFramebuffer(pci)) return false;
-    // Head 4 of the NVIDIA accelerator: WindowServer composites this panel on the NVIDIA card and the display pipe copies
-    // each frame into the mapping. Set before IOFramebuffer::start: start() attaches the shared controller only when the
+    // Set the hybrid-panel slot before IOFramebuffer::start. start() attaches the shared controller only when the
     // dependent ID already exists, and the power change registerPowerDriver() queues needs that controller.
     setProperty("IOFBDependentID", 0x4E56524D00000001ull, 64);
     setProperty("IOFBDependentIndex", 4ull, 32);

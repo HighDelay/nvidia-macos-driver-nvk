@@ -111,6 +111,8 @@ def organize(payload, records, identity=None):
                    detailed_build_record_sha256=integrity.digest(detail))
     panel = payload / 'Optional/NMIntelFB.kext/Contents/MacOS/NMIntelFB'
     compact['optional_intel_panel'] = {'bundled': panel.is_file(), 'default': 'No', 'existing_opt_ins_retained': True}
+    amd_panel = payload / 'Optional/NMGopFB.kext/Contents/MacOS/NMGopFB'
+    compact['optional_amd_panel'] = {'bundled': amd_panel.is_file(), 'default': 'No', 'existing_opt_ins_retained': True}
     audio = payload / 'Optional/NMXAudio.kext/Contents/MacOS/NMXAudio'
     compact['optional_audio'] = {'bundled': audio.is_file(), 'default': 'No', 'minimum_macos_major': 26, 'existing_opt_ins_retained': True}
     webkit = payload/'Optional/NVWebKitFixup/NVWebKitFixup.kext/Contents/MacOS/NVWebKitFixup'
@@ -120,7 +122,7 @@ def organize(payload, records, identity=None):
     paths = [Path('Library/Extensions') / (name + '.kext/Contents/MacOS/' + name)
              for name in ('NVRM', 'NVRMFB', 'NVAccel', 'NVRMAGDC')]
     paths += [Path('Library/NullMoth/kexts') / major / 'NVAccel.kext/Contents/MacOS/NVAccel' for major in ('15', '26')]
-    paths += [Path('Library/GPUBundles/NVMTLDriver.bundle/Contents/MacOS/NVMTLDriver'), panel.relative_to(payload), audio.relative_to(payload), webkit.relative_to(payload)]
+    paths += [Path('Library/GPUBundles/NVMTLDriver.bundle/Contents/MacOS/NVMTLDriver'), panel.relative_to(payload), amd_panel.relative_to(payload), audio.relative_to(payload), webkit.relative_to(payload)]
     compact['components_sha256'] = {str(path): integrity.digest(payload / path) for path in paths if (payload / path).is_file()}
     current.write_text(json.dumps(compact, indent=2) + '\n')
     current.chmod(0o644)
@@ -129,6 +131,8 @@ def organize(payload, records, identity=None):
         if (payload / 'Guides' / name).is_file():
             readme = readme.replace(GITHUB_FILES + GUIDE_SOURCES[relative].as_posix(), 'Guides/' + name)
     readme = readme.replace(GITHUB_FILES + 'docs/INTEL-PANEL.md', 'Optional/README.md')
+    if amd_panel.is_file():
+        readme = readme.replace(GITHUB_FILES + 'docs/AMD-PANEL.md', 'Optional/AMD-Panel.md')
     readme = readme.replace(GITHUB_FILES + 'docs/OPTIONAL-AUDIO.md', 'Optional/Audio.md')
     readme = readme.replace(GITHUB_FILES + 'docs/SAFARI-WEBGL.md', 'Optional/NVWebKitFixup/README.md')
     (payload / 'READ-ME.md').write_text(readme)

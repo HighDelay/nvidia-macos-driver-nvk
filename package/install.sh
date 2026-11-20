@@ -4,6 +4,7 @@ set -u
 PATH=/usr/bin:/bin:/usr/sbin:/sbin; export PATH
 HERE=$(cd "$(dirname "$0")" && pwd)
 INTEL_PANEL_CHOICE=ask
+AMD_PANEL_CHOICE=ask
 AUDIO_CHOICE=ask
 DLSS_CHOICE=ask
 WEBKIT_CHOICE=ask
@@ -20,11 +21,13 @@ while [ "$#" != 0 ]; do
     --audio=no) AUDIO_CHOICE=no; shift;;
     --intel-panel=yes) INTEL_PANEL_CHOICE=yes; shift;;
     --intel-panel=no) INTEL_PANEL_CHOICE=no; shift;;
+    --amd-panel=yes) AMD_PANEL_CHOICE=yes; shift;;
+    --amd-panel=no) AMD_PANEL_CHOICE=no; shift;;
     --webkit-fixup=manual|--webkit-fixup=auto|--webkit-fixup=skip) WEBKIT_CHOICE=${1#*=}; shift;;
     --efi-target)
       [ "$#" -ge 2 ] && [ -n "$2" ] || { echo "STOP: --efi-target requires diskXsY or a mounted EFI/OC path" >&2; exit 2; }
       EFI_TARGET=$2; shift 2;;
-    *) echo "STOP: expected --payload directory, --intel-panel=yes|no, --audio=yes|no, --dlss=yes|no, --webkit-fixup=manual|auto|skip or --efi-target target" >&2; exit 2;;
+    *) echo "STOP: expected --payload directory, --intel-panel=yes|no, --amd-panel=yes|no, --audio=yes|no, --dlss=yes|no, --webkit-fixup=manual|auto|skip or --efi-target target" >&2; exit 2;;
   esac
 done
 KEXTS="NVRM NVAccel NVRMFB NVRMAGDC"
@@ -85,6 +88,9 @@ rollback_install() {
   fi
   if [ -f "$BK/intel-panel-touched" ]; then
     case " $restore_kexts " in *' NMIntelFB '*) ;; *) restore_kexts="$restore_kexts NMIntelFB";; esac
+  fi
+  if [ -f "$BK/amd-panel-touched" ]; then
+    case " $restore_kexts " in *' NMGopFB '*) ;; *) restore_kexts="$restore_kexts NMGopFB";; esac
   fi
   if [ -f "$BK/audio-touched" ]; then
     case " $restore_kexts " in *' NMXAudio '*) ;; *) restore_kexts="$restore_kexts NMXAudio";; esac
@@ -195,6 +201,7 @@ kpath() {
     NVAccel) echo "$VAR/NVAccel.kext";;
     NVPrimarySelector) echo "$SELECTOR_SOURCE";;
     NMIntelFB) echo "$HERE/Optional/NMIntelFB.kext";;
+    NMGopFB) echo "$HERE/Optional/NMGopFB.kext";;
     NMXAudio) echo "$HERE/Optional/NMXAudio.kext";;
     *) echo "$HERE/Library/Extensions/$1.kext";;
   esac
@@ -254,79 +261,7 @@ for target in 15 26; do
     [ -f "$HERE/Library/NullMoth/kexts/$target/NVAccel.kext/Contents/Info.plist" ] || die "this package lacks the complete macOS $target accelerator"
 done
 ok "every file matches SHA256SUMS and both OS accelerators are present"
-# The portable model name can be spoofed on a Hackintosh, and it does not tell
-# us which GPU owns the panel. Ask instead of enabling this framebuffer from it.
-INTEL_PANEL=0; INTEL_PANEL_TOUCHED=0
-if [ -e "$EXT/NMIntelFB.kext" ] || [ -L "$EXT/NMIntelFB.kext" ]; then
-  [ ! -L "$EXT/NMIntelFB.kext" ] && [ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$EXT/NMIntelFB.kext/Contents/Info.plist" 2>/dev/null)" = com.nullmoth.NMIntelFB ] \
-    || die "cannot identify the existing NMIntelFB.kext; no driver changes made"
-  [ "$INTEL_PANEL_CHOICE" != ask ] || INTEL_PANEL_CHOICE=yes
-fi
-if [ "$INTEL_PANEL_CHOICE" = ask ] && [ -d "$HERE/Optional/NMIntelFB.kext" ]; then
-  printf '\n%s\n' '----------------------------------------------------------------------'
-  echo "Optional Intel laptop panel support (experimental):"
-  printf '%s\n\n' '----------------------------------------------------------------------'
-  echo "Use only for a laptop whose built-in screen is wired to an Intel GPU unsupported by macOS."
-  echo "Skip for desktops, Apple-supported Intel graphics, or a panel driven directly by NVIDIA."
-  echo "This adopts the firmware display mode; NVIDIA-to-Intel panel acceleration is still disabled by default."
-  if [ -t 0 ]; then
-    printf 'Install NMIntelFB for this laptop panel? [y/N] '
-    answer=""; IFS= read -r answer || answer=""
-    case "$answer" in y|Y|yes|YES|Yes) INTEL_PANEL_CHOICE=yes;; *) INTEL_PANEL_CHOICE=no;; esac
-  else
-    echo "No interactive input: Intel panel support skipped (use --intel-panel=yes to opt in)."
-    INTEL_PANEL_CHOICE=no
-  fi
-fi
-if [ "$INTEL_PANEL_CHOICE" = yes ]; then
-  [ -d "$HERE/Optional/NMIntelFB.kext" ] && [ ! -L "$HERE/Optional/NMIntelFB.kext" ] \
-    || die "this package lacks the optional Intel panel kext"
-  [ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$HERE/Optional/NMIntelFB.kext/Contents/Info.plist" 2>/dev/null)" = com.nullmoth.NMIntelFB ] \
-    || die "invalid optional Intel panel bundle identity"
-  codesign --verify --strict "$HERE/Optional/NMIntelFB.kext" || die "invalid Intel panel kext signature"
-  KEXTS="$KEXTS NMIntelFB"; INTEL_PANEL=1; INTEL_PANEL_TOUCHED=1
-  ok "experimental Intel panel support selected; an existing opt-in is kept on updates"
-elif [ -d "$EXT/NMIntelFB.kext" ]; then
-  REMOVED_KEXTS=NMIntelFB; INTEL_PANEL_TOUCHED=1
-  ok "Intel panel support will be removed; the previous copy is backed up"
-fi
-# NMXAudio is a separate, optional HD Audio driver for Tahoe. Never infer an
-# opt-in from a detected controller or take ownership of another installation.
-AUDIO=0; AUDIO_TOUCHED=0; AUDIO_OWNED=0
-audio_managed && AUDIO_OWNED=1
-if [ "$AUDIO_CHOICE" = ask ] && [ "$AUDIO_OWNED" = 1 ]; then AUDIO_CHOICE=yes; fi
-if [ "$AUDIO_CHOICE" = ask ]; then
-  AUDIO_CHOICE=no
-  if [ "$MAJ" -ge 26 ] && [ -d "$HERE/Optional/NMXAudio.kext" ] && [ ! -e "$EXT/NMXAudio.kext" ] &&
-     ioreg -r -c IOPCIDevice -l -w0 2>/dev/null | grep -q '"class-code" = <00030400>'; then
-    printf '\n%s\n' '----------------------------------------------------------------------'
-    echo "Optional NMXAudio HD Audio driver (Tahoe only). Skip if your audio already works."
-    printf '%s\n\n' '----------------------------------------------------------------------'
-    if [ -t 0 ]; then
-      printf 'Install the optional audio driver? [y/N] '
-      answer=""; IFS= read -r answer || answer=""
-      case "$answer" in y|Y|yes|YES|Yes) AUDIO_CHOICE=yes;; esac
-    else
-      echo "No interactive input: audio support skipped (use --audio=yes to opt in)."
-    fi
-  fi
-fi
-if [ "$AUDIO_CHOICE" = yes ]; then
-  [ "$MAJ" -ge 26 ] || die "the optional audio driver requires macOS Tahoe; use --audio=no on Sequoia"
-  [ "$AUDIO_OWNED" = 1 ] || { [ ! -e "$EXT/NMXAudio.kext" ] && [ ! -L "$EXT/NMXAudio.kext" ]; } \
-    || die "NMXAudio is installed independently or changed; it was left untouched (use --audio=no)"
-  [ -d "$HERE/Optional/NMXAudio.kext" ] && [ ! -L "$HERE/Optional/NMXAudio.kext" ] \
-    || die "this package lacks the optional audio driver"
-  [ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$HERE/Optional/NMXAudio.kext/Contents/Info.plist" 2>/dev/null)" = com.nullmoth.NMXAudio ] \
-    || die "invalid optional audio bundle identity"
-  ioreg -r -c IOPCIDevice -l -w0 2>/dev/null | grep -q '"class-code" = <00030400>' \
-    || die "no PCI HD Audio controller found; use --audio=no"
-  KEXTS="$KEXTS NMXAudio"; AUDIO=1; AUDIO_TOUCHED=1
-  ok "optional audio selected; existing driver-managed opt-ins are kept on updates"
-elif [ "$AUDIO_OWNED" = 1 ]; then
-  REMOVED_KEXTS="$REMOVED_KEXTS NMXAudio"; AUDIO_TOUCHED=1
-  ok "driver-managed audio will be removed; independent audio drivers are kept"
-fi
+
 GLD_BUNDLE=""
 if [ -d "$HERE/Library/GPUBundles/NVKZinkGLDriver.bundle" ]; then
   GLD_BUNDLE=NVKZinkGLDriver.bundle
@@ -379,6 +314,118 @@ if [ "${CHECK:-0}" != 1 ]; then
   printf '%s\n' "$LOCK_ID" | grep -Eq '^[0-9]+:[0-9]+$' || die "installer guard identity is unavailable"
 fi
 
+# The portable model name can be spoofed on a Hackintosh, and it does not tell
+# us which GPU owns the panel. Ask instead of enabling this framebuffer from it.
+AMD_PANEL_PRESENT=0; AMD_PANEL_TOUCHED=0
+if [ -d "$EXT/NMGopFB.kext" ] && [ ! -L "$EXT/NMGopFB.kext" ] &&
+   [ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$EXT/NMGopFB.kext/Contents/Info.plist" 2>/dev/null)" = com.nullmoth.NMGopFB ]; then
+  AMD_PANEL_PRESENT=1
+fi
+if [ "$AMD_PANEL_CHOICE" = ask ] && [ "$AMD_PANEL_PRESENT" = 1 ]; then
+  AMD_PANEL_CHOICE=yes
+fi
+INTEL_PANEL=0; INTEL_PANEL_TOUCHED=0
+if [ -e "$EXT/NMIntelFB.kext" ] || [ -L "$EXT/NMIntelFB.kext" ]; then
+  [ ! -L "$EXT/NMIntelFB.kext" ] && [ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$EXT/NMIntelFB.kext/Contents/Info.plist" 2>/dev/null)" = com.nullmoth.NMIntelFB ] \
+    || die "cannot identify the existing NMIntelFB.kext; no driver changes made"
+  [ "$INTEL_PANEL_CHOICE" != ask ] || INTEL_PANEL_CHOICE=yes
+fi
+if [ "$INTEL_PANEL_CHOICE" = ask ] && [ "$AMD_PANEL_CHOICE" != yes ] && [ -d "$HERE/Optional/NMIntelFB.kext" ]; then
+  printf '\n%s\n' '----------------------------------------------------------------------'
+  echo "Optional Intel laptop panel support (experimental):"
+  printf '%s\n\n' '----------------------------------------------------------------------'
+  echo "Use only for a laptop whose built-in screen is wired to an Intel GPU unsupported by macOS."
+  echo "Skip for desktops, Apple-supported Intel graphics, or a panel driven directly by NVIDIA."
+  echo "This adopts the firmware display mode; NVIDIA-to-Intel panel acceleration is still disabled by default."
+  if [ -t 0 ]; then
+    printf 'Install NMIntelFB for this laptop panel? [y/N] '
+    answer=""; IFS= read -r answer || answer=""
+    case "$answer" in y|Y|yes|YES|Yes) INTEL_PANEL_CHOICE=yes;; *) INTEL_PANEL_CHOICE=no;; esac
+  else
+    echo "No interactive input: Intel panel support skipped (use --intel-panel=yes to opt in)."
+    INTEL_PANEL_CHOICE=no
+  fi
+fi
+if [ "$INTEL_PANEL_CHOICE" = yes ] && [ "$AMD_PANEL_CHOICE" = yes ]; then
+  die "Intel and AMD panel options share one slot; select --intel-panel=no or --amd-panel=no"
+fi
+if [ "$INTEL_PANEL_CHOICE" = yes ]; then
+  [ -d "$HERE/Optional/NMIntelFB.kext" ] && [ ! -L "$HERE/Optional/NMIntelFB.kext" ] \
+    || die "this package lacks the optional Intel panel kext"
+  [ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$HERE/Optional/NMIntelFB.kext/Contents/Info.plist" 2>/dev/null)" = com.nullmoth.NMIntelFB ] \
+    || die "invalid optional Intel panel bundle identity"
+  codesign --verify --strict "$HERE/Optional/NMIntelFB.kext" || die "invalid Intel panel kext signature"
+  KEXTS="$KEXTS NMIntelFB"; INTEL_PANEL=1; INTEL_PANEL_TOUCHED=1
+  ok "experimental Intel panel support selected; an existing opt-in is kept on updates"
+elif [ -d "$EXT/NMIntelFB.kext" ]; then
+  REMOVED_KEXTS="$REMOVED_KEXTS NMIntelFB"; INTEL_PANEL_TOUCHED=1
+  ok "Intel panel support will be removed; the previous copy is backed up"
+fi
+if [ "$AMD_PANEL_CHOICE" = ask ] && [ "$INTEL_PANEL" = 0 ] && [ -d "$HERE/Optional/NMGopFB.kext" ]; then
+  printf '\n%s\n' '----------------------------------------------------------------------'
+  echo "Optional AMD laptop panel support (experimental)"
+  echo "Use for a firmware framebuffer on a screen wired to an AMD GPU unsupported by macOS."
+  echo "See Optional/AMD-Panel.md for activation and recovery."
+  if [ -t 0 ]; then
+    printf 'Install NMGopFB for this laptop panel? [y/N] '
+    answer=""; IFS= read -r answer || answer=""
+    case "$answer" in y|Y|yes|YES|Yes) AMD_PANEL_CHOICE=yes;; *) AMD_PANEL_CHOICE=no;; esac
+  else
+    echo "No interactive input: AMD panel support skipped (use --amd-panel=yes to opt in)."
+    AMD_PANEL_CHOICE=no
+  fi
+fi
+if [ "$AMD_PANEL_CHOICE" = yes ]; then
+  [ "$AMD_PANEL_PRESENT" = 1 ] || { [ ! -e "$EXT/NMGopFB.kext" ] && [ ! -L "$EXT/NMGopFB.kext" ]; } \
+    || die "cannot identify the existing NMGopFB.kext; no driver changes made"
+  [ -d "$HERE/Optional/NMGopFB.kext" ] && [ ! -L "$HERE/Optional/NMGopFB.kext" ] \
+    || die "this package lacks the optional AMD panel kext"
+  [ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$HERE/Optional/NMGopFB.kext/Contents/Info.plist" 2>/dev/null)" = com.nullmoth.NMGopFB ] \
+    || die "invalid optional AMD panel bundle identity"
+  codesign --verify --strict "$HERE/Optional/NMGopFB.kext" || die "invalid AMD panel kext signature"
+  KEXTS="$KEXTS NMGopFB"; AMD_PANEL_TOUCHED=1
+  ok "experimental AMD panel support selected; see Optional/AMD-Panel.md for the separate boot setting"
+elif [ "$AMD_PANEL_PRESENT" = 1 ]; then
+  REMOVED_KEXTS="$REMOVED_KEXTS NMGopFB"; AMD_PANEL_TOUCHED=1
+  ok "AMD panel support will be removed; the previous copy is backed up"
+fi
+# NMXAudio is a separate, optional HD Audio driver for Tahoe. Never infer an
+# opt-in from a detected controller or take ownership of another installation.
+AUDIO=0; AUDIO_TOUCHED=0; AUDIO_OWNED=0
+audio_managed && AUDIO_OWNED=1
+if [ "$AUDIO_CHOICE" = ask ] && [ "$AUDIO_OWNED" = 1 ]; then AUDIO_CHOICE=yes; fi
+if [ "$AUDIO_CHOICE" = ask ]; then
+  AUDIO_CHOICE=no
+  if [ "$MAJ" -ge 26 ] && [ -d "$HERE/Optional/NMXAudio.kext" ] && [ ! -e "$EXT/NMXAudio.kext" ] &&
+     ioreg -r -c IOPCIDevice -l -w0 2>/dev/null | grep -q '"class-code" = <00030400>'; then
+    printf '\n%s\n' '----------------------------------------------------------------------'
+    echo "Optional NMXAudio HD Audio driver (Tahoe only). Skip if your audio already works."
+    printf '%s\n\n' '----------------------------------------------------------------------'
+    if [ -t 0 ]; then
+      printf 'Install the optional audio driver? [y/N] '
+      answer=""; IFS= read -r answer || answer=""
+      case "$answer" in y|Y|yes|YES|Yes) AUDIO_CHOICE=yes;; esac
+    else
+      echo "No interactive input: audio support skipped (use --audio=yes to opt in)."
+    fi
+  fi
+fi
+if [ "$AUDIO_CHOICE" = yes ]; then
+  [ "$MAJ" -ge 26 ] || die "the optional audio driver requires macOS Tahoe; use --audio=no on Sequoia"
+  [ "$AUDIO_OWNED" = 1 ] || { [ ! -e "$EXT/NMXAudio.kext" ] && [ ! -L "$EXT/NMXAudio.kext" ]; } \
+    || die "NMXAudio is installed independently or changed; it was left untouched (use --audio=no)"
+  [ -d "$HERE/Optional/NMXAudio.kext" ] && [ ! -L "$HERE/Optional/NMXAudio.kext" ] \
+    || die "this package lacks the optional audio driver"
+  [ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$HERE/Optional/NMXAudio.kext/Contents/Info.plist" 2>/dev/null)" = com.nullmoth.NMXAudio ] \
+    || die "invalid optional audio bundle identity"
+  ioreg -r -c IOPCIDevice -l -w0 2>/dev/null | grep -q '"class-code" = <00030400>' \
+    || die "no PCI HD Audio controller found; use --audio=no"
+  KEXTS="$KEXTS NMXAudio"; AUDIO=1; AUDIO_TOUCHED=1
+  ok "optional audio selected; existing driver-managed opt-ins are kept on updates"
+elif [ "$AUDIO_OWNED" = 1 ]; then
+  REMOVED_KEXTS="$REMOVED_KEXTS NMXAudio"; AUDIO_TOUCHED=1
+  ok "driver-managed audio will be removed; independent audio drivers are kept"
+fi
 primary_bundle_id() {
  if [ "$1" = NVPrimarySelector ]; then echo org.hackintosh.experimental.NVPrimarySelector
  else echo "com.nullmoth.$1"; fi
@@ -488,6 +535,7 @@ if [ -s "$KC" ]; then
     case "$external_path" in *.kext) ;; *) continue;; esac
     case "$external_path" in "$EXT"/*|/Library/Apple/System/Library/Extensions/*|/System/*) continue;; esac
     printf '%s' "$external_id" | grep -Eq '^[A-Za-z0-9_.-]+$' || die "invalid external extension identity"
+    if [ "$AMD_PANEL_TOUCHED" = 1 ] && [ "$external_id" = com.nullmoth.NMGopFB ]; then continue; fi
     case "$external_id" in com.nullmoth.NVRM|com.nullmoth.NVAccel|com.nullmoth.NVRMFB|com.nullmoth.NVRMAGDC|com.nullmoth.NMIntelFB) continue;; esac
     permanent_path=$(permanent_kext_path "$external_id" "$external_version" "$external_path") \
       || die "cannot preserve existing extension $external_id from a permanent installed path"
@@ -530,6 +578,7 @@ step "4. back up what is there now -> $BK"
 printf '%s\n' "$BUILD" > "$BK/macos-build" || die "record backup macOS build"
 [ "$PRIMARY" != 1 ] || touch "$BK/primary-selector-used" || die "record primary selector backup"
 [ "$INTEL_PANEL_TOUCHED" != 1 ] || touch "$BK/intel-panel-touched" || die "record Intel panel rollback"
+[ "$AMD_PANEL_TOUCHED" != 1 ] || touch "$BK/amd-panel-touched" || die "record AMD panel rollback"
 if [ "$AUDIO_TOUCHED" = 1 ]; then
   touch "$BK/audio-touched" || die "record audio rollback"
   [ ! -f "$AUDIO_MARKER" ] || backup_copy "audio opt-in" cp -p "$AUDIO_MARKER" "$BK/nvidia-audio.sha256"

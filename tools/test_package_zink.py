@@ -101,6 +101,15 @@ class PackageZinkTests(unittest.TestCase):
                 'tag': '615.78.08', 'commit': '1a82fbfda8f321b056eb3568850f9316c5e465c5',
                 'headers_sha256': {'fixture/nvkms-kapi.h': '0'*64},
             }))
+        if args[0] == '/bin/bash' and Path(args[1]) == ROOT/'kexts/NMGopFB/build.sh':
+            panel = Path(args[2])/'NMGopFB.kext'
+            self.bundle(panel, 'NMGopFB')
+            info = panel/'Contents/Info.plist'
+            info.write_bytes(plistlib.dumps({
+                'CFBundleExecutable': 'NMGopFB',
+                'CFBundleIdentifier': 'com.nullmoth.NMGopFB',
+                'CFBundleVersion': '0.1',
+            }))
         if args[0] == 'strings': return self.firmware
         if args[0] == 'git': return 'test-commit\n'
         if args[0] == 'otool': return 'cmd LC_RPATH\n cmdsize 40\n path /Library/GPUBundles/nvmtl (offset 12)\n'
@@ -204,6 +213,37 @@ class PackageZinkTests(unittest.TestCase):
         expected.update('./Library/NullMoth/kexts/' + m + '/SHA256SUMS' for m in ('15', '26'))
         self.assertEqual(set(entries), expected)
         self.assertFalse(list(self.out.rglob('NVKZinkGLDriver.bundle')))
+
+    def test_amd_panel_is_signed_and_only_bundled_as_optional(self):
+        active = self.base/'Library/Extensions/NMGopFB.kext'
+        self.bundle(active, 'NMGopFB')
+        info = active/'Contents/Info.plist'
+        info.write_bytes(plistlib.dumps({
+            'CFBundleExecutable': 'NMGopFB',
+            'CFBundleIdentifier': 'com.nullmoth.NMGopFB',
+        }))
+        pkg.base_tools.write_manifest(self.base)
+        self.original = self.snapshot(self.base)
+
+        self.stage()
+        self.unchanged()
+        panel = self.out/'Optional/NMGopFB.kext'
+        self.assertTrue(panel.is_dir())
+        self.assertFalse((self.out/'Library/Extensions/NMGopFB.kext').exists())
+        self.assertIn('--amd-panel=yes', (self.out/'install.sh').read_text())
+        self.assertTrue((self.out/'licenses/PrimeBridge-LICENSE.txt').is_file())
+        self.assertTrue(any(cmd[:3] == ('codesign', '--verify', '--strict')
+                            and cmd[-1].endswith('/Optional/NMGopFB.kext') for cmd in self.commands))
+        compact = json.loads((self.out/'PACKAGE-IDENTITY.json').read_text())
+        self.assertEqual(compact['optional_amd_panel'], {
+            'bundled': True, 'default': 'No', 'existing_opt_ins_retained': True,
+        })
+        detail = self.out.with_name(self.out.name+'-build-records')/'PACKAGE-IDENTITY.json'
+        record = json.loads(detail.read_text())['optional_amd_panel']
+        self.assertEqual(record['files']['Contents/MacOS/NMGopFB'],
+                         pkg.base_tools.digest(panel/'Contents/MacOS/NMGopFB'))
+        self.assertIn('](Optional/AMD-Panel.md)', (self.out/'READ-ME.md').read_text())
+        pkg.base_tools.verify_manifest(self.out)
 
     def test_tampered_base_is_rejected_without_output(self):
         self.put(self.base / 'VERSION', b'tampered')

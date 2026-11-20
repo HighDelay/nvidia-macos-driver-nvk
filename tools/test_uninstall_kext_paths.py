@@ -154,6 +154,27 @@ class UninstallPaths(fixture.Install):
         self.assertFalse(panel.exists())
         self.assertNotIn('com.nullmoth.NMIntelFB',self.kc.read_text())
 
+    def test_optional_amd_panel_is_removed_with_the_driver(self):
+        panel = self.bundle('Library/Extensions/NMGopFB.kext', 'com.nullmoth.NMGopFB', '0.1')
+        unrelated_id = 'org.test.com.nullmoth.NMGopFB'
+        unrelated = self.bundle('Library/Extensions/UnrelatedPanel.kext', unrelated_id, '1')
+        self.entries.append(['com.nullmoth.NMGopFB', '0.1', str(panel)])
+        self.entries.append([unrelated_id, '1', str(unrelated)])
+        self.cache()
+        result = self.run_remove()
+        self.assertEqual(result.returncode, 0, result.stdout+result.stderr)
+        self.assertFalse(panel.exists())
+        kept = {row[0] for row in json.loads(self.kc.read_text())['entries']}
+        self.assertNotIn('com.nullmoth.NMGopFB', kept)
+        self.assertIn(unrelated_id, kept)
+
+    def test_foreign_bundle_at_amd_panel_path_survives(self):
+        panel = self.bundle('Library/Extensions/NMGopFB.kext', 'org.test.ForeignPanel', '1')
+        result = self.run_remove()
+        self.assertEqual(result.returncode, 0, result.stdout+result.stderr)
+        self.assertTrue(panel.exists())
+        self.assertIn('org.test.ForeignPanel', self.kc.read_text())
+
     def test_failed_removal_restores_optional_panel(self):
         self.panel();self.external();result=self.run_remove(FAKE_REMOVE_LIVE_DROP='org.test.External')
         self.assert_restored(result)

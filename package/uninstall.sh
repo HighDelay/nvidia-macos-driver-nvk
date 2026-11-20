@@ -4,7 +4,7 @@ set -u
 # fixed PATH those resolve through whatever the caller exported, and kmutil
 # rebuilds the auxiliary kernel collection.
 PATH=/usr/bin:/bin:/usr/sbin:/sbin; export PATH
-# NVIDIA, optional Intel panel, and audio explicitly installed by this fork.
+# NVIDIA, optional laptop panels, and audio explicitly installed by this fork.
 # Independent audio, AMD/Intel GPU and NPU installations remain external.
 KEXTS="NVRM NVAccel NVRMFB NVRMAGDC NVPrimarySelector NMIntelFB"; EXT=/Library/Extensions; GB=/Library/GPUBundles
 AUDIO_MARKER=/Library/NullMoth/nvidia-audio.sha256
@@ -31,6 +31,10 @@ audio_managed() {
 }
 AUDIO_MANAGED=0
 if audio_managed; then AUDIO_MANAGED=1; KEXTS="$KEXTS NMXAudio"; fi
+if [ -d "$EXT/NMGopFB.kext" ] && [ ! -L "$EXT/NMGopFB.kext" ] &&
+   [ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$EXT/NMGopFB.kext/Contents/Info.plist" 2>/dev/null)" = com.nullmoth.NMGopFB ]; then
+  KEXTS="$KEXTS NMGopFB"
+fi
 KC=/Library/KernelCollections/AuxiliaryKernelExtensions.kc
 K=/System/Library/Kernels/kernel
 KARG=(--allow-missing-kdk); [ -f "$K" ] && KARG+=(--kernel "$K")   # without a matching Kernel Debug Kit, kmutil needs --allow-missing-kdk
@@ -136,7 +140,7 @@ permanent_kext_path() {
 # bundle IDs this invocation is removing, not the vendor's entire namespace.
 collection_has_removed_ids() {
   local ids k wanted
-  ids=$(printf '%s\n' "$1" | grep -oE '(com\.nullmoth\.[A-Za-z0-9_.-]+|org\.hackintosh\.experimental\.NVPrimarySelector)')
+  ids=$(printf '%s\n' "$1" | awk '{print $1}')
   for k in $KEXTS; do
     case "$k" in NVPrimarySelector) wanted=org.hackintosh.experimental.NVPrimarySelector;; *) wanted=com.nullmoth.$k;; esac
     if printf '%s\n' "$ids" | grep -Fxq "$wanted"; then return 0; fi
@@ -147,7 +151,7 @@ KEEP_KEXT_ARGS=(); KEEP_KEXT_IDS=""
 keep_kext() {
   local path=$1 id=$2 parent
   printf '%s' "$id" | grep -Eq '^[A-Za-z0-9_.-]+$' || die "invalid preserved extension identity"
-  case "$id" in com.nullmoth.NVRM|com.nullmoth.NVAccel|com.nullmoth.NVRMFB|com.nullmoth.NVRMAGDC|com.nullmoth.NMIntelFB|org.hackintosh.experimental.NVPrimarySelector) return;; esac
+  if collection_has_removed_ids "$id"; then return 0; fi
   case " $KEEP_KEXT_IDS " in *" $id "*) return;; esac
   parent=$path
   while :; do
@@ -173,8 +177,7 @@ if [ -s "$KC" ]; then
     || die "cannot inspect the existing collection before preserving extensions"
   while IFS=$'\t' read -r external_id external_version external_path external_rest; do
     case "$external_path" in *.kext) ;; *) continue;; esac
-    if [ "$AUDIO_MANAGED" = 1 ] && [ "$external_id" = com.nullmoth.NMXAudio ]; then continue; fi
-    case "$external_id" in com.nullmoth.NVRM|com.nullmoth.NVAccel|com.nullmoth.NVRMFB|com.nullmoth.NVRMAGDC|com.nullmoth.NMIntelFB|org.hackintosh.experimental.NVPrimarySelector) continue;; esac
+    if collection_has_removed_ids "$external_id"; then continue; fi
     case " $KEEP_KEXT_IDS " in *" $external_id "*) continue;; esac
     case "$external_path" in /System/*) continue;; esac
     permanent_path=$(permanent_kext_path "$external_id" "$external_version" "$external_path") \

@@ -57,8 +57,9 @@ a tested recovery path before evaluating the ACPI power resource. Surround
 needs atomic ownership and completion across all participating heads.
 Disk-backed brightness recovery needs serialization with active panel
 brightness changes. The existing optional Intel panel remains the supported
-hybrid display path. Broader muxless support and firmware-to-AUX takeover
-need affected hardware for validation.
+hybrid display path. The [experimental AMD panel option](AMD-PANEL.md)
+bundles the firmware framebuffer. Broader muxless support and firmware-to-AUX
+takeover need affected hardware for validation.
 
 ## Runtime validation
 

@@ -33,6 +33,10 @@ The installer offers experimental **Intel laptop panel support** (`NMIntelFB`),
 default **No**, for internal screens wired to an unsupported Intel GPU. Existing
 opt-ins survive updates. See [when to enable it](docs/INTEL-PANEL.md).
 
+The installer also offers **experimental AMD firmware-framebuffer support**
+(`NMGopFB`), default **No**, for screens wired to an unsupported AMD GPU.
+Choose one panel option. [AMD panel setup](docs/AMD-PANEL.md)
+
 Experimental [notebook TGP support](docs/NOTEBOOK-TGP.md) is available with
 `nvrmtgp=1`; it stays off by default and uses the laptop firmware's power budget.
 

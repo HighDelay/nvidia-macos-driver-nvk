@@ -18,7 +18,10 @@ sudo ./install.sh
 
 Follow the approval and reboot instructions. Optional Intel laptop panel
 support defaults to **No**; an existing opt-in is retained. See
-[the Intel panel guide](https://github.com/HighDelay/nvidia-macos-driver-nvk/blob/main/docs/INTEL-PANEL.md) before enabling it.
+[the Intel panel guide](https://github.com/HighDelay/nvidia-macos-driver-nvk/blob/main/docs/INTEL-PANEL.md).
+
+The experimental AMD panel option also defaults to **No**. Choose one panel
+option and follow the activation and recovery steps. [AMD panel guide](https://github.com/HighDelay/nvidia-macos-driver-nvk/blob/main/docs/AMD-PANEL.md)
 
 Native MetalFX DLSS has its own installer prompt, default **No**. It downloads
 NVIDIA files and compiles kernels on the target Mac. Wine/CrossOver DLSS uses
