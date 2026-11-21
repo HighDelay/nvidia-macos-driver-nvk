@@ -24,6 +24,7 @@ fixture = r'''
 #include <vector>
 #include <initializer_list>
 #include "nvrm-rotation.h"
+#include "nvrm-fb-safety.h"
 #define detailedTimingModeID __reservedA[0]
 using NvU32=uint32_t;using NvU64=uint64_t;
 enum {kModeId=1};
@@ -47,6 +48,9 @@ struct NvKmsKapiDisplayMode{NvKmsKapiDisplayModeTimings timings;};
 struct Kms{bool allowed=true;bool validateDisplayMode(void *,unsigned,NvKmsKapiDisplayMode *){return allowed;}};
 struct NVRMNVDAFramebuffer{
  bool fRotationEnabled=true,fModeSet=true,fBootInDT=false;unsigned fIndex=0,fNDT=0,fValidateCalls=0,fValidateOk=0,fEdidHits=0;
+ bool fHdrActive=false,fVrrSupported=false;
+ unsigned fVrrMinHz=0,fVrrMaxHz=0;
+ bool hdrAllowed() const {return false;}
  static const unsigned kMaxMacTimings=224;
  IODetailedTimingInformationV2 fDT[256]{},fCurDT{};
  IODisplayModeID fCurId=1;UInt32 fTransform=0,fCurTransform=0;
@@ -72,7 +76,8 @@ struct NVRMNVDAFramebuffer{
  void refreshDisplayAudioProperties(){++audioRefreshes;}
  bool edidModeFor(const IODetailedTimingInformationV2 *,NvKmsKapiDisplayMode *){return false;}
  bool applyMode(){return true;}
- IOReturn switchMode(IODisplayModeID id,const NvKmsKapiDisplayMode &mode,NvU32 w,NvU32 h,UInt32 transform){
+ IOReturn switchMode(IODisplayModeID id,const NvKmsKapiDisplayMode &mode,NvU32 w,NvU32 h,UInt32 transform,bool hdr=false){
+  fHdrActive=hdr;
   ++switches;fCurId=id;fMode=mode;fW=w;fH=h;fRasterW=mode.timings.hVisible;fRasterH=mode.timings.vVisible;fCurTransform=transform;return 0;
  }
 };

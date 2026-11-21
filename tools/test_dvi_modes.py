@@ -93,6 +93,7 @@ struct NVRMNVDAFramebuffer {
     void validateInitialDviMode();
     bool edidModeFor(const IODetailedTimingInformationV2 *,NvKmsKapiDisplayMode *);
     unsigned addKmsRefreshModes(unsigned);
+    static void dtToKapi(const IODetailedTimingInformationV2 *, NvKmsKapiDisplayMode *);
 };
 @@METHODS@@
 static IODetailedTimingInformationV2 timing(const NvKmsKapiDisplayMode &mode){
@@ -193,6 +194,7 @@ int main(){
 fixture = fixture.replace('@@METHODS@@', '\n'.join(method(name) for name in [
     'void NVRMNVDAFramebuffer::validateInitialDviMode(',
     'bool NVRMNVDAFramebuffer::edidModeFor(',
+    'void NVRMNVDAFramebuffer::dtToKapi(',
     'unsigned NVRMNVDAFramebuffer::addKmsRefreshModes(']))
 includes = [ROOT / 'kexts/NVRMFB/fb'] + [args.ogkm / name for name in [
     'src/nvidia/arch/nvalloc/unix/include',
