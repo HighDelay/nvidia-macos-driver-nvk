@@ -15,6 +15,7 @@ def between(source, start, end):
 
 
 fixture = r'''#include <cassert>
+#include <cerrno>
 #include <cmath>
 #include <cstdint>
 #include <cstring>
@@ -26,6 +27,18 @@ using UInt32 = uint32_t;
 using UInt64 = uint64_t;
 using NvU32 = uint32_t;
 using IOReturn = int;
+struct IOLock { bool held = false; };
+static IOLock *IOLockAlloc() { return new IOLock; }
+static void IOLockLock(IOLock *lock) { assert(!lock->held); lock->held = true; }
+static void IOLockUnlock(IOLock *lock) { assert(lock->held); lock->held = false; }
+static bool diskEnabled = false;
+static bool PE_parse_boot_argn(const char *name, UInt32 *value, unsigned size) {
+    assert(!strcmp(name, "nvfbbacklightdisk") && size == sizeof(*value));
+    *value = diskEnabled;
+    return true;
+}
+#define NVRM_EDP_BACKLIGHT_FN "NVRMEdpBacklight"
+struct NVRMEdpBacklightRequest { unsigned gpuId, displayId; bool set; unsigned percent; };
 using thread_call_param_t = void *;
 static constexpr IOReturn kIOReturnSuccess = 0;
 static int gIODTPlane;
@@ -137,6 +150,7 @@ static UInt32 savedValue();
 static void nvrm_backlight_dummy();
 struct NVRMBacklightHandler : IODisplayParameterHandler {
     IOService *fRM = nullptr;
+    NVRMEdpBacklightRequest fAux = {};
     const OSSymbol *fFn = nullptr;
     thread_call_t fApply = nullptr;
     thread_call_t fPersist = nullptr;
@@ -150,10 +164,14 @@ struct NVRMBacklightHandler : IODisplayParameterHandler {
     bool fHaveSaved = false;
     volatile bool fUserSeen = false;
     OSDictionary *fParameters = nullptr;
+    IOLock *fTargetLock = nullptr;
+    bool fDiskEnabled = false, fUserSelected = false, fDiskRestoreAccepted = false;
+    SInt32 fDiskLevel = -1;
     static const OSSymbol *sBrightnessProbe, *sLinearBrightnessProbe;
     bool init() { return true; }
     void release() override { delete this; }
-    static NVRMBacklightHandler *withRM(IOService *, NvU32);
+    static NVRMBacklightHandler *withRM(IOService *, NvU32, const NVRMEdpBacklightRequest * = nullptr);
+    int diskLevel(SInt32 *, bool);
     bool setDisplay(IODisplay *) override;
     bool doIntegerSet(OSDictionary *, const OSSymbol *, UInt32);
     static void applyFire(thread_call_param_t, thread_call_param_t);
@@ -320,6 +338,23 @@ int main() {
     assert(fresh->doIntegerSet(&user, gIODisplayBrightnessKey, 65535));
     NVRMBacklightHandler::applyFire(fresh, nullptr); fireSave(fresh);
     assert(savedValue() == 65535);
+    SInt32 diskValue = 6000;
+    assert(fresh->diskLevel(&diskValue, true) == ENODEV);
+    diskEnabled = true;
+    auto disk = NVRMBacklightHandler::withRM(&rm, 50);
+    IODisplay diskDisplay;
+    assert(disk->setDisplay(&diskDisplay));
+    assert(disk->doIntegerSet(&user, gIODisplayBrightnessKey, 65535));
+    assert(disk->diskLevel(&diskValue, true) == 0 && disk->fPending == 6000);
+    NVRMBacklightHandler::applyFire(disk, nullptr);
+    assert(disk->diskLevel(&diskValue, false) == 0 && diskValue == 6000);
+    assert(disk->doIntegerSet(&user, gIODisplayBrightnessKey, 9000));
+    assert(disk->diskLevel(&diskValue, true) == EBUSY && disk->fPending == 9000);
+    NVRMBacklightHandler::applyFire(disk, nullptr);
+    assert(disk->diskLevel(&diskValue, false) == 0 && diskValue == 9000);
+    auto userFirst = NVRMBacklightHandler::withRM(&rm, 50);
+    assert(userFirst->doIntegerSet(&user, gIODisplayBrightnessKey, 12000));
+    assert(userFirst->diskLevel(&diskValue, true) == EBUSY && userFirst->fPending == 12000);
     puts("PASS: fractional targets survive probes, hardware-percent quantization, power requests and restart; legacy storage, endpoints and failed writes are covered.");
 }
 '''
@@ -330,7 +365,8 @@ code += between(HEADER, "enum { kNVRMBacklightMax", "static inline unsigned nvrm
 code += between(SOURCE, "NVRMBacklightHandler *NVRMBacklightHandler::withRM", "void NVRMBacklightHandler::free()")
 code += between(SOURCE, "bool NVRMBacklightHandler::setDisplay", "// User changes arrive")
 code += between(SOURCE, "bool NVRMBacklightHandler::doIntegerSet", "void NVRMBacklightHandler::applyFire")
-code += between(SOURCE, "void NVRMBacklightHandler::applyFire", "// 1 once this boot's guard clear")
+code += between(SOURCE, "void NVRMBacklightHandler::applyFire", "// The restore sysctl targets")
+code += between(SOURCE, "void NVRMBacklightHandler::persistFire", "// 1 once this boot's guard clear")
 code += checks
 
 with tempfile.TemporaryDirectory() as directory:

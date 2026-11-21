@@ -23,6 +23,7 @@ using UInt32 = uint32_t;
 #define kprintf printf
 static unsigned char panel[0x800];
 static unsigned enabled = 1, writeAttempts;
+static unsigned modeWrites, failModeWrites;
 static bool failWrite, shortRead;
 static bool PE_parse_boot_argn(const char *name, UInt32 *out, size_t size) {
     assert(strcmp(name, "nvfbedpbl") == 0 && size == sizeof(*out));
@@ -32,8 +33,19 @@ static bool PE_parse_boot_argn(const char *name, UInt32 *out, size_t size) {
 static int nvrm_dpaux_transfer(NVRMDpAuxRequest *r) {
     assert(r->gpuId == 42 && r->displayId == 16 && r->addr + r->len <= sizeof panel);
     if (r->write) {
-        assert(r->addr == kEdpBacklightMsb);
         ++writeAttempts;
+        if (r->addr == kEdpBacklightMode) {
+            assert(r->len == 1 && panel[kEdpBacklightMsb] != 0);
+            ++modeWrites;
+            if (failModeWrites) {
+                if (failModeWrites == 2) panel[r->addr] = r->data[0];
+                --failModeWrites;
+                return -1;
+            }
+            panel[r->addr] = r->data[0];
+            return 0;
+        }
+        assert(r->addr == kEdpBacklightMsb);
         if (failWrite) {
             panel[r->addr] = r->data[0];
             failWrite = false;
@@ -75,7 +87,25 @@ int main() {
     assert(panel[kEdpBacklightMsb] == 0xff && panel[kEdpBacklightLsb] == 0x33);
     enabled = 0;
     assert(nvrm_edp_backlight(&request) == -1 && writeAttempts == 4);
-    puts("PASS: active AUX control, exact lengths, partial-write restoration and PWM preservation");
+    enabled = 2;
+    panel[kEdpBacklightMode] = 0xa0;
+    panel[kEdpBacklightMsb] = 0x00;
+    request.set = false;
+    assert(nvrm_edp_backlight(&request) == 0 && request.percent == 100 && modeWrites == 0);
+    request.set = true;
+    request.percent = 0;
+    failModeWrites = 1;
+    assert(nvrm_edp_backlight(&request) == -1);
+    assert(panel[kEdpBacklightMode] == 0xa0 && panel[kEdpBacklightMsb] == 0);
+    assert(modeWrites == 2);
+    failModeWrites = 2;
+    assert(nvrm_edp_backlight(&request) == -1);
+    assert(panel[kEdpBacklightMode] == 0xa2 && panel[kEdpBacklightMsb] == 13);
+    assert(modeWrites == 4);
+    panel[kEdpBacklightMode] = 0xa0;
+    assert(nvrm_edp_backlight(&request) == 0 && modeWrites == 5);
+    assert(panel[kEdpBacklightMode] == 0xa2 && panel[kEdpBacklightMsb] == 13);
+    puts("PASS: active AUX control, exact lengths, partial writes and opt-in PWM takeover");
 }
 '''
 with tempfile.TemporaryDirectory() as d:

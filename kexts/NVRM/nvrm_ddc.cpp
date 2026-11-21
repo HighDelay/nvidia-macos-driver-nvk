@@ -139,7 +139,8 @@ extern "C" int nvrm_edp_backlight(NVRMEdpBacklightRequest *brightness)
 {
     UInt32 enabled = 0;
     if (!brightness || brightness->percent > 100 ||
-        !PE_parse_boot_argn("nvfbedpbl", &enabled, sizeof enabled) || enabled != 1) return -1;
+        !PE_parse_boot_argn("nvfbedpbl", &enabled, sizeof enabled) ||
+        (enabled != 1 && enabled != 2)) return -1;
 
     auto transfer = [brightness](unsigned address, unsigned len, bool write, unsigned char *data) {
         NVRMDpAuxRequest request = {};
@@ -159,24 +160,41 @@ extern "C" int nvrm_edp_backlight(NVRMEdpBacklightRequest *brightness)
     if (!transfer(kEdpGeneralCap1, 2, false, capability) ||
         !transfer(kEdpDisplayCtl, 2, false, mode)) return -1;
     const auto caps = edpBacklightCaps(capability[0], capability[1]);
-    // Firmware must already be driving the backlight through AUX. Entering
-    // this mode without knowing the PWM brightness can drop the panel to black.
-    if (!caps.auxSet || !(mode[0] & kEdpCtlBacklightEnable) ||
-        (mode[1] & kEdpModeMask) != kEdpModeDpcd) return -1;
+    if (!caps.auxSet || !(mode[0] & kEdpCtlBacklightEnable)) return -1;
+    const unsigned currentMode = mode[1] & kEdpModeMask;
+    const bool takeover = enabled == 2 && currentMode == kEdpModePwm;
+    if (currentMode != kEdpModeDpcd && !takeover) return -1;
 
     unsigned char before[2];
     const unsigned len = caps.twoBytes ? 2 : 1;
     if (!transfer(kEdpBacklightMsb, len, false, before)) return -1;
     if (!brightness->set) {
+        if (takeover) {
+            // The PWM level is driven outside DPCD. Report a full-scale
+            // starting target and leave PWM active until a set request.
+            brightness->percent = 100;
+            return 0;
+        }
         const unsigned level = caps.twoBytes ? ((unsigned)before[0] << 8) | before[1] : before[0];
         const unsigned max = caps.twoBytes ? 65535 : 255;
         brightness->percent = (100 * level + max / 2) / max;
         return 0;
     }
 
-    const unsigned level = edpBacklightLevel(brightness->percent, caps.twoBytes);
+    const unsigned percent = takeover && brightness->percent < 5 ? 5 : brightness->percent;
+    const unsigned level = edpBacklightLevel(percent, caps.twoBytes);
     unsigned char after[2] = { (unsigned char)(caps.twoBytes ? level >> 8 : level), (unsigned char)level };
-    if (transfer(kEdpBacklightMsb, len, true, after)) return 0;
+    if (transfer(kEdpBacklightMsb, len, true, after)) {
+        if (!takeover) return 0;
+        unsigned char dpcd = (mode[1] & ~kEdpModeMask) | kEdpModeDpcd;
+        if (transfer(kEdpBacklightMode, 1, true, &dpcd)) return 0;
+        // An unacknowledged write may still have switched modes. Keep the
+        // safe level unless PWM has been successfully restored.
+        if (!transfer(kEdpBacklightMode, 1, true, &mode[1])) {
+            kprintf("NVRM-xnu: eDP backlight could not restore the PWM control mode\n");
+            return -1;
+        }
+    }
     // An incomplete two-byte transaction can update only the MSB.
     if (!transfer(kEdpBacklightMsb, len, true, before))
         kprintf("NVRM-xnu: eDP brightness could not be restored after a failed AUX write\n");

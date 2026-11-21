@@ -20,6 +20,10 @@ fixture = r'''
 using SInt32 = int32_t;
 using UInt32 = uint32_t;
 using UInt64 = uint64_t;
+struct IOLock {};
+static void IOLockLock(IOLock *) {}
+static void IOLockUnlock(IOLock *) {}
+#define BLLOG(...) do {} while (0)
 enum { kNVRMBacklightMax = 0xFFFF };
 static constexpr SInt32 kAppleBacklightDefaultMax = 255;
 static constexpr UInt32 kNVRMBacklightSaveDelaySeconds = 2, kSecondScale = 1;
@@ -53,6 +57,10 @@ struct NVRMBacklightHandler {
     volatile SInt32 fPersistPending = -1;
     volatile UInt64 fPersistDeadline = 0;
     OSDictionary *fParameters = nullptr;
+    IOLock *fTargetLock = nullptr;
+    bool fDiskEnabled = false, fUserSelected = false, fHaveSaved = false;
+    bool fDiskRestoreAccepted = false;
+    SInt32 fRestoreLevel = -1;
     bool doIntegerSet(OSDictionary *, const OSSymbol *, UInt32);
 };
 const OSSymbol *NVRMBacklightHandler::sBrightnessProbe = &probeKey;
@@ -72,23 +80,23 @@ int main() {
     assert(h.doIntegerSet(&power, gIODisplayBrightnessKey, kAppleBacklightDefaultMax));
     assert(h.fPending == 35 && h.fUserLevel == 35);
     assert(h.doIntegerSet(&power, gIODisplayBrightnessKey, 12));
-    assert(h.fUserLevel == 35 && h.fPersistPending == -1 && h.fPending == 12 && h.call.entered == 3);
+    assert(h.fUserLevel == 35 && h.fPersistPending == -1 && h.fPending == 12 && h.call.entered == 4);
     assert(h.doIntegerSet(&user, gIODisplayBrightnessKey, 64));
-    assert(h.fUserLevel == 64 && h.fPersistPending == -1 && h.fPending == 64 && h.call.entered == 4);
+    assert(h.fUserLevel == 64 && h.fPersistPending == -1 && h.fPending == 64 && h.call.entered == 5);
     assert(parameters.values[gIODisplayLinearBrightnessKey] == 64);
-    assert(!h.doIntegerSet(&user, &otherKey, 80) && h.fPending == 64 && h.call.entered == 4);
+    assert(!h.doIntegerSet(&user, &otherKey, 80) && h.fPending == 64 && h.call.entered == 5);
     // GetUserBrightness writes a conversion probe with a potentially stale value (18 on the affected laptop).
     assert(h.doIntegerSet(&user, NVRMBacklightHandler::sLinearBrightnessProbe, 18));
     assert(parameters.values[NVRMBacklightHandler::sBrightnessProbe] == 18);
-    assert(h.fUserLevel == 64 && h.fPersistPending == -1 && h.fPending == 64 && h.call.entered == 4);
+    assert(h.fUserLevel == 64 && h.fPersistPending == -1 && h.fPending == 64 && h.call.entered == 5);
     // RefreshUserBrightness converts in the other direction before sending the actual linear request.
     assert(h.doIntegerSet(&user, NVRMBacklightHandler::sBrightnessProbe, 83));
     assert(parameters.values[NVRMBacklightHandler::sLinearBrightnessProbe] == 83);
-    assert(h.fUserLevel == 64 && h.fPending == 64 && h.call.entered == 4);
+    assert(h.fUserLevel == 64 && h.fPending == 64 && h.call.entered == 5);
     assert(h.doIntegerSet(&user, gIODisplayLinearBrightnessKey, 83));
-    assert(h.fUserLevel == 83 && h.fPersistPending == -1 && h.fPending == 83 && h.call.entered == 5);
+    assert(h.fUserLevel == 83 && h.fPersistPending == -1 && h.fPending == 83 && h.call.entered == 6);
     assert(h.doIntegerSet(&user, NVRMBacklightHandler::sLinearBrightnessProbe, 18));
-    assert(h.fUserLevel == 83 && h.fPersistPending == -1 && h.fPending == 83 && h.call.entered == 5);
+    assert(h.fUserLevel == 83 && h.fPersistPending == -1 && h.fPending == 83 && h.call.entered == 6);
     assert(h.doIntegerSet(&power, gIODisplayBrightnessKey, 100) && h.fPending == 83);
     assert(h.doIntegerSet(&user, NVRMBacklightHandler::sBrightnessProbe, 0xFFFFFFFFU));
     assert(parameters.values[NVRMBacklightHandler::sLinearBrightnessProbe] == kNVRMBacklightMax && h.fUserLevel == 83);

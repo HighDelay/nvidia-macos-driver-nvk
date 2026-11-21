@@ -247,6 +247,10 @@ if [ -f "$KC" ]; then
 fi
 REMOVING=0
 rm -rf "$RB"
+if [ -f /Library/NullMoth/backlight_keeper.sh ]; then
+  launchctl bootout system/com.nullmoth.backlight 2>/dev/null || true
+  rm -f /Library/NullMoth/backlight_keeper.sh /Library/NullMoth/backlight.level /Library/LaunchDaemons/com.nullmoth.backlight.plist
+fi
 # Change boot-args only after removal commits. A failed NVRAM write keeps the ownership record for recovery.
 # Keep identical to install.sh: an unreadable NVRAM store is not empty boot-args.
 read_boot_args() {

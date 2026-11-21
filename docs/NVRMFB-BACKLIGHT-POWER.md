@@ -13,3 +13,21 @@ The four IODisplay brightness and conversion-probe parameters advertise a logica
 The logical target remains unquantized through probes, pending requests and version-2 restart persistence. The final NVKMS call uses `5 + round(level * 95 / 65535)`: slider zero maps to hardware 5%, and slider maximum maps to 100%. Hardware initialization uses the inverse mapping, with hardware values at or below 5% mapping to logical zero. The 5% floor protects panels that turn completely off at zero; the affine mapping removes the old bottom 5% plateau while retaining integer-percent hardware quantization. This is a usable-range mapping, not a perceptual curve. AppleBacklightDisplay's public source uses 0..255 as its default power-brightness span when the display publishes no power-state range; that full-power request restores the saved logical target. Keyboard stepping and system volume handling are unchanged.
 
 Public contracts: [Apple IODisplay float normalization](https://github.com/apple-oss-distributions/IOKitUser/blob/main/graphics.subproj/IODisplayLib.c), [IODisplay parameter handling](https://github.com/apple-oss-distributions/IOGraphics/blob/main/IOGraphicsFamily/IODisplay.cpp), and [NVIDIA integer-percent backlight](https://github.com/NVIDIA/open-gpu-kernel-modules/blob/main/kernel-open/nvidia-modeset/nvidia-modeset-linux.c).
+
+## Optional disk recovery and AUX takeover
+
+For firmware that loses the NVRAM brightness record, add `nvfbbacklightdisk=1`
+to the boot arguments and run the helper from the extracted package.
+
+```sh
+sudo ./Optional/Panel-Brightness/backlight_keeper.sh install
+```
+
+The helper saves the last successfully applied user level. It can restore
+that level once per panel startup, before a new user selection. Replace
+`install` with `remove` to delete the helper and its saved level.
+
+`nvfbedpbl=2` lets an internal panel with AUX brightness support switch from
+firmware PWM control when a brightness level is applied. The driver programs
+a level of at least 5% before switching and attempts to restore PWM if the
+mode change fails. This mode needs physical laptop testing.

@@ -174,6 +174,7 @@ private:
     bool         fPrivateState = false;
     bool         fAdapter = false;
     NVRMPower   *fPower = nullptr;
+    IOLock      *fEdpBacklightLock = nullptr;
     IOLock      *fUtilizationLock = nullptr;
     void        *fUtilizationState = nullptr;
     bool         fUtilizationStopping = false;
@@ -633,6 +634,10 @@ bool NVRM::start(IOService *provider)
     if (!fPCI) return false;
     // An unavailable telemetry lock disables this optional interface, not the GPU.
     fUtilizationLock = IOLockAlloc();
+    UInt32 edpBacklight = 0;
+    if (PE_parse_boot_argn("nvfbedpbl", &edpBacklight, sizeof edpBacklight) &&
+        (edpBacklight == 1 || edpBacklight == 2))
+        fEdpBacklightLock = IOLockAlloc();
     gNVRMService = this;
     nv_xnu_log_init();
     // The kernel mapping table is serialised, so its lock has to exist before RM maps anything.
@@ -1948,6 +1953,7 @@ void NVRM::restoreAspm()
 void NVRM::free()
 {
     nvrm_power_release(fPower); fPower = nullptr;
+    if (fEdpBacklightLock) { IOLockFree(fEdpBacklightLock); fEdpBacklightLock = nullptr; }
     if (fUtilizationLock) { IOLockFree(fUtilizationLock); fUtilizationLock = nullptr; }
     super::free();
 }
@@ -2190,11 +2196,14 @@ IOReturn NVRM::callPlatformFunction(const OSSymbol *fn, bool wait, void *p1, voi
     }
     if (fn && (fn->isEqualTo(NVRM_DDC_FN) || fn->isEqualTo(NVRM_EDP_BACKLIGHT_FN))) {
         if (!p1) return kIOReturnBadArgument;
+        const bool edp = fn->isEqualTo(NVRM_EDP_BACKLIGHT_FN);
+        if (edp && !fEdpBacklightLock) return kIOReturnNotReady;
         int counted = 0;
         if (!nv_xnu_pm_try_enter(&counted)) return kIOReturnNotReady;
-        const int result = fn->isEqualTo(NVRM_DDC_FN)
-            ? nvrm_ddc_transfer(static_cast<NVRMDdcRequest *>(p1))
-            : nvrm_edp_backlight(static_cast<NVRMEdpBacklightRequest *>(p1));
+        if (edp) IOLockLock(fEdpBacklightLock);
+        const int result = edp ? nvrm_edp_backlight(static_cast<NVRMEdpBacklightRequest *>(p1))
+                               : nvrm_ddc_transfer(static_cast<NVRMDdcRequest *>(p1));
+        if (edp) IOLockUnlock(fEdpBacklightLock);
         nv_xnu_pm_exit(counted);
         return result ? kIOReturnIOError : kIOReturnSuccess;
     }

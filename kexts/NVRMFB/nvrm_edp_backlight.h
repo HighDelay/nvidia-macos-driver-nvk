@@ -17,7 +17,8 @@ enum {
     kEdpBacklightMsb  = 0x722,
     kEdpBacklightLsb  = 0x723,
 };
-enum { kEdpCapAuxSet = 0x02, kEdpCapByteCount = 0x04, kEdpCtlBacklightEnable = 0x01, kEdpModeMask = 0x03, kEdpModeDpcd = 0x02 };
+enum { kEdpCapAuxSet = 0x02, kEdpCapByteCount = 0x04, kEdpCtlBacklightEnable = 0x01,
+       kEdpModeMask = 0x03, kEdpModePwm = 0x00, kEdpModeDpcd = 0x02 };
 // What the sink advertises: AUX brightness control, and whether the level is one byte or two.
 struct EdpBacklightCaps { bool auxSet; bool twoBytes; };
 static inline EdpBacklightCaps edpBacklightCaps(unsigned char cap1, unsigned char cap2)

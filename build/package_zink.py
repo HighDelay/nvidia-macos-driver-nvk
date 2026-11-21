@@ -190,6 +190,10 @@ def stage(base, zink, output, components=None, native_gld=False, records=None, w
         shutil.copy2(ROOT / 'docs/GPU-UTILIZATION.md', payload / 'GPU-UTILIZATION.md')
         audio_identity = stage_optional_audio(payload)
         amd_panel_identity = stage_amd_panel(payload, Path(temp)/'amd-panel')
+        keeper = payload/'Optional/Panel-Brightness'
+        keeper.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(ROOT/'package/backlight_keeper.sh', keeper/'backlight_keeper.sh')
+        shutil.copy2(ROOT/'docs/NVRMFB-BACKLIGHT-POWER.md', keeper/'README.md')
         webkit_identity = stage_webkit(payload, webkit_fixup_build, run)
         # Always bundle the real framebuffer, outside Library/Extensions. Only
         # an explicit installer choice copies it into the system repositories.

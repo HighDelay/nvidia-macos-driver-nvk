@@ -187,6 +187,12 @@ class NVRMBacklightHandler : public IODisplayParameterHandler {
     volatile UInt64 fPersistDeadline = 0;
     SInt32 fRestoreLevel = -1;
     OSDictionary *fParameters = nullptr;
+    IOLock *fTargetLock = nullptr;
+    bool fDiskEnabled = false;
+    bool fUserSelected = false;
+    bool fHaveSaved = false;
+    bool fDiskRestoreAccepted = false;
+    SInt32 fDiskLevel = -1;
     static void applyFire(thread_call_param_t me, thread_call_param_t);
     static void persistFire(thread_call_param_t me, thread_call_param_t);
     static const OSSymbol *sBrightnessProbe, *sLinearBrightnessProbe;
@@ -197,6 +203,8 @@ public:
     bool doDataSet(const OSSymbol *, OSData *) override { return false; }
     bool doUpdate() override { return true; }
     void free() override;
+    bool diskEnabled() const { return fDiskEnabled; }
+    int diskLevel(SInt32 *level, bool restore);
 };
 OSDefineMetaClassAndStructors(NVRMBacklightHandler, IODisplayParameterHandler)
 const OSSymbol *NVRMBacklightHandler::sBrightnessProbe = nullptr;
@@ -213,17 +221,21 @@ NVRMBacklightHandler *NVRMBacklightHandler::withRM(IOService *rm, NvU32 level, c
     if (!sLinearBrightnessProbe) sLinearBrightnessProbe = OSSymbol::withCStringNoCopy("linear-brightness-probe");
     h->fApply = nvrmfbCall(applyFire, h);
     h->fPersist = thread_call_allocate_with_options(persistFire, h, THREAD_CALL_PRIORITY_LOW, THREAD_CALL_OPTIONS_ONCE);
+    h->fTargetLock = IOLockAlloc();
+    UInt32 disk = 0;
+    h->fDiskEnabled = PE_parse_boot_argn("nvfbbacklightdisk", &disk, sizeof disk) && disk == 1;
     h->fLevel = (SInt32)nvrm_backlight_from_percent(level <= 100 ? level : 100);
     UInt32 saved;
     IORegistryEntry *options = IORegistryEntry::fromPath("/options", gIODTPlane);
     if (options && nvrm_backlight_read(options, &saved)) {
+        h->fHaveSaved = true;
         h->fUserLevel = (SInt32)saved;
         h->fRestoreLevel = (SInt32)saved;
     } else {
         h->fUserLevel = h->fLevel;
     }
     OSSafeReleaseNULL(options);
-    if (!h->fFn || !h->fApply || !h->fPersist) { h->release(); return nullptr; }
+    if (!h->fFn || !h->fApply || !h->fPersist || !h->fTargetLock) { h->release(); return nullptr; }
     return h;
 }
 
@@ -234,6 +246,7 @@ void NVRMBacklightHandler::free()
     OSSafeReleaseNULL(fFn);
     OSSafeReleaseNULL(fRM);
     OSSafeReleaseNULL(fParameters);
+    if (fTargetLock) IOLockFree(fTargetLock);
     IODisplayParameterHandler::free();
 }
 
@@ -247,6 +260,7 @@ bool NVRMBacklightHandler::setDisplay(IODisplay *display)
     OSDictionary *params = cur ? OSDictionary::withDictionary(cur) : OSDictionary::withCapacity(2);
     OSSafeReleaseNULL(old);
     if (!params) return false;
+    IOLockLock(fTargetLock);
     IODisplay::addParameter(params, gIODisplayBrightnessKey, 0, kNVRMBacklightMax);
     SInt32 initial = OSAddAtomic(0, &fUserLevel);
     IODisplay::setParameter(params, gIODisplayBrightnessKey, initial);
@@ -257,14 +271,17 @@ bool NVRMBacklightHandler::setDisplay(IODisplay *display)
     IODisplay::setParameter(params, sBrightnessProbe, initial);
     IODisplay::addParameter(params, sLinearBrightnessProbe, 0, kNVRMBacklightMax);
     IODisplay::setParameter(params, sLinearBrightnessProbe, initial);
-    display->setProperty(gIODisplayParametersKey, params);
     OSSafeReleaseNULL(fParameters);
     fParameters = params;
+    params->retain();
     if (fRestoreLevel >= 0) {
         fPending = fRestoreLevel;
         fRestoreLevel = -1;
         thread_call_enter(fApply);
     }
+    IOLockUnlock(fTargetLock);
+    display->setProperty(gIODisplayParametersKey, params);
+    params->release();
     BLLOG("backlight: brightness parameters on %s, logical level %d/65535", display->getName(), (int)fLevel);
     return true;
 }
@@ -276,13 +293,25 @@ bool NVRMBacklightHandler::doIntegerSet(OSDictionary *params, const OSSymbol *pa
     const bool probe = paramName == sBrightnessProbe || paramName == sLinearBrightnessProbe;
     if (!probe && paramName != gIODisplayBrightnessKey && paramName != gIODisplayLinearBrightnessKey) return false;
     SInt32 level = value > kNVRMBacklightMax ? kNVRMBacklightMax : (SInt32)value;
+    IOLockLock(fTargetLock);
     if (probe) {
         // No transfer function is reported by NVKMS; preserve the normalized request without applying it.
-        return fParameters && IODisplay::setParameter(fParameters,
+        const bool updated = fParameters && IODisplay::setParameter(fParameters,
             paramName == sBrightnessProbe ? sLinearBrightnessProbe : sBrightnessProbe, level);
+        IOLockUnlock(fTargetLock);
+        return updated;
     }
-    const bool userRequest = params && params->getObject(gIODisplayValueKey);
+    bool userRequest = params && params->getObject(gIODisplayValueKey);
+    if (userRequest && !fUserSelected && level == (SInt32)kNVRMBacklightMax &&
+        ((fDiskEnabled && !fDiskRestoreAccepted) ||
+         ((fHaveSaved || fDiskRestoreAccepted) && OSAddAtomic(0, &fUserLevel) < level))) {
+        // CoreDisplay can send several default maximum requests while opening
+        // a panel. Keep the saved target until the first real adjustment.
+        userRequest = false;
+    }
     if (userRequest) {
+        fUserSelected = true;
+        fRestoreLevel = -1;
         uint64_t deadline;
         clock_interval_to_deadline(kNVRMBacklightSaveDelaySeconds, kSecondScale, &deadline);
         __atomic_store_n(&fPersistDeadline, deadline, __ATOMIC_SEQ_CST);
@@ -298,7 +327,35 @@ bool NVRMBacklightHandler::doIntegerSet(OSDictionary *params, const OSSymbol *pa
         userRequest ? "user" : "power", (int)level, (int)OSAddAtomic(0, &fUserLevel));
     fPending = level;
     thread_call_enter(fApply);
+    IOLockUnlock(fTargetLock);
     return true;
+}
+
+int NVRMBacklightHandler::diskLevel(SInt32 *level, bool restore)
+{
+    if (!fDiskEnabled) return ENODEV;
+    IOLockLock(fTargetLock);
+    int result = 0;
+    if (!restore) {
+        *level = fDiskLevel;
+    } else if (*level < 0 || *level > (SInt32)kNVRMBacklightMax) {
+        result = EINVAL;
+    } else if (fUserSelected || fDiskRestoreAccepted) {
+        result = EBUSY;
+    } else {
+        fDiskRestoreAccepted = true;
+        __atomic_store_n(&fUserLevel, *level, __ATOMIC_SEQ_CST);
+        if (fParameters) {
+            IODisplay::setParameter(fParameters, gIODisplayBrightnessKey, *level);
+            IODisplay::setParameter(fParameters, gIODisplayLinearBrightnessKey, *level);
+            fPending = *level;
+            thread_call_enter(fApply);
+        } else {
+            fRestoreLevel = *level;
+        }
+    }
+    IOLockUnlock(fTargetLock);
+    return result;
 }
 
 void NVRMBacklightHandler::applyFire(thread_call_param_t p, thread_call_param_t)
@@ -320,13 +377,67 @@ void NVRMBacklightHandler::applyFire(thread_call_param_t p, thread_call_param_t)
         me->fLevel = v;
         BLLOG("backlight: applied logical=%d/65535 hardware=%u%% user-target=%d/65535",
             (int)v, (unsigned)percent, (int)OSAddAtomic(0, &me->fUserLevel));
-        uint64_t deadline = __atomic_load_n(&me->fPersistDeadline, __ATOMIC_SEQ_CST);
+        IOLockLock(me->fTargetLock);
+        const uint64_t deadline = __atomic_load_n(&me->fPersistDeadline, __ATOMIC_SEQ_CST);
+        if (me->fDiskEnabled && (me->fUserSelected || me->fDiskRestoreAccepted)
+            && OSAddAtomic(0, &me->fUserLevel) == v) me->fDiskLevel = v;
         if (deadline && OSAddAtomic(0, &me->fUserLevel) == v) {
             // Only a successfully applied user target becomes eligible for persistence.
             __atomic_store_n(&me->fPersistPending, v, __ATOMIC_SEQ_CST);
             thread_call_enter_delayed(me->fPersist, deadline);
         }
+        IOLockUnlock(me->fTargetLock);
     } else BLLOG("backlight: setting %u%% failed (0x%x)", (unsigned)percent, r);
+}
+
+// The restore sysctl targets the only opted-in internal NVIDIA panel.
+// The framebuffer owns the handler. The registry lock covers publication,
+// removal, and taking a reference for a sysctl operation.
+static NVRMBacklightHandler *gDiskBacklight;
+static unsigned gDiskPanelCount;
+static int nvrmfbBacklightDiskSysctl SYSCTL_HANDLER_ARGS
+{
+    IORecursiveLock *lock = startLock();
+    if (!lock) return ENOMEM;
+    IORecursiveLockLock(lock);
+    auto *handler = gDiskPanelCount == 1 ? gDiskBacklight : nullptr;
+    if (handler) handler->retain();
+    IORecursiveLockUnlock(lock);
+    if (!handler) return ENODEV;
+    SInt32 level = -1;
+    int result = handler->diskLevel(&level, false);
+    if (!result) result = sysctl_handle_int(oidp, &level, 0, req);
+    if (!result && req->newptr) result = handler->diskLevel(&level, true);
+    handler->release();
+    return result;
+}
+SYSCTL_PROC(_debug, OID_AUTO, nvrmfb_backlight_disk,
+            CTLTYPE_INT | CTLFLAG_RW | CTLFLAG_LOCKED, nullptr, 0,
+            nvrmfbBacklightDiskSysctl, "I", "last applied panel brightness and one-time startup restore");
+
+static void publishDiskBacklight(NVRMBacklightHandler *handler)
+{
+    if (!handler->diskEnabled()) return;
+    IORecursiveLock *lock = startLock();
+    if (!lock) return;
+    IORecursiveLockLock(lock);
+    if (gDiskPanelCount++ == 0) gDiskBacklight = handler;
+    static bool installed;
+    const bool install = !installed;
+    installed = true;
+    IORecursiveLockUnlock(lock);
+    if (install) sysctl_register_oid(&sysctl__debug_nvrmfb_backlight_disk);
+}
+
+static void clearDiskBacklight(NVRMBacklightHandler *handler)
+{
+    if (!handler->diskEnabled()) return;
+    IORecursiveLock *lock = startLock();
+    if (!lock) return;
+    IORecursiveLockLock(lock);
+    if (gDiskBacklight == handler) gDiskBacklight = nullptr;
+    if (gDiskPanelCount) --gDiskPanelCount;
+    IORecursiveLockUnlock(lock);
 }
 
 void NVRMBacklightHandler::persistFire(thread_call_param_t p, thread_call_param_t)
@@ -2973,9 +3084,11 @@ bool NVRMNVDAFramebuffer::start(IOService *provider)
     if (fInternal) publishBacklight();   // before super::start(): IOFramebuffer::open looks for "backlight"
     publishDdcBus();
     if (!super::start(provider)) {
+        if (fBacklight) { fBacklight->detach(this); OSSafeReleaseNULL(fBacklight); }
         NVRMDisplayGate gate; if (gate.valid() && fOwnsHead) { gHeadsTaken &= ~(1u << fHead); fOwnsHead = false; }
         FBLOG("super::start failed after kapiInit succeeded"); return false;
     }
+    if (fBacklight) publishDiskBacklight(fBacklight);
     fSleepTap = addFramebufferNotification(&NVRMNVDAFramebuffer::sleepTap, this, nullptr);
     if (!fSleepTap) FBLOG("sleep/wake notification tap not registered - a wake after dark wakes may leave the accelerator off");
     fVblTimer = nvrmfbCall(vblFire, this);
@@ -3084,7 +3197,11 @@ void NVRMNVDAFramebuffer::stop(IOService *provider)
     if (fHwVblCb && fKms && fDev) {
         fKms->unregisterVblankIntrCallback(fDev, fHead, fHwVblCb); fHwVblCb = nullptr;
     }
-    if (fBacklight) { fBacklight->detach(this); OSSafeReleaseNULL(fBacklight); }
+    if (fBacklight) {
+        clearDiskBacklight(fBacklight);
+        fBacklight->detach(this);
+        OSSafeReleaseNULL(fBacklight);
+    }
     if (fGamma) { IOFree(fGamma, sizeof *fGamma); fGamma = nullptr; fGammaOn = false; }
     if (fWakeGate) { if (IOWorkLoop *wl = getWorkLoop()) wl->removeEventSource(fWakeGate); OSSafeReleaseNULL(fWakeGate); }
     if (fSleepTap) { fSleepTap->remove(); fSleepTap = nullptr; }
@@ -3103,7 +3220,7 @@ void NVRMNVDAFramebuffer::publishBacklight()
     NVRMEdpBacklightRequest aux = {};
     UInt32 enabled = 0;
     if (r != kIOReturnSuccess && rm && fDisplay &&
-        PE_parse_boot_argn("nvfbedpbl", &enabled, sizeof enabled) && enabled == 1) {
+        PE_parse_boot_argn("nvfbedpbl", &enabled, sizeof enabled) && (enabled == 1 || enabled == 2)) {
         const OSSymbol *auxFn = OSSymbol::withCStringNoCopy(NVRM_EDP_BACKLIGHT_FN);
         if (auxFn) {
             aux.gpuId = fGpuId;

@@ -32,7 +32,10 @@ Legacy macOS and software Metal WSI are excluded at the user's request.
 - `nvfbedpbl=1` allows DPCD brightness on an internal panel where NVKMS has
   no backlight control and the firmware already uses AUX. The driver verifies
   exact transfer lengths and attempts to restore the prior level after a
-  partial write.
+  partial write. The optional `nvfbedpbl=2` mode switches a capable PWM
+  panel to AUX after setting a brightness floor. The
+  [brightness helper](NVRMFB-BACKLIGHT-POWER.md) saves applied levels on disk
+  when firmware drops the NVRAM setting.
 - Large IOSurface readbacks can use 4 MiB contiguous staging chunks. A failed
   later copy waits for earlier DMA before releasing staging. A timeout
   quarantines the request's destinations and disables subsequent chunk
@@ -55,8 +58,7 @@ The large-readback path adapts
 Runtime D3cold needs serialized consumer admission, successful standby and
 a tested recovery path before evaluating the ACPI power resource. Surround
 needs atomic ownership and completion across all participating heads.
-Disk-backed brightness recovery needs serialization with active panel
-brightness changes. The existing optional Intel panel remains the supported
+The existing optional Intel panel remains the supported
 hybrid display path. The [experimental AMD panel option](AMD-PANEL.md)
 bundles the firmware framebuffer. Broader muxless support and firmware-to-AUX
 takeover need affected hardware for validation.
