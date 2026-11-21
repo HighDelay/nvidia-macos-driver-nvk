@@ -68,10 +68,11 @@ class PackageZinkTests(unittest.TestCase):
         pkg.base_tools.write_manifest(self.base)
         self.webkit = self.root/'webkit-build'
         self.bundle(self.webkit/'NVWebKitFixup.kext', 'NVWebKitFixup')
-        (self.webkit/'NVWebKitFixup.kext/Contents/Info.plist').write_bytes((ROOT/'kexts/NVWebKitFixup/Info.plist').read_bytes())
+        webkit_plist = (ROOT/'kexts/NVWebKitFixup/Info.plist').read_bytes()
+        (self.webkit/'NVWebKitFixup.kext/Contents/Info.plist').write_bytes(webkit_plist)
         from package_webkit import SOURCES, files
         self.put(self.webkit/'BUILD.json', json.dumps({
-            'version':'0.2.0', 'files':files(self.webkit/'NVWebKitFixup.kext'),
+            'version':plistlib.loads(webkit_plist)['CFBundleVersion'], 'files':files(self.webkit/'NVWebKitFixup.kext'),
             'source_sha256':{name:pkg.base_tools.digest(ROOT/name) for name in SOURCES}}).encode())
         self.original = self.snapshot(self.base)
         self.zink_original = self.snapshot(self.zink)
@@ -242,6 +243,10 @@ class PackageZinkTests(unittest.TestCase):
         record = json.loads(detail.read_text())['optional_amd_panel']
         self.assertEqual(record['files']['Contents/MacOS/NMGopFB'],
                          pkg.base_tools.digest(panel/'Contents/MacOS/NMGopFB'))
+        for name in ('NVRM', 'NVRMFB', 'NVRMAGDC'):
+            self.assertEqual(record['matched_kexts_sha256'][name],
+                             pkg.base_tools.digest(self.out/'Library/Extensions'/f'{name}.kext'/'Contents/MacOS'/name))
+        self.assertEqual(set(record['matched_kexts_sha256']['NVAccel']), {'15', '26'})
         self.assertIn('](Optional/AMD-Panel.md)', (self.out/'READ-ME.md').read_text())
         pkg.base_tools.verify_manifest(self.out)
 

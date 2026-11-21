@@ -109,8 +109,8 @@ def stage_amd_panel(payload, build_dir):
     inputs = [
         *sorted(source.iterdir()),
         ROOT/'build/warn_ceiling.sh', ROOT/'build/warnings.txt',
-        ROOT/'kexts/NMIntelFB/display_ids.inc', ROOT/'kexts/NMIntelFB/nvrm_vram_abi.h',
-        ROOT/'kexts/NVRM/accel/nm_hybrid.h', ROOT/'kexts/NVRM/accel/nm_hybrid_abi.h',
+        ROOT/'kexts/NVRM/nvrm_gopfb.h', ROOT/'kexts/NVRM/nvrm_display_identity.h',
+        ROOT/'kexts/NVRM/nvrm_vram_abi.h', ROOT/'kexts/NVRM/nvrm_gpuva_abi.h',
         ROOT/'kexts/NVRM/accel/nv_iop_pixel.h', ROOT/'kexts/NVRMFB/nvrm_off.h',
     ]
     return {
@@ -270,6 +270,11 @@ def stage(base, zink, output, components=None, native_gld=False, records=None, w
             for major in ('15','26')}
         panel_identity['selected_accelerator_sha256'] = base_tools.digest(
             payload/'Library/Extensions/NVAccel.kext/Contents/MacOS/NVAccel')
+        amd_panel_identity['matched_kexts_sha256'] = {
+            **{name: base_tools.digest(payload/'Library/Extensions'/f'{name}.kext'/'Contents/MacOS'/name)
+               for name in ('NVRM', 'NVRMFB', 'NVRMAGDC')},
+            'NVAccel': panel_identity['matched_accelerators_sha256'],
+        }
         (payload/'Optional/INTEL-PANEL-BUILD.json').write_text(json.dumps(panel_identity, indent=2)+'\n')
         # Only the test utility consumes this ICD path. Production Zink opens
         # the private frontend directly, with no process-global loader override.

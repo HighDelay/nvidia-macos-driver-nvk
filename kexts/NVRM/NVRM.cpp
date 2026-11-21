@@ -17,6 +17,8 @@ extern "C" int nvrm_ddc_transfer(struct NVRMDdcRequest *);
 extern "C" int nvrm_edp_backlight(struct NVRMEdpBacklightRequest *);
 extern "C" void nv_xnu_power_refresh(void);   // nv_xnu_power.cpp
 #include <IOKit/IOService.h>
+#include "nvrm_display_identity.h"
+#include "nvrm_gopfb.h"
 #include <IOKit/IOUserClient.h>
 #include <IOKit/IOSubMemoryDescriptor.h>
 #include <IOKit/IOWorkLoop.h>
@@ -763,6 +765,48 @@ static int nvrmSysW(const char *n, int v) { return sysctlbyname(n, NULL, NULL, &
 static int nvrmSysR(const char *n, int *v) { size_t l = sizeof *v; *v = -99; return sysctlbyname(n, v, &l, NULL, 0); }
 static unsigned nvrmPop(unsigned m) { unsigned c = 0; for (; m; m &= m - 1) c++; return c; }
 
+static IOService *copyGopService(const char *name, IOService *pci = nullptr)
+{
+    OSDictionary *matching = IOService::serviceMatching(name);
+    if (!matching) return nullptr;
+    OSIterator *iter = IOService::getMatchingServices(matching);
+    matching->release();
+    if (!iter) return nullptr;
+    IOService *found = nullptr;
+    while (OSObject *object = iter->getNextObject()) {
+        IOService *service = OSDynamicCast(IOService, object);
+        if (!service || service->isInactive()) continue;
+        if (pci && nvrmFramebufferPCIOwner(service) != pci) continue;
+        if (pci && service->metaCast("NVRMNVDAFramebuffer")) {
+            unsigned long long slot;
+            if (!nvrmFramebufferIndex(service, &slot) || slot != 0) continue;
+        }
+        service->retain();
+        found = service;
+        break;
+    }
+    iter->release();
+    return found;
+}
+
+static IOReturn gopCall(IOService *claim, const char *name, void *p1 = nullptr, void *p2 = nullptr)
+{
+    const OSSymbol *fn = OSSymbol::withCStringNoCopy(name);
+    if (!fn) return kIOReturnNoMemory;
+    const IOReturn status = claim->callPlatformFunction(fn, false, p1, p2, nullptr, nullptr);
+    fn->release();
+    return status;
+}
+
+static void declineGopPanel()
+{
+    if (!nvrm_gopfb_enabled()) return;
+    if (IOService *claim = copyGopService(NVRM_GOP_CLAIM)) {
+        gopCall(claim, NVRM_GOP_FINISH);
+        claim->release();
+    }
+}
+
 // The name of another display-class PCI device whose memory windows hold [phys, phys + size), or NULL. The name points
 // into a static buffer, so the caller logs it before calling again.
 static const char *otherDisplayHolding(IOPCIDevice *self, uint64_t phys, uint64_t size)
@@ -954,6 +998,7 @@ void NVRM::bootHoldCap(thread_call_param_t p0, thread_call_param_t)
         return;
     }
     if (OSCompareAndSwap(1, 0, &s->fBootHold)) {
+        declineGopPanel();
         s->adjustBusy(-1); s->setProperty("nvrm-boot-hold", "CAP: bring-up not finished in time, NOT arming");
         LOG("boot hold RELEASED by the settle + %u s cap — the bring-up will not arm with WindowServer up", 40 + s->fHoldWaitedMs / 1000);   // the cap is no longer fixed at 40 s
     }
@@ -1007,14 +1052,22 @@ void NVRM::autoGo(void *p0, wait_result_t)
     kprintf("NVRM-xnu: auto-go: go(2) -> 0x%x (fPassDone %u)\n", r, s->fPassDone);
     if (r != kIOReturnSuccess) {
         s->fBringUp = 0;
+        declineGopPanel();
         s->setProperty("nvrm-autogo", r == kIOReturnBusy ? "busy (a hand-run go is running)" : "go(2) failed");
         s->releaseBootHold("go(2) failed");
     } else {
         s->setProperty("nvrm-autogo", "up");
         int want = 1; if (!PE_parse_boot_argn("nvfbheads", &want, sizeof(want)) || want < 1) want = 1;
+        const bool gopEnabled = nvrm_gopfb_enabled();
+        IOService *gopClaim = nullptr, *gopResources = nullptr;
         int mask = 0, last = -1, still = 0, i;
         for (i = 0; i < 20; i++) {
             if (nvrmSysR("debug.nvaccel_heads_published", &mask) != 0) mask = 0;
+            if (gopEnabled && !gopClaim) gopClaim = copyGopService(NVRM_GOP_CLAIM);
+            if (gopClaim && !mask) {
+                gopResources = copyGopService(NVRM_HEADLESS_RESOURCES, s->fPCI);
+                if (gopResources) break;
+            }
             if ((int)nvrmPop((unsigned)mask) >= want) break;
             still = (mask && mask == last) ? still + 1 : 0; last = mask;
             if (still >= 3) break;
@@ -1024,9 +1077,16 @@ void NVRM::autoGo(void *p0, wait_result_t)
             }
             IOSleep(1000);
         }
+        if (gopClaim && !gopResources && (mask & 1))
+            gopResources = copyGopService("NVRMNVDAFramebuffer", s->fPCI);
+        const bool gopAttached = gopResources && s->fBootHold == 1 &&
+                                 gopCall(gopClaim, NVRM_GOP_ATTACH, s, gopResources) == kIOReturnSuccess;
+        OSSafeReleaseNULL(gopResources);
         LOG("auto-go: heads published mask 0x%x (%u of nvfbheads %d) after %d s", mask, nvrmPop((unsigned)mask), want, i);
         s->fBringUp = 0;   // the cap may fire from here on; the next line decides whether it got there first
         if (!OSCompareAndSwap(1, 2, &s->fBootHold)) {
+            if (gopClaim) gopCall(gopClaim, NVRM_GOP_FINISH);
+            OSSafeReleaseNULL(gopClaim);
             LOG("auto-go: the hold was already released (cap) — NOT arming with WindowServer up; heads 0x%x", mask);
             s->setProperty("nvrm-display", "not armed: hold released by the cap first");
             s->release(); thread_terminate(current_thread()); return;
@@ -1036,20 +1096,52 @@ void NVRM::autoGo(void *p0, wait_result_t)
         if (armed == 1) nvrmSysW("debug.nvaccelfb", 4);
         LOG("auto-go: accelerator level 1 %s after %d tr%s%s", armed == 1 ? "took" : "NEVER took", i + 1, i ? "ies" : "y",
             armed == 1 ? ", level 4 written" : " — not arming further");
+        const auto setAgdc = [](bool enable) {
+            nvrmSysW("debug.nvrmfb_agdc", enable ? 1 : 0);
+            int state = -99;
+            for (unsigned attempt = 0; attempt < 25; ++attempt) {
+                nvrmSysR("debug.nvrmfb_agdc", &state);
+                if (enable ? state == 1 || state < 0 : state == 2) break;
+                IOSleep(200);
+            }
+            return state;
+        };
         int k5 = -99, ag = -99, iop = -99;
         if (armed == 1) {
             nvrmSysW("debug.nvrmfb_agdc_k5", 1);
-            nvrmSysW("debug.nvrmfb_agdc", 1);
-            for (i = 0; i < 25; i++) { nvrmSysR("debug.nvrmfb_agdc", &ag); if (ag == 1 || ag < 0) break; IOSleep(200); }
-            nvrmSysW("debug.nvaccel_iop", 1);
+            ag = setAgdc(true);
+            if (!gopAttached || (mask & 1) || ag == 1) nvrmSysW("debug.nvaccel_iop", 1);
             nvrmSysR("debug.nvrmfb_agdc_k5", &k5); nvrmSysR("debug.nvaccel_iop", &iop);
+        }
+        if (gopClaim) {
+            int piped = 0;
+            const bool ready = gopAttached && ag == 1 && iop == 1 &&
+                               !nvrmSysR("debug.nvaccel_heads_piped", &piped) && (piped & kNvrmGopMask);
+            const bool active = gopCall(gopClaim, NVRM_GOP_FINISH, ready ? s : nullptr) == kIOReturnSuccess && ready;
+            if (active) {
+                mask |= kNvrmGopMask;
+                nvrm_guard_display_up("AMD panel display pipe and AGDC are ready");
+            } else if (gopAttached && armed == 1) {
+                // Drop the failed panel from AGDC before releasing the boot
+                // hold. If native heads are up, rebuild their ordinary table.
+                if (!(mask & 1)) {
+                    nvrmSysW("debug.nvaccel_iop", 0);
+                    ag = setAgdc(false);
+                    iop = 0;
+                } else {
+                    if (ag == 1) ag = setAgdc(false);
+                    if (ag != 1) ag = setAgdc(true);
+                }
+            }
+            s->setProperty("nvrm-amd-panel", active ? "active" : "firmware fallback");
+            OSSafeReleaseNULL(gopClaim);
         }
         char sum[160];
         snprintf(sum, sizeof sum, "heads 0x%x accel %d agdc %d k5 %d iop %d", mask, armed == 1 ? 4 : 0, ag, k5, iop);
         s->setProperty("nvrm-display", sum);
         LOG("auto-go: display stack: %s", sum);
         s->releaseBootHold(armed == 1 && ag == 1 && iop == 1 ? "display armed" : "display PARTIAL");
-        if (armed == 1 && iop == 1 && !PE_parse_boot_argn("-nvrmnoflip", nb, sizeof(nb))) {
+        if (armed == 1 && iop == 1 && (!gopAttached || (mask & 1)) && !PE_parse_boot_argn("-nvrmnoflip", nb, sizeof(nb))) {
             // Zero-copy scan-out shows only what sits in this GPU's VRAM. One setup blacks the screen (cursor only) the
             // moment it starts, and every report was fixed by -nvrmnoflip: a second accelerated GPU (Intel/AMD iGPU;
             // WindowServer composites there, issues #16 #26). The black screens reported for unplaced windows (#54, #82)

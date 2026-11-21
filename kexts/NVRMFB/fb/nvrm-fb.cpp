@@ -47,6 +47,7 @@ static inline thread_call_t nvrmfbCall(thread_call_func_t fn, thread_call_param_
 #include "nvrmfb_scanout_reserve.h"
 #include "nvrm-rotation.h"
 #include "../../NVRM/nvrm_display_identity.h"
+#include "../../NVRM/nvrm_gopfb.h"
 #include "nvrm-allocation-table.h"
 #include "nvrm-head-gate.h"
 static IORecursiveLock *startLock();
@@ -631,6 +632,7 @@ class NVRMNVDAFramebuffer : public IOFramebuffer {
     volatile uint64_t fHwVblLast = 0;
     volatile unsigned long long fHwVblCalls = 0;
     unsigned fModeSetTicks = 0;
+    bool fGopResources = false;
     bool fHwVblWanted = false;
     unsigned fHwVblTries = 0, fHwVblTickAtTry = 0, fVblTicks = 0;
     static void hwVblIntr(NvU64 param, NvU64 timestamp);
@@ -872,6 +874,44 @@ public:
 };
 OSDefineMetaClassAndStructors(NVRMFBClaim, IOService)
 
+// When the NVIDIA card has no connector in use, the AMD panel still needs
+// the NVIDIA allocator and its KAPI device. Keep the probed head as a backend
+// without publishing an IOFramebuffer for a display that does not exist.
+class NVRMHeadlessResources : public IOService {
+    OSDeclareDefaultStructors(NVRMHeadlessResources)
+    IOService *fBackend = nullptr;
+public:
+    bool publish(IOService *nub, IOService *backend) {
+        if (!init() || !attach(nub)) return false;
+        backend->retain();
+        fBackend = backend;
+        registerService();
+        return true;
+    }
+    void free() override {
+        OSSafeReleaseNULL(fBackend);
+        IOService::free();
+    }
+    IOReturn callPlatformFunction(const OSSymbol *fn, bool wait, void *p1, void *p2, void *p3, void *p4) override {
+        if (fn && (fn->isEqualTo(NVRM_VRAM_FN_ALLOC) || fn->isEqualTo(NVRM_VRAM_FN_FREE) ||
+                   fn->isEqualTo(NVRM_GPUVA_FN_HANDLES)))
+            return fBackend->callPlatformFunction(fn, wait, p1, p2, p3, p4);
+        return IOService::callPlatformFunction(fn, wait, p1, p2, p3, p4);
+    }
+};
+OSDefineMetaClassAndStructors(NVRMHeadlessResources, IOService)
+
+static bool waitingForGopPanel()
+{
+    if (!nvrm_gopfb_enabled()) return false;
+    OSDictionary *matching = IOService::serviceMatching(NVRM_GOP_CLAIM);
+    IOService *claim = matching ? IOService::copyMatchingService(matching) : nullptr;
+    const bool ready = claim && !claim->isInactive();
+    OSSafeReleaseNULL(claim);
+    OSSafeReleaseNULL(matching);
+    return ready;
+}
+
 // With the driver off ("Start once without NVIDIA driver", "Remove NVIDIA driver") the claim above steps aside, but the
 // install excludes IONDRVSupport in OpenCore so Apple's firmware framebuffer never takes this display: nothing lit the
 // screen and both driver-off starts came up black (1.14.0/1.14.1 reports). This is what IONDRVFramebuffer does for a card
@@ -1105,7 +1145,12 @@ bool NVRMNVDAFramebuffer::kapiInit()
         FBLOG("declareEventInterest ok (dpy-changed | dynamic-dpy-connected | flip-occurred)");
     if (gNDpy < 0) {
         NvU32 n = 0; NvKmsKapiDisplay handles[NVKMS_KAPI_MAX_CONNECTORS * 2];
-        if (!fKms->getDisplays(fDev, &n, NULL) || n == 0) { FBLOG("getDisplays: none"); return false; }
+        if (!fKms->getDisplays(fDev, &n, NULL)) { FBLOG("getDisplays: query failed"); return false; }
+        if (n == 0) {
+            fGopResources = fIndex == 0 && nvrm_gopfb_enabled();
+            FBLOG("getDisplays: none");
+            return false;
+        }
         if (n > sizeof handles / sizeof handles[0]) n = sizeof handles / sizeof handles[0];
         if (!fKms->getDisplays(fDev, &n, handles)) return false;
         FBLOG("getDisplays: %u handle(s); this GPU has %u heads and %u connectors",
@@ -1140,7 +1185,10 @@ bool NVRMNVDAFramebuffer::kapiInit()
               gNDpy, n, fNumHeads);
         // NVKMS answered and nothing is plugged into this card (its displays are on another GPU): the driver is up as
         // far as it will go, so this start counts as good for the boot guard (nvrm_off.h)
-        if (n > 0 && gNDpy == 0) fbGuardCleared("NVKMS lists this card's connectors and none has a display");
+        if (gNDpy == 0) {
+            fGopResources = fIndex == 0 && nvrm_gopfb_enabled();
+            if (!waitingForGopPanel()) fbGuardCleared("NVKMS lists this card's connectors and none has a display");
+        }
     }
 
     if (gBootHead == -2) {
@@ -3071,6 +3119,12 @@ bool NVRMNVDAFramebuffer::start(IOService *provider)
     if (!kapiOk && fOwnsHead) { gHeadsTaken &= ~(1u << fHead); fOwnsHead = false; }
     IORecursiveLockUnlock(sl);
     if (!kapiOk) {
+        if (fGopResources) {
+            if (NVRMHeadlessResources *resources = OSTypeAlloc(NVRMHeadlessResources)) {
+                if (resources->publish(provider, this)) FBLOG("NVIDIA resources available for the AMD panel");
+                resources->release();
+            }
+        }
         // nvfbheads=4 starts four framebuffer instances; the ones past the connected displays have nothing to drive and
         // stop here on every healthy boot. Say so, so a log with one lit head is not read as a refused framebuffer.
         if (fSpareIndex)

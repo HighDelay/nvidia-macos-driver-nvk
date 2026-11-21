@@ -5,6 +5,7 @@
 #include <stdio.h>
 #include <stdint.h>
 #include "nm_gopfb.h"
+#include "../kexts/NVRMAGDC/nvrm-agdc-k5.h"
 
 static int fails;
 #define ARM(name, cond) do { if (cond) printf("ok   %s\n", name); else { printf("FAIL %s\n", name); fails++; } } while (0)
@@ -63,9 +64,31 @@ int main(void)
     ARM("with no BAR at all it is refused", nmgop_geometry(0x490000000ull, 1920, 1080, 7680, 32, BARS, 0, &g) == NMGOP_E_OUTSIDE);
     ARM("a BAR whose end would wrap past 2^64 does not accept an address beyond it",
         ({ struct nmgop_bar w = { 0xFFFFFFFFFFFFF000ull, 0x1000ull }; nmgop_geometry(0xFFFFFFFFFFFFF000ull, 64, 64, 256, 32, &w, 1, &g) == NMGOP_E_OUTSIDE; }));
+    const struct nmgop_bar wrap = { UINT64_MAX - 4095, 16384 };
+    ARM("a wrapping physical framebuffer is refused even if it fits within the reported BAR length",
+        nmgop_geometry(wrap.phys, 64, 64, 256, 32, &wrap, 1, &g) == NMGOP_E_OUTSIDE);
     ARM("a row pitch large enough to wrap the byte count is refused as a size, not accepted",
         nmgop_geometry(0x490000000ull, 1920, 1080, 0x100000000ull, 32, BARS, 3, &g) == NMGOP_E_SIZE &&
         nmgop_geometry(0x490000000ull, 20000, 1080, 80000, 32, BARS, 3, &g) == NMGOP_E_SIZE);
+
+    /* A GOP-only boot uses stable display slot 4 but AGDC pipe index 0. */
+    uint32_t timing[NVK5_TIMING_WORDS];
+    ARM("the GOP mode gives AGDC consistent 4K software timing at 60 Hz",
+        nmgop_logical_timing(3840, 2160, timing) && !nvk5_timing_bad(timing, sizeof timing) &&
+        timing[NVK5_T_PCLK] == 60ull * timing[NVK5_T_HTOT] * timing[NVK5_T_VTOT]);
+    struct NVAGDCLinkConfig link = { 0 };
+    struct NVAGDCFBExtCap caps = { .type = NVK5_CAP_PLANESCALER };
+    int why = 0;
+    ARM("the first AGDC pipe answers link configuration and fixed-size plane capabilities",
+        nvk5_answer(NVK5_CMD_LINKCONFIG, &link, sizeof link, &link, sizeof link, timing, sizeof timing, &why) == NVK5_R_LINK &&
+        link.port == 1 && link.timing.hActive == 3840 && link.timing.vActive == 2160 &&
+        nvk5_answer(NVK5_CMD_FBCAPEX, &caps, sizeof caps, &caps, sizeof caps, timing, sizeof timing, &why) == NVK5_R_CAPS &&
+        caps.count == 1);
+    link.id = 4;
+    ARM("the stable slot is refused as an AGDC query index when the panel is alone",
+        nvk5_answer(NVK5_CMD_LINKCONFIG, &link, sizeof link, &link, sizeof link, timing, sizeof timing, &why) == NVK5_R_BADARG);
+    ARM("logical modes with no raster or an overflowing clock are refused",
+        !nmgop_logical_timing(0, 2160, timing) && !nmgop_logical_timing(16384, 16384, timing));
     printf("%d failed\n", fails);
     return fails ? 1 : 0;
 }

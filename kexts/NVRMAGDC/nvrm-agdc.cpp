@@ -7,6 +7,7 @@
 #include "nvrm_off.h"
 #include <IOKit/IOService.h>
 #include "../NVRM/nvrm_display_identity.h"
+#include "../NVRM/nvrm_gopfb.h"
 #include <IOKit/IOLib.h>
 #include <sys/sysctl.h>
 #include <kern/thread_call.h>
@@ -50,7 +51,7 @@ static int    gAgdcLogged = 0;
 // Slot-table rescans done while answering 0x980 (see nvdaAgdcRescanForReply).
 static SInt64 gAgdcRescans = 0;
 
-enum { kAgdcMaxFB = 4 };
+enum { kAgdcNativeFB = kNvrmGopSlot, kAgdcMaxFB = kAgdcNativeFB + 1 };
 static IOService *gAgdcFB[kAgdcMaxFB];
 static unsigned  gAgdcNFB = 0;
 enum { kAgdcFBMapBytes = 3 + kAgdcMaxFB * 25 + 52 + 1 };
@@ -64,6 +65,7 @@ class NVDADeviceControl : public AppleGraphicsDeviceControl {
     OSDeclareDefaultStructors(NVDADeviceControl)
 public:
     IOService *fPci; IOService *fFB;
+    bool fGop;
     using AppleGraphicsDeviceControl::vendor_doDeviceAttribute;
     virtual IOReturn vendor_doDeviceAttribute(unsigned int cmd, unsigned long *in, unsigned long inSize,
                                               unsigned long *out, unsigned long *outSize, IOExternalMethodArguments *args) APPLE_KEXT_OVERRIDE;
@@ -95,7 +97,7 @@ static IOReturn nvdaK5Answer(IOService *fb, unsigned int cmd, unsigned long *in,
     return r == NVK5_R_BADARG ? kIOReturnBadArgument : kIOReturnNotFound;
 }
 
-static void nvdaAgdcScan(IOService *pci);
+static bool nvdaAgdcScan(IOService *pci, IOService *gop = nullptr);
 // WindowServer reads AGDC command 0x980 when it (re)starts and builds one display pipe per entry in the reply. The
 // slot table used to be scanned only once, when AGDC came up, so a framebuffer that started later -- a monitor
 // plugged in after boot -- was never in the answer: WindowServer then built a single display pipe, the second
@@ -130,7 +132,8 @@ IOReturn NVDADeviceControl::vendor_doDeviceAttribute(unsigned int cmd, unsigned 
     }
     if (cmd == 0x980) {
         if (!out || !outSize || *outSize != sizeof(NVAGDCGPUCapability)) return kIOReturnBadArgument;
-        nvdaAgdcRescanForReply(fPci);   // a framebuffer that started after boot has to be in this reply
+        // The AMD panel uses its actual pipe index, which is assigned at boot.
+        if (!fGop) nvdaAgdcRescanForReply(fPci);
         NVAGDCGPUCapability *c = (NVAGDCGPUCapability *)out; bzero(c, sizeof *c);
         unsigned n = gAgdcNFB;
         if (n == 0 || n > kAgdcMaxFB) {
@@ -164,28 +167,45 @@ static void nvdaAgdcDropTable(void)
     if (n) snprintf(gAgdcFBMap, sizeof gAgdcFBMap, "released (the last table had %u slot(s))", n);
 }
 static void nvdaAgdcDropFB(void) { if (gAgdcFBRef) { gAgdcFBRef->release(); gAgdcFBRef = nullptr; } nvdaAgdcDropTable(); }
+static IOService *nvdaAgdcGopTarget()
+{
+    if (!nvrm_gopfb_enabled()) return nullptr;
+    OSDictionary *matching = IOService::serviceMatching(NVRM_GOP_PANEL);
+    IOService *panel = matching ? IOService::copyMatchingService(matching) : nullptr;
+    OSSafeReleaseNULL(matching);
+    unsigned long long slot = 0;
+    IOService *nub = panel ? panel->getProvider() : nullptr;
+    IOService *rm = nub ? nub->getProvider() : nullptr;
+    if (!panel || panel->isInactive() || !rm || !rm->metaCast("NVRM") ||
+        !nvrmFramebufferIndex(panel, &slot) || slot != kNvrmGopSlot || !panel->getProperty(NVRM_GOP_PIPE)) {
+        OSSafeReleaseNULL(panel);
+    }
+    return panel;
+}
+
 static void nvdaAgdcTargets(IOService **pci, IOService **fb)
 {
     *pci = nullptr; *fb = nullptr;
-    OSDictionary *m = IOService::serviceMatching("NVRMNVDAFramebuffer"); if (!m) return;
-    IOService *f = IOService::copyMatchingService(m); m->release(); if (!f) return;
-    IOService *p = f->getProvider(); int hops = 0;
-    while (p && !p->metaCast("IOPCIDevice") && hops++ < 8) p = p->getProvider();
-    if (!p || !p->metaCast("IOPCIDevice")) { f->release(); return; }
+    IOService *f = nvdaAgdcGopTarget();
+    if (!f) {
+        OSDictionary *m = IOService::serviceMatching("NVRMNVDAFramebuffer"); if (!m) return;
+        f = IOService::copyMatchingService(m); m->release(); if (!f) return;
+    }
+    IOService *p = nvrmFramebufferPCIOwner(f);
+    if (!p) { f->release(); return; }
     gAgdcFBRef = f; *fb = f; *pci = p;
 }
 
 static int gAgdcScanLogged = 0;
 #define SCANLOG(fmt, ...) do { if (gAgdcScanLogged < 8) { gAgdcScanLogged++; FBLOG("AGDC scan: " fmt " [%d/8]", ##__VA_ARGS__, gAgdcScanLogged); } } while (0)
-static void nvdaAgdcScan(IOService *pci)
+static bool nvdaAgdcScan(IOService *pci, IOService *gop)
 {
     nvdaAgdcDropTable(); gAgdcScanLogged = 0;
     IOService *tab[kAgdcMaxFB] = {}; unsigned seen = 0, noidx = 0, range = 0, dup = 0, other = 0, hole = 0;
     OSDictionary *m = IOService::serviceMatching("NVRMNVDAFramebuffer");
     OSIterator *it = m ? IOService::getMatchingServices(m) : nullptr; OSSafeReleaseNULL(m);
-    if (!it) { snprintf(gAgdcFBMap, sizeof gAgdcFBMap, "n=0 (no iterator: the earlier one-head reply)"); FBLOG("AGDC: slot table %s", gAgdcFBMap); return; }
     OSObject *o;
-    while (seen < 16 && (o = it->getNextObject())) {
+    while (it && seen < 16 && (o = it->getNextObject())) {
         seen++;
         IOService *f = OSDynamicCast(IOService, o); if (!f) continue;
         unsigned long long rid = f->getRegistryEntryID();
@@ -193,15 +213,32 @@ static void nvdaAgdcScan(IOService *pci)
         if (p != pci) { other++; SCANLOG("framebuffer id %#llx is under another PCI device: not ours to report", rid); continue; }
         unsigned long long ix = 0;
         if (!nvrmFramebufferIndex(f, &ix)) { noidx++; SCANLOG("framebuffer id %#llx has no valid display slot: left out", rid); continue; }
-        if (ix >= kAgdcMaxFB) { range++; SCANLOG("framebuffer id %#llx display slot %llu >= %d: left out", rid, ix, (int)kAgdcMaxFB); continue; }
+        if (ix >= kAgdcNativeFB) { range++; SCANLOG("framebuffer id %#llx display slot %llu >= %d: left out", rid, ix, (int)kAgdcNativeFB); continue; }
         if (tab[ix]) { dup++; SCANLOG("display slot %llu claimed twice: id %#llx kept, id %#llx left out", ix, (unsigned long long)tab[ix]->getRegistryEntryID(), rid); continue; }
         f->retain(); tab[ix] = f;
     }
-    it->release();
-    unsigned n = 0; while (n < kAgdcMaxFB && tab[n]) n++;
-    for (unsigned i = n; i < kAgdcMaxFB; i++) if (tab[i]) {
+    OSSafeReleaseNULL(it);
+    unsigned n = 0; while (n < kAgdcNativeFB && tab[n]) n++;
+    for (unsigned i = n; i < kAgdcNativeFB; i++) if (tab[i]) {
         hole++; SCANLOG("slot %u (id %#llx) sits beyond a hole at slot %u: left out", i, (unsigned long long)tab[i]->getRegistryEntryID(), n);
         tab[i]->release(); tab[i] = nullptr;
+    }
+    if (gop) {
+        OSObject *value = gop->copyProperty(NVRM_GOP_PIPE);
+        OSNumber *pipe = OSDynamicCast(OSNumber, value);
+        const unsigned long long index = pipe ? pipe->unsigned64BitValue() : kAgdcMaxFB;
+        const bool matches = index <= n && nvrmFramebufferPCIOwner(gop) == pci && !gop->isInactive();
+        OSSafeReleaseNULL(value);
+        if (!matches) {
+            for (unsigned i = 0; i < n; ++i) tab[i]->release();
+            FBLOG("AGDC: AMD panel pipe disagrees with the native slot table");
+            return false;
+        }
+        // A framebuffer can publish after NVAccel admits the panel. The
+        // table must keep the pipe order established for this boot.
+        while (n > index) tab[--n]->release();
+        gop->retain();
+        tab[n++] = gop;
     }
     for (unsigned i = 0; i < n; i++) gAgdcFB[i] = tab[i];
     gAgdcNFB = n;
@@ -211,6 +248,7 @@ static void nvdaAgdcScan(IOService *pci)
     if (w > 0 && (unsigned)w < sizeof gAgdcFBMap && (noidx | range | dup | other | hole))
         snprintf(gAgdcFBMap + w, sizeof gAgdcFBMap - (size_t)w, " (left out: noidx %u range %u dup %u gpu %u hole %u)", noidx, range, dup, other, hole);
     FBLOG("AGDC: slot table %s (%u framebuffer node(s) seen)", gAgdcFBMap, seen);
+    return true;
 }
 
 static SInt32 gAgdcBusy = 0;
@@ -224,17 +262,20 @@ static void nvdaAgdcWorkBody(void)
     if (gAgdcWant == 1 && !gAgdc) {
         IOService *pci = nullptr, *fb = nullptr; nvdaAgdcTargets(&pci, &fb);
         if (!pci || !fb) { gAgdcState = -1; FBLOG("AGDC: no PCI device or no framebuffer yet (pci %p fb %p)", pci, fb); return; }
-        nvdaAgdcScan(pci);
+        const bool gop = fb->metaCast(NVRM_GOP_PANEL) != nullptr;
+        if (!nvdaAgdcScan(pci, gop ? fb : nullptr)) { gAgdcState = -6; nvdaAgdcDropFB(); return; }
         NVDADeviceControl *d = OSTypeAlloc(NVDADeviceControl);
         if (!d) { gAgdcState = -2; FBLOG("AGDC: alloc failed"); nvdaAgdcDropFB(); return; }
         if (!d->init(nullptr)) { gAgdcState = -3; FBLOG("AGDC: init failed"); d->release(); nvdaAgdcDropFB(); return; }
-        d->fPci = pci; d->fFB = fb;
+        d->fPci = pci; d->fFB = fb; d->fGop = gop;
         if (!d->attach(pci)) { gAgdcState = -4; FBLOG("AGDC: attach(%s) failed", pci->getName()); d->release(); nvdaAgdcDropFB(); return; }
         if (!d->start(pci)) { gAgdcState = -5; FBLOG("AGDC: AppleGraphicsDeviceControl::start failed (vendor calls so far %lld)", gAgdcCmds); d->detach(pci); d->release(); nvdaAgdcDropFB(); return; }
+        if (gop) fb->setProperty(NVRM_GOP_AGDC, kOSBooleanTrue);
         gAgdc = d; gAgdcState = 1;
         FBLOG("AGDC: UP on %s — %u framebuffer slot(s), maxFramebuffers %d; vendor calls %lld, refused %lld (last %#x)", pci->getName(), gAgdcNFB, gAgdcMaxFBOut, gAgdcCmds, gAgdcUnsupported, gAgdcLastRefused);
     } else if (gAgdcWant == 0 && gAgdc) {
         NVDADeviceControl *d = gAgdc; gAgdc = nullptr;
+        if (d->fGop) d->fFB->removeProperty(NVRM_GOP_AGDC);
         bool ok = d->terminate(kIOServiceRequired | kIOServiceSynchronous); d->release(); nvdaAgdcDropFB(); gAgdcState = 2;
         FBLOG("AGDC: terminate -> %d (a reboot is the certain way back; this is the polite one)", ok);
     }

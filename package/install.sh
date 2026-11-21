@@ -364,7 +364,7 @@ fi
 if [ "$AMD_PANEL_CHOICE" = ask ] && [ "$INTEL_PANEL" = 0 ] && [ -d "$HERE/Optional/NMGopFB.kext" ]; then
   printf '\n%s\n' '----------------------------------------------------------------------'
   echo "Optional AMD laptop panel support (experimental)"
-  echo "Use for a firmware framebuffer on a screen wired to an AMD GPU unsupported by macOS."
+  echo "Use NVIDIA rendering on a laptop screen wired to an unsupported AMD GPU with an active firmware framebuffer."
   echo "See Optional/AMD-Panel.md for activation and recovery."
   if [ -t 0 ]; then
     printf 'Install NMGopFB for this laptop panel? [y/N] '

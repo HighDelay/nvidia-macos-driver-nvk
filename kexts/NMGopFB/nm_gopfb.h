@@ -110,6 +110,7 @@ static inline int nmgop_geometry(uint64_t base_raw, uint64_t width, uint64_t hei
     const uint64_t bytes = row_bytes * height;          /* both fit in 32 bits here, so no overflow in 64 */
     if (bytes > (1ull << 30)) return NMGOP_E_SIZE;
     const uint64_t phys = base_raw & ~3ull;
+    if (!phys || bytes - 1 > UINT64_MAX - phys) return NMGOP_E_OUTSIDE;
     for (unsigned i = 0; i < nbars; i++) {
         const uint64_t b = bars[i].phys, l = bars[i].len;
         if (!l || phys < b) continue;
@@ -120,6 +121,20 @@ static inline int nmgop_geometry(uint64_t base_raw, uint64_t width, uint64_t hei
         return NMGOP_OK;
     }
     return NMGOP_E_OUTSIDE;
+}
+
+/* The firmware does not export link timings. Describe the fixed software mode
+ * to AGDC using its 60 Hz pacing rate. These values never program a link. */
+static inline int nmgop_logical_timing(uint32_t w, uint32_t h, uint32_t t[13])
+{
+    if (!w || !h || w > 16384 || h > 16384) return 0;
+    const uint32_t ht = w + 160, vt = h + 28;
+    const uint64_t clock = (uint64_t)ht * vt * 60;
+    if (clock > UINT32_MAX) return 0;
+    const uint32_t words[] = { 0x4b350001u, (uint32_t)clock, w, w + 48, w + 80, ht,
+                               h, h + 3, h + 9, vt, 60000, 1, 0 };
+    for (unsigned i = 0; i < sizeof words / sizeof words[0]; ++i) t[i] = words[i];
+    return 1;
 }
 
 #endif

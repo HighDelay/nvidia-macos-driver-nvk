@@ -1,5 +1,17 @@
 # Retained fork changes for upstream merges
 
+## AMD muxless panel presentation
+
+Keep the optional NMGopFB installer choice default-off. With `nmhybrid=1`,
+validate the AMD firmware framebuffer before claiming the device. Publish the
+panel under the NVIDIA RM with its own controller and stable slot 4. Reuse the
+NVIDIA allocator on a headless boot and keep the AMD pixel destination inside
+NMGopFB. AGDC enumerates the panel by actual pipe order. Finish AGDC and enable
+IOPresentment before exposing the Metal plugin on an AMD-only display boot.
+Release the AMD claim for firmware matching if startup fails or misses the
+boot-hold deadline. Preserve the independent Intel bridge and native NVIDIA
+display, flip and BAR1 behavior. See [AMD panel setup](AMD-PANEL.md).
+
 ## Deferred upstream backports, 2026-11-20
 
 Keep NVK and Zink on stable Mesa **26.3.0** at

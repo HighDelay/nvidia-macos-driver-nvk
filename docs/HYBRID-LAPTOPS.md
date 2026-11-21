@@ -44,12 +44,11 @@ panel to the NVIDIA GPU (see "Mux switching" below).
 
 ## AMD integrated GPUs: NMGopFB
 
-On a laptop whose panel is wired to an unsupported Radeon, `NMGopFB` can expose
-the 32-bit framebuffer set up by UEFI. It verifies the format, row pitch and
-memory range before mapping the framebuffer. It uses the same display slot
-as `NMIntelFB`. This fork's experimental option provides the firmware
-framebuffer. NVIDIA-accelerated copying to an AMD panel requires a separate
-accelerator integration.
+On a laptop whose panel is wired to an unsupported Radeon, `NMGopFB` uses the
+32-bit framebuffer set up by UEFI. With `nmhybrid=1`, WindowServer uses NVIDIA
+for rendering and the CPU copies completed frames into the AMD mapping. The
+panel has its own framebuffer controller and uses the optional panel slot.
+An AMD-only display can receive a pipe using the headless NVIDIA allocator.
 
 Which driver takes which GPU (`kexts/NMGopFB/nm_gopfb.h`, tested on the host):
 

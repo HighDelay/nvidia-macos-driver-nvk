@@ -162,7 +162,8 @@ h0 = accel.index('static void headlessCheck(')
 headless = accel[h0:accel.index('void deliverModeChange()', h0)]
 check('the headless fallback does not clear the guard', 'nvrm_guard_display_up(' not in headless)
 fb = (root / 'kexts/NVRMFB/fb/nvrm-fb.cpp').read_text()
-check('the framebuffer clears it on a connector list with no display', 'if (n > 0 && gNDpy == 0) fbGuardCleared(' in fb)
+check('the framebuffer clears it on a connector list with no display when no AMD panel is pending',
+      'if (gNDpy == 0) {' in fb and 'if (!waitingForGopPanel()) fbGuardCleared(' in fb)
 # a start that panics never reaches a clean shutdown, so only a synced counter survives it (#529: six panicking boots, "start 1" each)
 r = boots(exe, ['hang-panic', 'hang-panic', 'good'])
 check('two starts that panic switch the driver off on the third boot (the count is synced, not left in the kernel copy)', r[2][0] == 1, r)

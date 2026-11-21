@@ -30,6 +30,8 @@ HARNESS = r'''
 #include "nv_iop_pixel.h"
 #include "panel_bridge_abi.h"
 #include "nvrm_vram_abi.h"
+#include "nvrm_gopfb.h"
+#include "nm_gopfb.h"
 using IOReturn = int;
 using SInt32 = int32_t;
 using SInt64 = int64_t;
@@ -97,13 +99,18 @@ struct IOAccelDisplayPipeTransaction2 {
     OSObject *getPlaneResource(unsigned, unsigned) { return resource; }
 };
 struct IOService : OSObject {
-    bool intel = false, blocked = false, legacy = false, leased = false;
+    bool intel = false, gop = false, blocked = false, legacy = false, leased = false;
     int begins = 0, ends = 0, cancels = 0;
     unsigned completed = NMINTELFB_CANCEL;
     IOReturn endResult = kIOReturnSuccess;
     NMIntelFBFrame frame = {};
-    bool metaCast(const char *name) { return intel && !strcmp(name, "NMIntelFB"); }
+    bool metaCast(const char *name) { return (intel && !strcmp(name, "NMIntelFB")) || (gop && !strcmp(name, NVRM_GOP_PANEL)); }
+    virtual IOReturn copyFrame(const NvrmGopCopy *) { assert(false); return kIOReturnUnsupported; }
     IOReturn callPlatformFunction(const OSSymbol *s, bool, void *p, void *, void *, void *) {
+        if (!strcmp(s->name, NVRM_GOP_COPY)) {
+            assert(gop);
+            return copyFrame(static_cast<const NvrmGopCopy *>(p));
+        }
         auto *q = static_cast<NMIntelFBFrame *>(p);
         assert(q->version == NMINTELFB_FRAME_VERSION);
         if (!strcmp(s->name, NMINTELFB_FN_BEGIN)) {
@@ -118,6 +125,18 @@ struct IOService : OSObject {
         return endResult;
     }
 };
+struct IOLock { bool held = false; };
+static void IOLockLock(IOLock *lock) { assert(!lock->held); lock->held = true; }
+static void IOLockUnlock(IOLock *lock) { assert(lock->held); lock->held = false; }
+struct NMGopFB : IOService {
+    nmgop_geom fGeometry = {};
+    IOLock lock;
+    IOLock *fLock = &lock;
+    bool fStopping = false, fPowered = true, fGpuReady = true;
+    IOMemoryMap *fSurfMap = nullptr;
+    IOReturn copyFrame(const NvrmGopCopy *frame) override;
+};
+@@GOP_COPY@@
 struct NVDisplayPipe {
     enum { kIopSrcSlots = 4 };
     struct NVIopSrc { IOMemoryMap *map = nullptr; IOMemoryDescriptor *md = nullptr; unsigned id = 0; };
@@ -128,9 +147,12 @@ struct NVDisplayPipe {
 };
 struct NVAccel {
     static NVAccel *gAccel;
+    OSSymbol gopCopy{NVRM_GOP_COPY};
+    const OSSymbol *fGopCopy = &gopCopy;
     IOService *fb = nullptr; NVRMVramRequest scanout = {};
-    IOService *pipeFramebuffer(NVDisplayPipe *, unsigned *head) { *head = 0; return fb; }
+    IOService *pipeFramebuffer(NVDisplayPipe *, unsigned *head) { *head = fb->gop ? kNvrmGopSlot : 0; return fb; }
     IOReturn askFramebufferForScanout(NVRMVramRequest *q, IOService *) {
+        assert(!fb->gop);
         assert(q->version == NVRM_VRAM_ABI_VERSION); *q = scanout; return kIOReturnSuccess;
     }
 };
@@ -138,9 +160,13 @@ NVAccel *NVAccel::gAccel;
 static bool ready = true, current = true, allowFlip = false, directDone = false;
 static int waits, copyChecks, homes, memcpyCalls;
 static bool nvSurfWaitReady(unsigned id) { assert(id == 77); ++waits; return ready; }
-static bool nvAccelSurfCopyReady(IOSurface *, unsigned) { ++copyChecks; return current; }
+static bool nvAccelSurfCopyReady(IOSurface *, unsigned head, bool strict) {
+    assert(strict == (head == kNvrmGopSlot));
+    ++copyChecks;
+    return current;
+}
 static bool nvAccelIopFlip(IOService *fb, unsigned, IOSurface *s, void *) {
-    return allowFlip && !fb->intel && s->fmt == NV_IOP_FMT_BGRA;
+    return allowFlip && !fb->intel && !fb->gop && s->fmt == NV_IOP_FMT_BGRA;
 }
 static void nvAccelIopHome(IOService *, unsigned) { ++homes; }
 @@LEASE@@
@@ -163,8 +189,9 @@ int main(int argc, char **argv) {
     assert(argc == 2); const std::string test = argv[1];
     const bool bgra = test.find("bgra") != std::string::npos || test == "resource";
     const bool intel = test.find("intel") != std::string::npos;
+    const bool gop = test.compare(0, 4, "gop-") == 0;
     const std::string kind = test.compare(0, 6, "intel-") == 0 ? test.substr(6) : test;
-    IOService fb; fb.intel = intel;
+    NMGopFB fb; fb.intel = intel; fb.gop = gop;
     if (test == "intel-blocked") fb.blocked = true;
     if (test == "intel-legacy") fb.legacy = true;
     if (test == "intel-finish-refused") fb.endResult = kIOReturnBusy;
@@ -190,6 +217,9 @@ int main(int argc, char **argv) {
     NVAccel a; a.fb = &fb;
     a.scanout.kva = dst.data() + 1; a.scanout.width = s.width;
     a.scanout.height = s.height; a.scanout.pitch = dpitch;
+    IOMemoryMap panelMap{dst.data() + 1, dpr * s.height * sizeof(unsigned)};
+    fb.fSurfMap = &panelMap;
+    fb.fGeometry = {0, 0, panelMap.length, 0, 0, s.width, s.height, dpitch};
     fb.frame.version = NMINTELFB_FRAME_VERSION; fb.frame.kva = a.scanout.kva;
     fb.frame.width = s.width; fb.frame.height = s.height; fb.frame.pitch = dpitch;
     NVAccel::gAccel = &a;
@@ -209,6 +239,12 @@ int main(int argc, char **argv) {
     if (test == "missing-destination") { a.scanout.kva = nullptr; expected = kIOReturnNotReady; }
     if (test == "source-not-current") { current = false; copied = false; }
     if (test == "intel-not-ready") { ready = false; copied = false; }
+    if (test == "gop-not-ready") { ready = false; copied = false; }
+    if (test == "gop-stale") { current = false; copied = false; }
+    if (test == "gop-asleep") { fb.fPowered = false; copied = false; }
+    if (test == "gop-renderer-lost") { fb.fGpuReady = false; copied = false; }
+    if (test == "gop-stopped") { fb.fStopping = true; fb.fSurfMap = nullptr; copied = false; }
+    if (test == "gop-wrong-size") { ++fb.fGeometry.width; expected = kIOReturnBadArgument; }
     if (test == "intel-blocked" || test == "bgra-flip" || directDone) copied = false;
     if (expected != kIOReturnSuccess) copied = false;
     NVDisplayPipe pipe;
@@ -225,7 +261,7 @@ int main(int argc, char **argv) {
     CHECK(src == original);
     CHECK(dst.front() == guard && dst.back() == guard);
     if (copied) {
-        const unsigned words = bgra ? std::min(spr, dpr) : s.width;
+        const unsigned words = bgra && !gop ? std::min(spr, dpr) : s.width;
         for (unsigned y = 0; y < s.height; ++y) for (unsigned x = 0; x < dpr; ++x) {
             const unsigned v = x < words ? original[1 + y * spr + x] : padding;
             // Expected channel values, independent of the production conversion helper.
@@ -242,7 +278,8 @@ int main(int argc, char **argv) {
     }
     if (!bgra) CHECK(memcpyCalls == 0);
     if (test == "bgra-flip") CHECK(waits == 0 && copyChecks == 0 && homes == 0 && gCntIopOk == 1);
-    if (copied && !bgra) CHECK(waits == 1 && copyChecks == 1 && homes == 1);
+    if (copied && !bgra) CHECK(waits == 1 && copyChecks == 1 && homes == (gop ? 0 : 1));
+    if (gop) CHECK(!fb.lock.held && gCntIopOkHead[kNvrmGopSlot] == copied);
     pipe.iopDropSources();
     CHECK(md.wired == 0 && md.refs == 1 && fb.refs == 1);
     std::printf("%s %s (return=%d expected=%d)\n", bad ? "FAIL" : "PASS", argv[1], result, expected);
@@ -259,6 +296,7 @@ CASES = (
     "short-destination", "unaligned-destination", "wrong-dimensions", "missing-destination",
     "source-not-current", "intel-not-ready", "intel-blocked",
     "intel-unknown-format", "intel-zero-width", "intel-short-map", "intel-unaligned-destination",
+    "gop-l10r", "gop-bgra", "gop-wrong-size", "gop-not-ready", "gop-stale", "gop-asleep", "gop-renderer-lost", "gop-stopped",
 )
 
 
@@ -266,6 +304,8 @@ def run(source, output, cases, name):
     start = source.index("class NVIntelFrameLease {")
     lease = source[start:source.index("enum NVIntelCopyResult", start)]
     text = HARNESS.replace("@@LEASE@@", lease)
+    gop = (ROOT / "kexts/NMGopFB/gopfb.cpp").read_text()
+    text = text.replace("@@GOP_COPY@@", method(gop, "IOReturn NMGopFB::copyFrame(const NvrmGopCopy *frame)"))
     for token, signature in (
         ("DROP", "void NVDisplayPipe::iopDropSources()"),
         ("MAP", "const void *NVDisplayPipe::iopMapSurface(unsigned id, IOMemoryDescriptor *md, unsigned long long need)"),
@@ -280,6 +320,7 @@ def run(source, output, cases, name):
         "-I" + str(ROOT / "kexts/NVRM/accel"),
         "-I" + str(ROOT / "kexts/NVRM"),
         "-I" + str(ROOT / "kexts/NMIntelFB"), str(cpp), "-o", str(exe),
+        "-I" + str(ROOT / "kexts/NMGopFB"),
     ], check=True)
     results = []
     for case in cases:

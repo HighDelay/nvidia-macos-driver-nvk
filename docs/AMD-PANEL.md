@@ -1,9 +1,10 @@
 # Experimental AMD laptop panel
 
-`Optional/NMGopFB.kext` exposes an existing 32-bit UEFI GOP framebuffer on
-supported AMD GPUs that macOS cannot drive. It uses the mode the firmware left
-active. NVIDIA-accelerated presentation to an AMD-wired muxless panel still
-requires separate bridge work. [Supported AMD device IDs](https://github.com/HighDelay/nvidia-macos-driver-nvk/blob/main/kexts/NMGopFB/nm_gopfb.h)
+On a muxless AMD + NVIDIA laptop, `Optional/NMGopFB.kext` lets NVIDIA render
+the desktop for a panel wired to the AMD GPU. The CPU copies finished frames
+to the 32-bit UEFI GOP framebuffer that the AMD GPU is already scanning out.
+NVIDIA can render for this panel with its own display ports empty.
+[Supported AMD device IDs](https://github.com/HighDelay/nvidia-macos-driver-nvk/blob/main/kexts/NMGopFB/nm_gopfb.h)
 
 ## Install
 
@@ -18,15 +19,34 @@ sudo ./install.sh --amd-panel=yes
 The AMD and Intel options share a display slot. To switch from Intel to AMD in
 one install, pass `--intel-panel=no --amd-panel=yes`.
 
-The installer adds the kext to the normal driver transaction. To try the
-firmware framebuffer, add `nmhybrid=1` to the OpenCore boot arguments and reboot.
-The AMD GPU must already provide the boot framebuffer. Keep a working display
-route for testing. The GOP path uses a fixed firmware resolution and 60 Hz
-software pacing.
+Install the panel kext from the same package as NVRM, NVRMFB, NVAccel and
+NVRMAGDC. Add `nmhybrid=1` to the OpenCore boot arguments alongside the normal
+driver settings `nvfb=1` and `nvaccel=1`, then reboot. The AMD GPU must already
+provide the boot framebuffer. Keep a working recovery setup for testing.
+
+The panel uses the firmware resolution and 60 Hz software pacing. Presentation
+has a CPU copy cost, and the driver leaves brightness, refresh and link setup
+to firmware. The experimental path builds its display-pipe map at boot. Connect
+any NVIDIA-driven displays you want to use before booting. Internal-panel
+login, sustained presentation and sleep/wake still need testing on AMD + NVIDIA
+laptop hardware.
+
+## Check the handoff
+
+Look for `NMGopFBActive` in IORegistry and check that the copy counter increases
+while moving a window. The AMD panel uses driver slot 4. On an AMD-only display
+setup, it is the first AGDC pipe.
+
+```sh
+ioreg -r -c NMGopFB -l
+sysctl debug.nvaccel_heads_piped debug.nvaccel_iop_ok_h4 debug.nvrmfb_agdc_fbmap
+```
 
 ## Recover or remove
 
-Add `-nmgopfboff` to the boot arguments to bypass NMGopFB. To remove the kext
-during a driver update, use `sudo ./install.sh --amd-panel=no` and reboot.
+If the NVIDIA handoff fails, the driver releases the AMD device for firmware
+framebuffer matching. Add `-nmgopfboff` to the boot arguments to bypass NMGopFB.
+To remove the kext during a driver update, use `sudo ./install.sh --amd-panel=no`
+and reboot.
 Normal driver uninstallation removes the installed panel kext. The installer
 leaves the OpenCore boot arguments for this option under your control.
