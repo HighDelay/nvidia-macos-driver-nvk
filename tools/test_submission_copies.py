@@ -14,6 +14,8 @@ prepare = events[prepare_start:events.index('- (BOOL)nvmtlSubmitAhead', prepare_
 ahead = events[events.index('- (BOOL)nvmtlSubmitAhead'):events.index('static void nvmtl_gsub_ahead_pass1(void);')]
 advance = events[events.index('- (BOOL)nvmtlAdvancePart'):events.index('- (void)nvmtlSubmitWithEvents')]
 ws = events[events.index('static const void *const nvmtl_ws_marks_key'):events.index('static void nvmtl_surface_finish_writes(')]
+removed_start = events.index('static NSError *nvmtl_device_removed_error(void)')
+removed_error = events[removed_start:events.index('\n}\n', removed_start) + 3]
 objects = (root / 'plugin/NVMTLObjects.m').read_text()
 start = objects.index('static os_unfair_lock gSwcLock = OS_UNFAIR_LOCK_INIT;')   # the shared-VRAM working copy and the sync routines that use it
 sync = objects[start:]
@@ -153,6 +155,8 @@ static _Atomic unsigned long long gsub_inflight, gsub_peak, gsub_ahead, gEvFold,
 static NSMutableArray *nvmtl_quarantined_parts;
 static unsigned begins, waits, finishes, scheduled;
 static int submitResult; static BOOL allocationFails;
+static BOOL deviceRemoved;
+static int nvmtl_vk_device_removed(void) { return deviceRemoved; }
 static unsigned char *testGPU; static unsigned char expectedPixel, writtenPixel;
 static int nvmtl_gsub_cap(void) { return 8; }
 static BOOL nvmtl_evfold_on(void) { return NO; }
@@ -353,6 +357,14 @@ int main(void) { @autoreleasepool {
     assert([cb nvmtlAdvancePart] && !cb->_executionDone && [events isEqual:@[@"o1:0"]]);
     assert([cb nvmtlAdvancePart] && cb->_executionDone && [events isEqual:(@[@"o1:0",@"o1:0"])] && !dirtyCalls);
     CFRelease(shared); CFRelease(other);
+    // Device loss completes the buffer with a Metal error and leaves its writes unreported.
+    submitResult=-2; deviceRemoved=YES; expectedPixel=cpu[0];
+    const unsigned copiesBeforeLoss=downloads, signalsBeforeLoss=event->signals;
+    cb=makeCommand(resources,event);
+    assert([cb nvmtlAdvancePart] && cb->_executionDone && cb->_gpuUsesUncertain);
+    assert([cb->_cbError.domain isEqualToString:MTLCommandBufferErrorDomain] &&
+           cb->_cbError.code==MTLCommandBufferErrorDeviceRemoved);
+    assert(downloads==copiesBeforeLoss && event->signals==signalsBeforeLoss);
     printf("PASS (kernel half %s): production submission ordering, failed-submit isolation, event publication, host-pointer "
            "hold / ahead finish, WindowServer marks: %s\n", half?"present":"absent",
            half?"held until every write in flight landed (same buffer, overlapping buffers, failed writer), released "
@@ -368,7 +380,8 @@ with tempfile.TemporaryDirectory() as directory:
                     '-framework', 'Metal', str(path / 'test.m'), '-o', str(path / 'test')], check=True)
     subprocess.run([str(path / 'test')], check=True)
 
-    (path / 'submission.m').write_text(fixture + helper + sync + submission_fixture.replace('/*WS*/', ws) + prepare + ahead + advance + submission_checks)
+    (path / 'submission.m').write_text(fixture + helper + sync + removed_error +
+                                      submission_fixture.replace('/*WS*/', ws) + prepare + ahead + advance + submission_checks)
     subprocess.run(['clang', '-fobjc-arc', '-I', str(root / 'plugin'), '-framework', 'Foundation', '-framework', 'IOSurface',
                     '-framework', 'Metal', str(path / 'submission.m'), '-o', str(path / 'submission')], check=True)
     for half in ('1', '0'):

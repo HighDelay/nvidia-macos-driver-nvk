@@ -7,6 +7,7 @@
 The 1401 app's part (login items, log collection, hardened runtime) is tested in 1401 (mac/tools)."""
 import os
 import pathlib
+import re
 import sys
 
 root = pathlib.Path(sys.argv[1] if len(sys.argv) > 1 else pathlib.Path(__file__).resolve().parents[1])
@@ -267,12 +268,44 @@ check('a bind clears the mapping context only under the mapping lock', bind_lock
 check('negative control: a bind that frees the list after the unlock is caught',
       not bind_locked(bind.replace('        IOLockUnlock(me->fMapLock);\n', '', 1).replace(
           '        IOLockLock(me->fMapLock);\n', '        IOLockLock(me->fMapLock);\n        IOLockUnlock(me->fMapLock);\n', 1)))
-cmft = body(nvrm, 'IOReturn NVRMUserClient::clientMemoryForType(', 'IOReturn NVRMUserClient::externalMethod(')
-copied = cmft.find('snapshot.memArea.pRanges = ranges;')
-check('a map reads the live context only under the mapping lock, then only its private copy',
-      copied > 0 and 'nvu_memcpy(ranges,' in cmft[:copied] and 'fMmap' not in cmft[copied:]
-      and 'fMapList' not in cmft[copied:]
-      and 'c = &snapshot' in cmft[copied:] and 'c = &fMmap' not in cmft)
+cmft = body(nvrm, 'IOReturn NVRMUserClient::clientMemoryForType(', '\n}\n')
+
+
+def map_snapshot_locked(src):
+    code = re.sub(r'//[^\n]*', '', src)
+    snapshot = code.find('snapshot = fMapList->context;')
+    copy_ranges = code.find('nvu_memcpy(ranges, snapshot.memArea.pRanges,')
+    rebase = code.find('snapshot.memArea.pRanges = ranges;')
+    read_lock = code.rfind('IOLockLock(fMapLock);', 0, snapshot)
+    token_lock = code.find('IOLockLock(fMapLock);', rebase)
+    # Standalone unlocks delimit the success paths. Error arms unlock and return.
+    unlock = re.compile(r'^[ \t]*IOLockUnlock\(fMapLock\);[ \t]*$', re.M)
+    read_end = unlock.search(code, max(snapshot, 0))
+    token_end = unlock.search(code, max(token_lock, 0))
+    if not (read_end and token_end
+            and 0 <= read_lock < snapshot < copy_ranges < read_end.start()
+            and read_end.start() < rebase < token_lock < token_end.start()):
+        return False
+    mapping = code[rebase:token_lock]
+    # Mapping uses the snapshot. A token may consume its node only after
+    # checking both its identity and generation under the reacquired lock.
+    token = code[token_lock:token_end.start()]
+    guard = token.find('if (fMapList != snapNode || fMapGen != snapGen) r = kIOReturnBusy;')
+    consume = token.find('fMapList = one->pNext;')
+    unlocked = code[:read_lock] + code[read_end.end():token_lock] + code[token_end.end():]
+    live_fields = r'\bf(?:Mmap|MapList|MapGen|MapLen(?:Node)?)\b'
+    return ('c = &snapshot' in mapping and not re.search(live_fields, unlocked)
+            and 0 <= guard < consume and '->context' not in token)
+
+
+check('the map uses a locked snapshot and consumes an unchanged token node under the lock', map_snapshot_locked(cmft))
+check('negative control: a map that rereads the live context outside the lock is caught',
+      not map_snapshot_locked(cmft.replace('c = &snapshot;', 'c = &fMapList->context;')))
+check('negative control: a range copy after unlocking is caught',
+      not map_snapshot_locked(cmft.replace('        nvu_memcpy(ranges,',
+                                           '        IOLockUnlock(fMapLock);\n        nvu_memcpy(ranges,')))
+check('negative control: a token commit without a generation check is caught',
+      not map_snapshot_locked(cmft.replace(' || fMapGen != snapGen', '')))
 check('a map refuses an empty range list before reading its first entry',
       'count == 0 || count > 4096' in cmft)
 close = body(nvrm, 'IOReturn NVRMUserClient::clientClose(', 'void NVRMUserClient::free(')
