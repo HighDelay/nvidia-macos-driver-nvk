@@ -1182,7 +1182,11 @@ static int nvmtl_cache_write(NSString *path, NSData *d) {
         if (!(k & (k - 1))) nvlog("shader cache: not writing %s - the device is lost in this process [%lu skipped]", path.lastPathComponent.UTF8String, k);
         return -1;
     }
-    return nvmtl_cf_write(path.fileSystemRepresentation, d.bytes, d.length);
+    // WebKit's GPU sandbox allows writes and renames in its private cache but denies file sync.
+    // The checksum still guards these rebuildable shader entries after a crash.
+    const char *process = getprogname();
+    const bool allowDeniedSync = process && !strcmp(process, "com.apple.WebKit.GPU");
+    return nvmtl_cf_write(path.fileSystemRepresentation, d.bytes, d.length, allowDeniedSync);
 }
 
 // ---- one translation per module (nvmtl_pretranslate.h) ----

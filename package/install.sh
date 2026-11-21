@@ -987,6 +987,7 @@ webkit_manual() {
 choose_webkit_fixup() {
   printf '\n%s\n' '----------------------------------------------------------------------'
   echo "   Optional Safari WebGL helper for Intel Sequoia/Tahoe (requires Lilu 1.7.2+)."
+  echo "   Also enables hardware video decoding for supported codecs with the bundled NVIDIA video runtime."
   printf '%s\n\n' '----------------------------------------------------------------------'
   echo "   Manual gives copy/config instructions; automatic detects a compatible OpenCore EFI, then backs up and updates it."
   echo "   If several qualify, choose your boot EFI from the list. --efi-target overrides detection."

@@ -19,6 +19,12 @@ int main() {
     const char *binary="/Library/GPUBundles/NVMTLDriver.bundle/Contents/MacOS/NVMTLDriver";
     assert(resource(binary)==Resource::Runtime);
     assert(resource("/System/Volumes/Data/Library/GPUBundles/NVMTLDriver.bundle/Contents/MacOS/NVMTLDriver")==Resource::Runtime);
+    const auto codec=resource("/Library/GPUBundles/NVMTLDriver.bundle/Contents/MacOS/libnvencvt.dylib");
+    assert(codec==Resource::Runtime && map(1,5,2,codec));
+    assert(resource("/System/Volumes/Data/Library/GPUBundles/NVMTLDriver.bundle/Contents/MacOS/libnvencvt.dylib")==codec);
+    assert(!read(1,1,codec) && !map(1,7,2,codec) && !map(1,5,1,codec));
+    assert(resource("/Library/GPUBundles/NVMTLDriver.bundle/Contents/MacOS/libnvencvt.dylib.bak")==Resource::None);
+    assert(resource("/Library/GPUBundles/nvmtl/libnvencvt.dylib")==Resource::None);
     for(const char *bad : {"/Library/GPUBundles/evil.dylib", "/Library/GPUBundles/NVMTLDriver.bundle/Contents/MacOS/NVMTLDriver.evil", "/tmp/NVMTLDriver", "/Library/GPUBundles/nvmtl/../evil.dylib", "/System/Volumes/Data/dev/null", "/System/Volumes/DataX/Library/GPUBundles/NVMTLDriver.bundle/Contents/MacOS/NVMTLDriver", "", (const char *)nullptr})
         assert(resource(bad)==Resource::None);
     assert(resource("/dev/null")==Resource::NullDevice);

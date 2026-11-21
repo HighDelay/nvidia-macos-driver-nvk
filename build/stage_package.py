@@ -208,9 +208,14 @@ def validate_video_runtime(root):
 
 def video_default_config(text):
     # An explicit opt-out or process selection survives an update.
-    if re.search(r"^\s*NVMTL_NVENCVT\s*=", text, re.M):
-        return text
-    return text.rstrip("\n") + "\n\n# Bundled additional NVIDIA video codecs; 0 disables the addon.\nNVMTL_NVENCVT=1\n"
+    defaults = (
+        ("NVMTL_NVENCVT", "Bundled additional NVIDIA video codecs. Set 0 to disable the addon."),
+        ("NVMTL_WEBKIT_NVDEC", "Hardware video decoding with the optional NVWebKitFixup helper. Set 0 to disable."),
+    )
+    for key, description in defaults:
+        if not re.search(rf"^\s*{key}\s*=", text, re.M):
+            text = text.rstrip("\n") + f"\n\n# {description}\n{key}=1\n"
+    return text
 
 
 def stage_video_runtime(root, video, files):

@@ -1,11 +1,12 @@
-# Optional Safari WebGL helper
+# Optional Safari WebGL and hardware video decoding helper
 
 NVWebKitFixup lets Apple's sandboxed WebKit GPU process load the NVIDIA Metal
-runtime. It requires Lilu 1.7.2+ in OpenCore and the matching driver from the same
-package. It targets Intel Sequoia 15 and Tahoe 26 (Darwin 24/25), refusing unknown
-symbols or hook instructions. The original local candidate passed Aquarium on
-RTX 2060 SUPER / Tahoe 26.7.1. The broader 0.2.0 candidate has source/gate tests
-and an isolated Tahoe link check; Sequoia and 0.2.0 boot validation remain open.
+runtime for WebGL and register supported hardware video decoders through
+VideoToolbox. It requires Lilu 1.7.2+ in OpenCore and the matching driver from the
+same package. It targets Intel Sequoia 15 and Tahoe 26 (Darwin 24/25) and checks
+the kernel symbols and hook instructions at startup. Safari WebGL and VP9
+hardware decoding were verified on RTX 2060 SUPER with Tahoe 26.7.1. Sequoia
+validation covers the source interfaces and simulated compatibility checks.
 
 ## Installer choices
 
@@ -93,6 +94,11 @@ Automatic choice; Manual remains the default.
 After reboot, `sysctl -n debug.nvwkfixup` should report `ready`; `map` increases
 when WebKit loads the runtime. `read` can stay zero with the matched userland
 handle fallback. Test Safari on <https://webglsamples.org/aquarium/aquarium.html>.
+
+With the bundled video runtime, WebKit hardware decoding is enabled by default
+for supported codecs. To turn off local WebKit decoder registration, set
+`NVMTL_WEBKIT_NVDEC=0` in the user settings block of
+`/Library/GPUBundles/nvmtl/nvrm610.conf`, then quit and reopen Safari.
 
 Disable its Kernel/Add entry or use `-nvwkoff`, then reboot. Never unload a live
 helper. Driver removal does not edit OpenCore; remove its entry and

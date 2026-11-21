@@ -1,12 +1,12 @@
 # NVWebKitFixup — Sequoia and Tahoe compatibility candidate
 
-This optional x86_64 Lilu plugin lets Apple's normal WebKit GPU service load
-the installed NVIDIA Metal runtime while retaining other Sandbox and AMFI checks.
-It is a prototype, not a generally qualified Safari WebGL repair.
+This optional x86_64 Lilu plugin lets Apple's WebKit GPU service load the
+installed NVIDIA Metal runtime and video codec add-on. The matching Metal
+plugin registers supported hardware decoders through VideoToolbox.
 Use it with the matching NVMTL page-query and owned-handle fixes from this
 branch; an older driver package may lack the userland changes it needs.
 
-Version 0.2.0 targets Intel macOS 15 Sequoia (Darwin 24) and macOS 26 Tahoe
+Version 0.2.1 targets Intel macOS 15 Sequoia (Darwin 24) and macOS 26 Tahoe
 (Darwin 25). It checks the required kernel symbols and both Sandbox function
 prefixes before routing either callback. Only the reviewed frame-setup and
 register-save instructions are accepted; stack-frame sizes may vary within
@@ -21,17 +21,17 @@ pinning one kernel version string; they do not guarantee that every maintenance
 release has the same private Sandbox code. An unsupported layout requires review.
 
 The caller must have the kernel signing identity `com.apple.WebKit.GPU`, a valid
-signature and platform-binary status. Executable mappings are limited to six
-named NVMTL/NVK/translator/LLVM runtime paths. Each target must be a regular,
+signature and platform-binary status. Executable mappings are limited to seven
+named runtime paths, including `libnvencvt.dylib`. Each target must be a regular,
 root-owned, restricted file without group/other write permission. Only private
 X/RX mappings are admitted; writable executable, shared, anonymous and JIT
 mappings retain their denial. Existing maximum protections are never raised.
 The only open exception is read-only `/dev/null`, verified as root-owned device
 3,2. Writes and other paths keep the original result.
 
-The helper changes only the two in-memory Sandbox callbacks. It does not edit
-Apple's files, disable the sandbox, alter AMFI, change IOKit message filters,
-enable local video codecs, or change the confirmed Safari video/icon policies.
+The helper changes only the two in-memory Sandbox callbacks. The matched
+Metal plugin registers decoders in the WebKit GPU process after opening both
+accelerator connections under its sandbox.
 The matched NVMTL build also fixes the ICD's page/memory query fallback without
 requesting additional sysctl permissions. When both a fresh null-device open
 and `pipe()` are denied, its handle allocator duplicates WebKit's inherited
@@ -52,11 +52,8 @@ python3 tools/test_nvmtl_sandbox_memory.py
 python3 tools/test_icd_fd_token.py
 ```
 
-Build dependencies are for compilation only. Keep the installed Lilu rather
-than replacing it with the DEBUG build used as an SDK. The prototype was linked
-in an isolated Tahoe kernel collection against the host's Lilu 1.7.3. The
-original 0.1.0 candidate booted and passed the local Safari tests below; the
-broader 0.2.0 candidate requires a separate boot test.
+Build dependencies are for compilation only. Version 0.2.1 linked in an isolated
+Tahoe kernel collection against Lilu 1.7.3 and booted with that version.
 
 ## Local boot test
 
@@ -96,11 +93,9 @@ OpenCore installation. Multiple compatible installations require a choice;
 to both detected and explicit targets.
 It is never installed in the system kext repositories or activated by default.
 
-The 0.2.0 extension passes OS/symbol/instruction/routing refusal tests, the
-unchanged permission/callback tests, compilation and an isolated Tahoe kernel
-link check. Sequoia has source/interface validation and simulated gate tests,
-without a Sequoia boot or kernel-collection link result. The earlier Tahoe
-0.1.0 result should not be presented as a 0.2.0 boot test.
+Version 0.2.1 passed the hook and permission tests. On RTX 2060 SUPER with Tahoe
+26.7.1, Safari used NVIDIA hardware VP9 decoding after reboot. Sequoia validation
+covers source interfaces and simulated compatibility checks.
 
 Interface review used 13 Apple XNU tags from
 [`xnu-11215.1.10`](https://github.com/apple-oss-distributions/xnu/blob/xnu-11215.1.10/security/mac_policy.h)

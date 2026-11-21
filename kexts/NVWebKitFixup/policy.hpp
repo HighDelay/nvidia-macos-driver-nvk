@@ -18,6 +18,7 @@ inline Resource resource(const char *path) {
     const char *images[] = {
         "/Library/GPUBundles/NVMTLDriver.bundle/Contents/MacOS/NVMTLDriver",
         "/Library/GPUBundles/NVMTLDriver.bundle/Contents/MacOS/libnvmtl_translate.dylib",
+        "/Library/GPUBundles/NVMTLDriver.bundle/Contents/MacOS/libnvencvt.dylib",
         "/Library/GPUBundles/NVMTLDriver.bundle/Contents/MacOS/air-runtime/libLLVM.dylib",
         "/Library/GPUBundles/NVMTLDriver.bundle/Contents/MacOS/air-runtime/libzstd.1.dylib",
         "/Library/GPUBundles/nvmtl/libvulkan_nouveau.dylib",

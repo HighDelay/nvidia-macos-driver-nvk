@@ -3,13 +3,14 @@
    is a wrong shader, not a missing one. Every entry is written as <payload><footer>, where the footer holds a magic,
    the payload length and a 64-bit hash of the payload. A reader accepts the file only when all three agree and otherwise
    deletes it, so the next lookup translates again. The write goes to a temporary file in the same folder, is flushed to
-   the disk, and only then renamed over the final name, so no process ever sees a partial file under the final name and a
-   crash cannot leave a renamed file whose data never reached the disk.
+   the disk, and then renamed over the final name. A caller with a rebuildable private cache can publish when its
+   sandbox denies both sync calls. After a crash the same footer check discards any incomplete entry.
    An entry without a footer (written by an older driver) is not trusted: it reads as missing and is removed.
    Pure C over file descriptors, so tools/test_cache_file.c proves it without the plugin. */
 #ifndef NVMTL_CACHE_FILE_H
 #define NVMTL_CACHE_FILE_H
 #include <stdint.h>
+#include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -73,8 +74,19 @@ static inline uint8_t *nvmtl_cf_read(const char *path, size_t *payload_len, nvmt
     return buf;
 }
 
-/* Writes payload+footer to a temporary file beside `path`, flushes it, renames it into place. Returns 0, or an errno. */
-static inline int nvmtl_cf_write(const char *path, const void *payload, size_t n)
+static inline int nvmtl_cf_sync(int fd, bool allow_denied_sync)
+{
+#ifdef F_FULLFSYNC
+    if (fcntl(fd, F_FULLFSYNC) == 0) return 0;
+    allow_denied_sync = allow_denied_sync && (errno == EPERM || errno == EACCES);
+#endif
+    if (fsync(fd) == 0) return 0;
+    const int error = errno;
+    return allow_denied_sync && (error == EPERM || error == EACCES) ? 0 : error;
+}
+
+/* Writes and closes a temporary file beside `path` before publishing it with rename. Returns 0 or an errno. */
+static inline int nvmtl_cf_write(const char *path, const void *payload, size_t n, bool allow_denied_sync)
 {
     if (n > 0xffffffffu) return EFBIG;
     char tmp[1100];
@@ -92,11 +104,7 @@ static inline int nvmtl_cf_write(const char *path, const void *payload, size_t n
             ssize_t w = write(fd, parts[p] + off, sizes[p] - off);
             if (w > 0) off += (size_t)w; else if (w < 0 && errno == EINTR) continue; else { err = errno ? errno : EIO; break; }
         }
-#ifdef F_FULLFSYNC
-    if (!err && fcntl(fd, F_FULLFSYNC) != 0 && fsync(fd) != 0) err = errno;
-#else
-    if (!err && fsync(fd) != 0) err = errno;
-#endif
+    if (!err) err = nvmtl_cf_sync(fd, allow_denied_sync);
     if (close(fd) != 0 && !err) err = errno;
     if (!err && rename(tmp, path) != 0) err = errno;
     if (err) unlink(tmp);

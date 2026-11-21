@@ -53,6 +53,7 @@ SOURCE_PACKAGE="/original extracted package"
         result,called=self.invoke();self.assertEqual(result.returncode,0,result.stderr);self.assertIsNone(called)
         self.assertIn('/original extracted package/Optional/NVWebKitFixup/NVWebKitFixup.kext',result.stdout)
         self.assertIn('EFI/OC/Kexts/',result.stdout)
+        self.assertIn('hardware video decoding for supported codecs',result.stdout)
         self.assertIn('MinKernel=24.0.0; MaxKernel=25.99.99',result.stdout)
         self.assertNotIn('private package',result.stdout)
 

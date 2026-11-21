@@ -5,7 +5,30 @@
 #include <stdio.h>
 #include <stdatomic.h>
 #include <dirent.h>
+#include <errno.h>
+#include <fcntl.h>
+#include <unistd.h>
+
+static int sync_error;
+static int test_fsync(int fd)
+{
+    if (!sync_error) return fsync(fd);
+    errno = sync_error;
+    return -1;
+}
+#ifdef F_FULLFSYNC
+static int test_fullfsync(int fd, int command)
+{
+    if (!sync_error) return fcntl(fd, command);
+    errno = EPERM;
+    return -1;
+}
+#define fcntl test_fullfsync
+#endif
+#define fsync test_fsync
 #include "nvmtl_cache_file.h"
+#undef fsync
+#undef fcntl
 
 static int fails;
 static void arm(const char *what, int ok) { printf("%s  %s\n", ok ? "ok  " : "FAIL", what); if (!ok) fails++; }
@@ -26,7 +49,7 @@ static nvmtl_cf_status rd(const char *name, uint8_t **buf, size_t *n) { char pat
 
 static atomic_int stop, bad_seen, good_seen;
 static void *writer(void *a) { (void)a; uint8_t spv[1024]; size_t n = make_spv(spv, 60); char path[512]; snprintf(path, sizeof path, "%s/race.spv", dir);
-    while (!atomic_load(&stop)) nvmtl_cf_write(path, spv, n); return NULL; }
+    while (!atomic_load(&stop)) nvmtl_cf_write(path, spv, n, false); return NULL; }
 static void *reader(void *a) { (void)a; char path[512]; snprintf(path, sizeof path, "%s/race.spv", dir);
     while (!atomic_load(&stop)) { size_t n; nvmtl_cf_status s; uint8_t *b = nvmtl_cf_read(path, &n, &s);
         if (s == NVMTL_CF_OK && b && old_driver_accepts(b, n)) atomic_fetch_add(&good_seen, 1); else if (s != NVMTL_CF_MISSING) atomic_fetch_add(&bad_seen, 1); free(b); } return NULL; }
@@ -37,7 +60,7 @@ int main(void)
     uint8_t spv[1024]; size_t n = make_spv(spv, 60);
     char path[512]; snprintf(path, sizeof path, "%s/a.spv", dir);
 
-    arm("a written entry reads back byte for byte", nvmtl_cf_write(path, spv, n) == 0 && ({ uint8_t *b; size_t m; nvmtl_cf_status s = rd("a.spv", &b, &m); int ok = s == NVMTL_CF_OK && m == n && !memcmp(b, spv, n); free(b); ok; }));
+    arm("a written entry reads back byte for byte", nvmtl_cf_write(path, spv, n, false) == 0 && ({ uint8_t *b; size_t m; nvmtl_cf_status s = rd("a.spv", &b, &m); int ok = s == NVMTL_CF_OK && m == n && !memcmp(b, spv, n); free(b); ok; }));
     arm("no temporary file is left behind after a write", ({ int left = 0; DIR *d = opendir(dir); struct dirent *e; while ((e = readdir(d))) if (strstr(e->d_name, ".tmp-")) left++; closedir(d); left == 0; }));
 
     /* torn: the file cut short at every length, including exactly at an instruction boundary of the payload */
@@ -71,7 +94,27 @@ int main(void)
     { uint8_t *b; size_t m; nvmtl_cf_status s = rd("empty.spv", &b, &m); arm("an empty file is refused", s == NVMTL_CF_SHORT && !b); }
     { uint8_t *b; size_t m; nvmtl_cf_status s = rd("nothere.spv", &b, &m); arm("a missing file reads as missing, nothing is created or removed", s == NVMTL_CF_MISSING && !b); }
     char bad[600]; snprintf(bad, sizeof bad, "%s/nodir/x.spv", dir);
-    arm("a write into a folder that is not there fails with its errno and leaves nothing", nvmtl_cf_write(bad, spv, n) == ENOENT);
+    arm("a write into a folder that is not there fails with its errno and leaves nothing", nvmtl_cf_write(bad, spv, n, false) == ENOENT);
+
+    char sandbox_path[512];
+    snprintf(sandbox_path, sizeof sandbox_path, "%s/sandbox.spv", dir);
+    sync_error = EPERM;
+    arm("a denied sync leaves the normal cache entry unpublished",
+        nvmtl_cf_write(sandbox_path, spv, n, false) == EPERM && !exists("sandbox.spv"));
+    arm("the sandbox cache can publish after both sync calls are denied",
+        nvmtl_cf_write(sandbox_path, spv, n, true) == 0);
+    sync_error = EIO;
+    arm("an I/O error refuses replacement of the existing sandbox cache entry",
+        nvmtl_cf_write(sandbox_path, flip, n, true) == EIO);
+    sync_error = 0;
+    {
+        uint8_t *data;
+        size_t length;
+        nvmtl_cf_status status = rd("sandbox.spv", &data, &length);
+        arm("the sandbox entry retains its original payload and valid footer",
+            status == NVMTL_CF_OK && length == n && !memcmp(data, spv, n));
+        free(data);
+    }
 
     /* writer and readers on one name: a reader sees the whole entry or nothing, never a partial one */
     pthread_t w, r[3]; atomic_store(&stop, 0);

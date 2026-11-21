@@ -68,6 +68,7 @@ class VideoRuntime(unittest.TestCase):
         self.assertEqual((binary.parent / 'libnvencvt.dylib').read_bytes(), b'test binary')
         self.assertFalse((package / STAGE.RUNTIME / 'video/libnvencvt.dylib').exists())
         self.assertEqual(conf.read_text().count('NVMTL_NVENCVT=1'), 1)
+        self.assertEqual(conf.read_text().count('NVMTL_WEBKIT_NVDEC=1'), 1)
         STAGE.write_manifest(package)
         STAGE.verify_manifest(package)
         self.assertEqual(STAGE.digest(self.runtime / 'libnvencvt.dylib'), self.record['files']['libnvencvt.dylib'])
@@ -111,9 +112,15 @@ class VideoRuntime(unittest.TestCase):
     def test_config_defaults_preserve_explicit_optouts_and_process_selection(self):
         for value in ('0', '1', 'OBS'):
             original = 'OTHER=1\nNVMTL_NVENCVT=' + value + '\n'
-            self.assertEqual(STAGE.video_default_config(original), original)
+            updated = STAGE.video_default_config(original)
+            self.assertTrue(updated.startswith(original))
+            self.assertEqual(updated.count('\nNVMTL_NVENCVT='), 1)
+            self.assertIn('\nNVMTL_WEBKIT_NVDEC=1\n', updated)
+            with_optout = original + 'NVMTL_WEBKIT_NVDEC=0\n'
+            self.assertEqual(STAGE.video_default_config(with_optout), with_optout)
         generated = STAGE.video_default_config('# NVMTL_NVENCVT=0\n')
         self.assertEqual(generated.count('\nNVMTL_NVENCVT=1\n'), 1)
+        self.assertEqual(generated.count('\nNVMTL_WEBKIT_NVDEC=1\n'), 1)
         self.assertEqual(STAGE.video_default_config(generated), generated)
 
 

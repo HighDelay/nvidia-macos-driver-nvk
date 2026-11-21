@@ -499,19 +499,10 @@ static unsigned nvmtl_nvencvt_scope(const char *me, bool decoderAllowed)
     if (getenv("NVMTL_NO_NVENC")) scope &= ~2u;
     return scope;
 }
-static bool nvmtl_can_register_decoder(const char *me)
+static bool nvmtl_sandbox_decoder_bridge_available(const char *me)
 {
-    if (nvmtl_is_decode_service(me) || !nvmtl_is_sandboxed()) return true;
-    // Native sandboxed players keep upstream's service delegation even if they can open the bridge. QuickTime's
-    // in-process NVDEC path can freeze its picture while the playback clock advances. Only Chromium's GPU process
-    // needs the local capability registration below; identify the process type rather than an app-name allowlist.
-    // Gecko's RDD/GPU processes take the same probe. Their stock sandbox allows (iokit-connection "IOAccelerator"),
-    // which covers both bridge clients; the decoders' denied /dev/null handle is replaced in nvmtl_codec_open.
-    if (!nvmtl_is_chromium_gpu_process() && !nvmtl_is_gecko_decoder_process()) return false;
-    // Chromium checks local VideoToolbox hardware support before it creates a decoder. Skipping registration
-    // makes H.264 disappear from that check; it does not send the query to VTDecoderXPCService. A sandboxed GPU
-    // process can already use our accelerator's RM bridge. Check both client types used by the decoder libraries
-    // under the actual sandbox, and leave restricted clients on the service path. No decoder session is created.
+    // The codec libraries need both accelerator connections. Opening and closing the clients checks access
+    // under the process's sandbox before registering a decoder that VideoToolbox might select.
     static bool allowed;
     static dispatch_once_t once;
     dispatch_once(&once, ^{
@@ -531,6 +522,14 @@ static bool nvmtl_can_register_decoder(const char *me)
               me, allowed ? "available" : "unavailable", cr, gr);
     });
     return allowed;
+}
+static bool nvmtl_can_register_decoder(const char *me)
+{
+    if (nvmtl_is_decode_service(me) || !nvmtl_is_sandboxed()) return true;
+    // Native sandboxed players delegate to VTDecoderXPCService. Chromium's GPU process and Gecko's
+    // RDD/GPU processes query local capability and can use the accelerator connections in their sandbox.
+    return (nvmtl_is_chromium_gpu_process() || nvmtl_is_gecko_decoder_process())
+        && nvmtl_sandbox_decoder_bridge_available(me);
 }
 static void nvmtl_nvdec_register(void)
 {
@@ -621,6 +620,7 @@ static void nvmtl_nvencvt_register(void)
     static dispatch_once_t once;
     dispatch_once(&once, ^{
         const char *me = getprogname();
+        if (!me || !strcmp(me, "WindowServer")) return;
         const char *sel = getenv("NVMTL_NVENCVT");
         if (!sel || !*sel || !strcmp(sel, "0")) return;
         if (strcmp(sel, "1")) {                      // a process list, so one app can be moved over at a time
@@ -629,12 +629,18 @@ static void nvmtl_nvencvt_register(void)
             for (char *t = strtok(list, ", :"); t && !named; t = strtok(NULL, ", :")) named = !strcmp(t, me);
             if (!named) return;
         }
-        if (!strcmp(me, "WindowServer")) return;     // the codec registrars all stay out of it
         if (!nvmtl_video_has_codecs()) return;
-        // Match the built-in decoder policy for the addon too. Registering its
-        // decoder factories in native sandboxed players bypassed service
-        // delegation on Ada/TU117 and could reintroduce the QuickTime freeze.
-        unsigned scope = nvmtl_nvencvt_scope(me, nvmtl_can_register_decoder(me));
+        unsigned scope;
+        if (!strcmp(me, "com.apple.WebKit.GPU")) {
+            // WebKit queries VP9 hardware support in its own GPU process.
+            // The optional helper admits this addon through its normal signing and mapping checks.
+            const char *enabled = getenv("NVMTL_WEBKIT_NVDEC");
+            if (!enabled || strcmp(enabled, "1") || getenv("NVMTL_NO_NVDEC")
+                || !nvmtl_sandbox_decoder_bridge_available(me)) return;
+            scope = 1u;
+        } else {
+            scope = nvmtl_nvencvt_scope(me, nvmtl_can_register_decoder(me));
+        }
         if (!scope) return;
         Dl_info di;
         if (!dladdr((const void *)nvmtl_nvencvt_register, &di) || !di.dli_fname) { nvlog("nvencvt: dladdr failed - not registering"); return; }
