@@ -87,6 +87,7 @@ public:
     IOMemoryMap *fSurfMap = new IOMemoryMap{original.data(), original.size()};
     IOLock lock;
     IOLock *fRamLock = &lock;
+    bool fPanelSleeping = false;
     nmintelfb::FrameGate fFrameGate;
     IOBufferMemoryDescriptor *fRam[2] = {};
     IOMemoryMap *fRamMap[2] = {};

@@ -10,9 +10,9 @@ the idle nubs). nvfbbootretry=0 turns it off. The policy is compiled from nvrm-f
 import pathlib, subprocess, tempfile
 root = pathlib.Path(__file__).resolve().parents[1]
 src = (root / 'kexts/NVRMFB/fb/nvrm-fb.cpp').read_text()
-for need in ['PE_parse_boot_argn("nvfbbootretry"', 'gNDpy == 0 && gBootRetry < kNvrmBootRetries', 'nvrmBootRetryDelayMs(gBootRetry++)', 'if (gNDpy == 0 && n > 0)']:
-    assert need in src, need
-assert src.index('static unsigned gBootRetry') < src.index('gBootRetry = off ?'), 'declared after use'
+for snippet in ['PE_parse_boot_argn("nvfbbootretry"', 'gBootRetry = 1; hotplugKick(nvrmBootRetryDelayMs(0))',
+                'displayCount ? 0 : nvrmBootRetryDelayMs(gBootRetry)', 'if (retryDelay) ++gBootRetry;']:
+    assert snippet in src, snippet
 fixture = r'''
 #include <cassert>
 #include <cstdio>

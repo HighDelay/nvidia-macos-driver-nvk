@@ -26,14 +26,21 @@ check('the predicate exists in NVRM.cpp', src.count(head) == 1, src.count(head))
 start = src.index(head)
 body = src[start:src.index('\n}\n', start) + 3]
 
-placed = src.index('LOG("bar1: PLACED')
-call = src.find('nvrmConsoleLostByMove(con, fwBar1, fwBar1Size, bar1Base, bar1Size, verbose)', placed)
-check('placeLargeBar1 asks the predicate right after PLACED', 0 < call - placed < 600, call - placed)
-check('the console is silenced with kPEDisableScreen there',
-      src.find('setConsoleInfo(0, kPEDisableScreen)', call) - call < 200 if call > 0 else False)
+setup = src[src.index('PE_Video console = {};', src.index('bool NVRM::placeLargeBar1()')):]
+call = setup.index('nvrmConsoleLostByMove(')
+disable = setup.index('setConsoleInfo(nullptr, kPEDisableScreen)')
+writes = setup.index('fPCI->configWrite16(0x04, cmd & ~0x2)')
+placed = setup.index('LOG("bar1: PLACED')
+check('the old console is disabled before the PCI aperture moves', call < disable < writes)
+check('the verified BAR values precede creation of the new console target',
+      placed < setup.index('startVerboseConsole(console, fwBar1, fwBar1Size, bar1Base, bar1Size)'))
 check('the firmware size is kept before any resize',
       src.index('const UInt64 fwBar1Size = bar1Size;') < src.index('    UInt64 newSize = 0;\n    if (smallBar) {'))
-check('verbose is read from the -v boot argument', 'PE_parse_boot_argn("-v", vb, sizeof vb)' in src[placed:placed + 900])
+check('verbose is read from the -v boot argument', 'PE_parse_boot_argn("-v", verbose, sizeof verbose)' in setup)
+rm_init = src.index('NvBool ok = rm_init_adapter(NULL, nv)')
+check('the copier drops the initial window before RM and checks the reservation after RM',
+      src.index('fConsole->pause();', src.index('IOReturn NVRM::go(')) < rm_init <
+      src.index('fConsole->afterRm(nv, ok);', rm_init))
 
 prog = '#include <stdio.h>\n#include <stdlib.h>\n' + body + r'''
 int main(int c, char **v) {

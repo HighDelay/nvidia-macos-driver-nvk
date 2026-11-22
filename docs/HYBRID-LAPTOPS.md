@@ -201,18 +201,12 @@ per-process GPU-time figure is not published by the accelerator and is an open f
 
 ## Idle power-down
 
-The opt-in D3cold monitor (boot-args `nvrtd3=1` and `nvrtd3res=<ACPI path>`, `kexts/NVRM/nv_rtd3.cpp`) powers the GPU's
-power resource off after 60 s with no lit head and no client. On a hybrid laptop it now counts the right things:
-
-- Clients include the user clients of the accelerator, where every Metal application attaches (before, only clients of the
-  resource-manager service were counted, so a running app looked like an idle GPU).
-- Framebuffers include the NVIDIA GPU's own outputs (the check used a class name that matches nothing) and, with
-  `nmhybrid` on, the other GPU's panel, because then the NVIDIA GPU draws the desktop and is never idle.
-
-So the combinations are: `nmhybrid` off plus `nvrtd3=1`: the integrated GPU draws the desktop, the NVIDIA GPU powers off
-after 60 s without a Metal application and powers on when one starts. `nmhybrid` on: the GPU stays on, with or without
-`nvrtd3`. Not measured on hardware: the wake latency of the first Metal application, and whether the power resource path
-is right for a given laptop (the 1401 scan reports the candidates).
+Use `nvrtd3=1` and `nvrtd3res=<ACPI path>` with a known firmware power
+resource for the NVIDIA GPU. The GPU is eligible after 60 seconds without a
+framebuffer or rendering client. Open Intel-panel bridges count as
+framebuffer users, and the AMD panel option keeps the NVIDIA GPU powered.
+A new app open or system wake evaluates `_ON` before restoring the GPU.
+Live laptop testing is required to qualify the firmware path and wake latency.
 
 ## Mux switching (Advanced Optimus)
 
@@ -337,10 +331,11 @@ transaction of the bring-up (EDID, DPCD and link training included) and checks t
 for versions 12 and 13. `nm_hybrid_heads.h` is the framebuffer lifecycle for any number of heads sharing the device (create, bring up, publish; unpublish,
 take down, release; replug during teardown; stop order), tested in `tools/test_hybrid_heads.c`.
 
-With the boot-arg `nmhybridext=1` (versions 12 and 13) the panel driver runs this for real: when a cable is plugged into a Type-C port it allocates a
-1920x1080 buffer, maps it into free graphics-table entries, brings the display up on a free pipe, fills it with colour bars, and takes everything down
-on unplug and when the driver stops. This lights a monitor for a tester without touching the window system. Log lines start with
-`hybrid: external head on Type-C port N`.
+With `nmhybridext=1` on display versions 12 and 13, the optional Intel panel
+driver can bring up one compatible DisplayPort Alt Mode output at a time.
+It maps a test buffer into unused graphics-table entries, selects a free
+pipe and displays color bars. Unplugging or stopping the driver takes the
+test output down. See the [optional Intel panel guide](INTEL-PANEL.md#experimental-wake-and-type-c).
 
 What is not built, and why. (1) Publishing the head to the window system: the NVIDIA accelerator has five framebuffer slots (four NVIDIA heads and the
 panel at index 4), and its pipe count is exposed to the system as five; an external head needs the count raised and per-head state added, which changes the

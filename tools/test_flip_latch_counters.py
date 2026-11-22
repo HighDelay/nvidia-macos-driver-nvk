@@ -14,11 +14,6 @@ import tempfile
 
 root = pathlib.Path(__file__).resolve().parents[1]
 source = (root / 'kexts/NVRMFB/fb/nvrm-fb.cpp').read_text()
-safety = (root / 'kexts/NVRMFB/fb/nvrm-fb-safety.h').read_text()
-m0 = safety.index('static inline int nvrmFlipLatchMode')
-latch_mode = safety[m0:safety.index('\n}\n', m0) + 3]   # the shipped rate rule, run as is
-
-
 def lift_body(name):
     """The body of a single-level member function, by its definition line."""
     start = source.index(name)
@@ -32,14 +27,14 @@ def lift_body(name):
 
 
 # the latch region of submitConfig: from the gate to the fault at its end
-start = source.index('if (bootstrap || !gFlipLatch) return NV_TRUE;')
+start = source.index('if (bootstrap || (!gFlipLatch && !surround)) return NV_TRUE;')
 end = source.index('fSubmissionFaulted = true; return NV_FALSE;', start)
 end = source.index('\n', end)
 region = source[start:end]
 # the prior-completion wait that precedes a new submit (the if block's body, closing brace included)
 sc = source.index('NvBool NVRMNVDAFramebuffer::submitConfig(')
 p0 = source.index('if (fSubmissionSeen) {', sc) + len('if (fSubmissionSeen) {')
-p1 = source.index('    const bool tracked', p0)
+p1 = source.index('    NvU32 submissionHeads = 0;', p0)
 prior_region = source[p0:p1]
 # the event-woken wait, lifted whole so the test runs the shipped loop
 w0 = source.index('static IORecursiveLock *sFlipWaitLock;')
@@ -79,6 +74,7 @@ fixture = r'''
 #include <cassert>
 #include <cstdint>
 #include <cstdio>
+#include <initializer_list>
 using NvU32=uint32_t; using SInt32=int32_t; using NvBool=bool;
 enum { NV_TRUE=1, NV_FALSE=0, NVKMS_KAPI_LAYER_PRIMARY_IDX=0 };
 enum NvKmsFlipResult { NV_KMS_FLIP_RESULT_SUCCESS = 0, NV_KMS_FLIP_RESULT_INVALID_PARAMS, NV_KMS_FLIP_RESULT_IN_PROGRESS };
@@ -114,8 +110,6 @@ static bool presentStatsNote(unsigned, uint64_t, bool, bool, bool, uint32_t) { r
 static int gFlipLatch = 1;
 static int gFlipLatchWaits = 0, gFlipLatchTimeouts = 0, gFlipLatchMaxUs = 0, gFlipLatchLate = 0;
 static int gFlipLatchDeferred = 0;
-static int gFlipLatchAuto = 1;
-LATCH_MODE
 STUCK_LINE
 enum Mode { COMPLETE, STUCK, FAIL, LATE };
 struct Kms {
@@ -131,7 +125,10 @@ struct NvKmsKapiDisplayModeTimings { uint32_t pixelClockHz=0,hTotal=0,vTotal=0; 
 struct Rep { NvKmsFlipResult flipResult = NV_KMS_FLIP_RESULT_SUCCESS; };
 struct FB {
     Kms *fKms=nullptr; void *fDev=this; unsigned fHead=0; bool fSubmissionFaulted=false, fSubmissionSeen=false;
-    struct { bool owned() const { return true; } } fPrimaryGate;
+    struct { bool owned() const { return true; } } gate;
+    auto &primaryGate() { return gate; }
+    NvU32 fSubmissionHeads = 0;
+    bool surround = false;
     uint64_t fFlipSubmitAbs = 0; unsigned fLatchLateLogs = 0;
     int faultLogs = 0; const char *faultWhy = "";
     void flipFaultLog(const char *why) { faultLogs++; faultWhy = why; }
@@ -161,20 +158,20 @@ WAIT_REGION
         return NV_TRUE; // control's path when it falls through (never reached in fixed region)
     }
 };
-static void reset() { gFlipLatchWaits = gFlipLatchTimeouts = gFlipLatchMaxUs = gFlipLatchLate = gFlipLatchDeferred = 0; gFlipLatch = 1; gFlipLatchAuto = 1; gSleeps = 0; gLongestSleep = 0; }
+static void reset() { gFlipLatchWaits = gFlipLatchTimeouts = gFlipLatchMaxUs = gFlipLatchLate = gFlipLatchDeferred = 0; gFlipLatch = 1; gSleeps = 0; gLongestSleep = 0; }
 int main() {
     // Deferred (debug.nvrmfb_flip_latch=2, #300): the submit returns without waiting; the next submit verifies the flip.
     { Kms k; k.mode=COMPLETE; FB f; f.fKms=&k; f.mode(148500000, 2200, 1125); reset(); gFlipLatch = 2;
       assert(f.waitComplete(false, true) == NV_TRUE);
       assert(gFlipLatchDeferred == 1 && gFlipLatchWaits == 0 && gSleeps == 0 && "deferred mode must not wait for the flip"); }
-    // From 357 Hz a latch setting of 1 runs as 2 (the wait would cost a third of the frame); below it, and with the automatic
-    // switch off, the synchronous wait stays.
-    { Kms k; k.mode=COMPLETE; FB f; f.fKms=&k; f.mode(1199880000, 2000, 1111); reset();
-      assert(f.waitComplete(false, true) == NV_TRUE);
-      assert(gFlipLatchDeferred == 1 && gFlipLatchWaits == 0 && "540 Hz: the flip is verified by the next submit, not waited for"); }
-    { Kms k; k.mode=COMPLETE; FB f; f.fKms=&k; f.mode(1199880000, 2000, 1111); reset(); gFlipLatchAuto = 0;
-      assert(f.waitComplete(false, true) == NV_TRUE);
-      assert(gFlipLatchWaits == 1 && gFlipLatchDeferred == 0 && "540 Hz with the automatic switch off keeps the synchronous wait"); }
+    // Grouped surfaces are kept until every head completes, including with
+    // the ordinary single-head bypass and deferred options selected.
+    for (const int selection : {0, 2}) {
+        Kms k; FB f; f.fKms=&k; f.mode(148500000, 2200, 1125); reset();
+        f.surround = true; gFlipLatch = selection;
+        assert(f.waitComplete(false, true) == NV_TRUE);
+        assert(gFlipLatchWaits == 1 && gFlipLatchDeferred == 0);
+    }
     { Kms k; k.mode=COMPLETE; FB f; f.fKms=&k; f.mode(405000000, 2200, 1115); reset();
       assert(f.waitComplete(false, true) == NV_TRUE);
       assert(gFlipLatchWaits == 1 && gFlipLatchDeferred == 0 && "165 Hz still waits for every flip"); }
@@ -259,7 +256,7 @@ int main() {
 def build_and_run(region_text):
     src = (fixture.replace('WAIT_REGION', region_text).replace('PRIOR_REGION', prior_region)
            .replace('STATICS', statics).replace('WAITER', body).replace('VBL_BODY', vbl_body)
-           .replace('WAIT_US_BODY', wait_us_body).replace('PRIOR_BODY', prior_body).replace('STUCK_LINE', stuck_line).replace('LATCH_MODE', latch_mode))
+           .replace('WAIT_US_BODY', wait_us_body).replace('PRIOR_BODY', prior_body).replace('STUCK_LINE', stuck_line))
     with tempfile.TemporaryDirectory() as d:
         cpp = pathlib.Path(d) / 'tc.cpp'; binp = pathlib.Path(d) / 'tc'
         cpp.write_text(src)
@@ -289,8 +286,3 @@ for needle in ('us since its submit', 'latch waits %d timeouts %d late %d max %d
 assert source.count('presentation blocked') == 1, 'a head fault logs outside flipFaultLog'
 print('head-fault line: carries time since submit and the latch counters')
 print('PASS')
-rate_control = region.replace('    if (nvrmFlipLatchMode(gFlipLatch, gFlipLatchAuto, flipWaitUs() * 800ull) == 2) { OSIncrementAtomic((volatile SInt32 *)&gFlipLatchDeferred); return NV_TRUE; }\n', '')
-assert rate_control != region
-r = build_and_run(rate_control)
-assert r.returncode != 0, 'negative control passed -- the test does not detect a missing high-refresh deferral'
-print('negative control (no deferral at 540 Hz): FAILS as required')

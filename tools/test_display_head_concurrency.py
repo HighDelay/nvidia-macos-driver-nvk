@@ -29,10 +29,10 @@ waiter = method('bool NVRMNVDAFramebuffer::waitFlipDone(').replace('NVRMNVDAFram
 wake = method('void NVRMNVDAFramebuffer::flipWake(').replace('void NVRMNVDAFramebuffer::', 'static void ')
 for name in ('reflip', 'setHeadActive', 'applyMode', 'switchMode', 'flipToMemory', 'headOff', 'setHeadPower', 'nvrmSetGamma'):
     body = method('NVRMNVDAFramebuffer::' + name + '(')
-    assert 'NVRMHeadGate primary(startLock(), fPrimaryGate,' in body, name
+    assert 'NVRMHeadGate primary(startLock(), primaryGate(),' in body, name
     assert 'primary.valid()' in body, name
 for name in ('cursorApply', 'setCursorImage'):
-    assert 'NVRMHeadGate::waitForCursor(startLock(), fPrimaryGate);' in method('NVRMNVDAFramebuffer::' + name + '(')
+    assert 'NVRMHeadGate::waitForCursor(startLock(), primaryGate());' in method('NVRMNVDAFramebuffer::' + name + '(')
 stop = method('NVRMNVDAFramebuffer::stop(')
 assert stop.index('fStopping = 1;') < stop.index('NVRMHeadGate primary(') < stop.index('unregisterVblankIntrCallback')
 assert stop.index('NVRMHeadGate primary(') < stop.index('while (OSAddAtomic(0, &fCursorOutstanding))')
@@ -52,8 +52,9 @@ fixture = r'''
 using Clock = std::chrono::steady_clock;
 using SInt32 = int32_t;
 using NvBool = bool;
+using NvU32 = uint32_t;
 using event_t = void *;
-enum { THREAD_UNINT = 0, kMicrosecondScale = 1000, NVKMS_KAPI_LAYER_PRIMARY_IDX = 0, NV_TRUE = 1 };
+enum { THREAD_UNINT = 0, kMicrosecondScale = 1000, NVKMS_KAPI_LAYER_PRIMARY_IDX = 0, NV_TRUE = 1, NV_FALSE = 0 };
 static void *IOThreadSelf() { static thread_local char identity; return &identity; }
 struct IORecursiveLock {
     std::mutex mutex;
@@ -118,6 +119,9 @@ struct Kms {
 struct FB {
     Kms *fKms; void *fDev = this; unsigned fHead;
     NVRMHeadGateState fPrimaryGate;
+    NVRMHeadGateState *group = nullptr;
+    NvU32 fSubmissionHeads = 0;
+    NVRMHeadGateState &primaryGate() { return group ? *group : fPrimaryGate; }
     FB(Kms &kms, unsigned head) : fKms(&kms), fHead(head) {}
     WAKE
     WAITER
@@ -130,6 +134,35 @@ static void finish(Kms &kms, unsigned head) {
     kms.pending[head] = false; FB::flipWake(head);
 }
 int main() {
+    // Both grouped heads retain the same reservation until all scanouts finish.
+    {
+        Kms kms; FB heads[] = {{kms, 0}, {kms, 1}};
+        NVRMHeadGateState group;
+        heads[0].group = heads[1].group = &group;
+        heads[0].fSubmissionHeads = 3;
+        std::atomic<bool> submitted{false}, completed{false}, waitedOnSecond{false};
+        std::thread flip([&] {
+            Management hold;
+            NVRMHeadGate primary(startLock(), heads[0].primaryGate(), false);
+            kms.pending[0] = kms.pending[1] = true;
+            submitted = true;
+            assert(heads[0].waitFlipDone(1000000));
+            assert(!kms.pending[0] && !kms.pending[1]);
+            completed = true;
+        });
+        await([&] { return submitted.load(); });
+        finish(kms, 0);
+        std::thread disconnect([&] {
+            Management hold;
+            waitedOnSecond = true;
+            NVRMHeadGate transition(startLock(), heads[1].primaryGate(), true);
+            assert(completed);
+        });
+        await([&] { return waitedOnSecond.load(); });
+        assert(!completed);
+        finish(kms, 1);
+        flip.join(); disconnect.join();
+    }
     // A secondary flip and a cursor can proceed while the first head waits.
     // A same-head mode change cannot reuse that head until completion.
     {

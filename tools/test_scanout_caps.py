@@ -37,6 +37,7 @@ struct Kms {
         if(index>=modes.size())return -1;*mode=modes[index];*valid=true;*pref=index==0;return 1;
     }
 };
+static unsigned gSurroundMask = 0;
 struct NVRMNVDAFramebuffer {
     Kms *fKms=nullptr;void *fDev=this;unsigned fDisplay=1,fIndex=0;
     NvU32 fW=0,fH=0,fScalerMaxW=0,fScalerMaxH=0,fRasterMaxW=0;
@@ -73,6 +74,14 @@ int main() {
     NVRMNVDAFramebuffer h;h.fKms=&one;h.fW=2560;h.fH=1440;h.fSize=2560ull*1440*4;
     h.computeScanoutCaps(256);
     assert(h.fScalerMaxW==2560 && h.fScalerMaxH==1440 && h.fRasterMaxW==2560);
+    const auto single = h.fAllocSize;
+    gSurroundMask = 3;
+    h.computeScanoutCaps(256);
+    assert(h.fAllocSize >= 7680ull * 4 * 1440);
+    h.fIndex = 1;
+    h.computeScanoutCaps(256);
+    assert(h.fAllocSize == single);
+    gSurroundMask = 0;
 
     // empty/unreadable mode list: fall back to one step up from the boot raster, not zero
     NVRMNVDAFramebuffer e;Kms none;e.fKms=&none;e.fW=1920;e.fH=1080;e.fSize=1920ull*1080*4;

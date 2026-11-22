@@ -40,6 +40,11 @@ jobs:
             test_device_refusal.py test_hybrid_fb_dependent_id.py \
             test_install_weg_gfxrst.py test_nvrmfb_connect_owed.py \
             test_nvrmfb_hotplug_lifecycle.py test_scanout_reserve.py \
+            test_fb_hotplug_nub_parent.py test_fb_hotplug_poll.py test_fb_boot_retry.py \
+            test_fb_surround_plan.py test_fb_surround_wiring.py test_display_head_concurrency.py test_flip_latch_counters.py \
+            test_nv_rtd3_policy.py test_bar1_console_move.py test_hybrid_dmc.c \
+            test_hybrid_resume.c test_hybrid_resume14.c test_hybrid_resume20.c \
+            test_hybrid_tc.c test_hybrid_extmode.c test_hybrid_heads.c \
             test_scanout_caps.py test_stream_uncached.py test_ws_mark_once.py \
             test_yuv422_default.py test_yuv422.c test_copy_null_image.py test_utilization_hang.py \
             test_security_hardening.py test_submission_copies.py \

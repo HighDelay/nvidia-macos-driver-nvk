@@ -1,5 +1,21 @@
 # Retained fork changes for upstream merges
 
+## Runtime power and display backports
+
+Keep the runtime D3cold opt-in tied to native framebuffer and user-client
+admission. Serialize the ACPI transition with system power changes and require
+confirmed `_ON` before PCI restoration on a runtime-cold GPU. Keep the
+combined Surround surface and every member head under one reservation until
+completion. Preserve member audio, native DVI RGB8 and individual-mode recovery.
+The hot-plug scanner can reach idle nubs after a zero-display boot. Periodic
+scans remain opt-in. The verbose console's RAM copy pauses across RM's BAR1
+transition and ends before the framebuffer hands off to WindowServer.
+
+Keep the advanced Intel features behind their boot arguments. Their register
+writes share the existing RAM scanout lock. Drain queued work before replacing
+the mappings. Preserve the optional installer default and the fork's panel
+adoption, linked accelerator, brightness and startup recovery.
+
 ## AMD muxless panel presentation
 
 Keep the optional NMGopFB installer choice default-off. With `nmhybrid=1`,

@@ -45,9 +45,7 @@ static inline int nv_rtd3_clients_total(int rm_clients, int accel_clients) { ret
 /* The GPU must not be touched while its resource is off: 1 when a register access or an RM call is allowed */
 static inline int nv_rtd3_gpu_reachable(const struct nv_rtd3 *s) { return s->state == NV_RTD3_ON; }
 
-/* Record the result of the _OFF / _ON evaluation. A failed _OFF leaves the GPU on; a failed _ON leaves it marked off so
- * nothing touches it, and the caller reports the error. */
-static inline void nv_rtd3_off_done(struct nv_rtd3 *s, int ok) { if (ok) s->state = NV_RTD3_OFF; }
+/* A failed _ON leaves the GPU marked off so callers avoid touching it. */
 static inline void nv_rtd3_on_done(struct nv_rtd3 *s, int ok) { if (ok) s->state = NV_RTD3_ON; }
 
 /* What the monitor needs from the driver, so a host test can drive the same sequence with fakes. */
@@ -55,35 +53,46 @@ struct nv_rtd3_ops {
     void *ctx;
     int  (*heads_lit)(void *ctx);   /* a framebuffer exists for this GPU */
     int  (*clients)(void *ctx);     /* user clients are attached */
-    void (*suspend)(void *ctx);     /* the driver's system-sleep path: NVKMS, RM standby */
-    void (*resume)(void *ctx);      /* the driver's wake path: RM resume, NVKMS */
+    int  (*suspend)(void *ctx);     /* successful NVKMS suspend and RM standby */
+    int  (*resume)(void *ctx);      /* successful RM and NVKMS resume */
     int  (*acpi_off)(void *ctx);    /* power resource _OFF, 1 on success */
     int  (*acpi_on)(void *ctx);     /* power resource _ON, 1 on success */
 };
 
-enum { NV_RTD3_TICK_NONE = 0, NV_RTD3_TICK_POWERED_OFF = 1, NV_RTD3_TICK_OFF_FAILED = -1, NV_RTD3_TICK_WOKE = 2, NV_RTD3_TICK_WAKE_FAILED = -2 };
+enum {
+    NV_RTD3_TICK_NONE, NV_RTD3_TICK_POWERED_OFF, NV_RTD3_TICK_WOKE,
+    NV_RTD3_TICK_OFF_FAILED = -1, NV_RTD3_TICK_WAKE_FAILED = -2,
+    NV_RTD3_TICK_SUSPEND_FAILED = -3, NV_RTD3_TICK_RESUME_FAILED = -4,
+};
+
+static inline int nv_rtd3_wake(struct nv_rtd3 *s, const struct nv_rtd3_ops *o, unsigned *idle_s)
+{
+    *idle_s = 0;
+    if (s->state == NV_RTD3_ON) return NV_RTD3_TICK_NONE;
+    int ok = o->acpi_on(o->ctx);
+    nv_rtd3_on_done(s, ok);
+    if (!ok) return NV_RTD3_TICK_WAKE_FAILED;
+    return o->resume(o->ctx) ? NV_RTD3_TICK_WOKE : NV_RTD3_TICK_RESUME_FAILED;
+}
 
 /* One poll. `idle_s` is the seconds the GPU has been idle, kept by the caller; `period_s` is the seconds this tick stands for.
  * Idle long enough: suspend the driver, then switch the resource off; if that fails the driver is resumed at once and the
  * GPU stays on. Off and something wants the GPU: switch the resource on first, resume only after it. */
 static inline int nv_rtd3_tick(struct nv_rtd3 *s, const struct nv_rtd3_ops *o, unsigned *idle_s, unsigned period_s)
 {
+    if (!s->enabled || !s->have_resource) return NV_RTD3_TICK_NONE;
     int busy = o->heads_lit(o->ctx) || o->clients(o->ctx);
     if (s->state == NV_RTD3_ON) {
         if (busy) { *idle_s = 0; return NV_RTD3_TICK_NONE; }
-        *idle_s += period_s;
+        if (*idle_s < NV_RTD3_IDLE_SECONDS) *idle_s += period_s;
         if (!nv_rtd3_may_power_off(s, 1, 0, 0, *idle_s)) return NV_RTD3_TICK_NONE;
-        o->suspend(o->ctx);
-        int ok = o->acpi_off(o->ctx);
-        nv_rtd3_off_done(s, ok);
-        if (!ok) { o->resume(o->ctx); *idle_s = 0; return NV_RTD3_TICK_OFF_FAILED; }
-        return NV_RTD3_TICK_POWERED_OFF;
+        if (!o->suspend(o->ctx)) { *idle_s = 0; return NV_RTD3_TICK_SUSPEND_FAILED; }
+        // A failing AML method can already have changed power. Require _ON
+        // before RM touches the GPU after any attempted _OFF.
+        s->state = NV_RTD3_OFF;
+        if (o->acpi_off(o->ctx)) return NV_RTD3_TICK_POWERED_OFF;
+        const int recovery = nv_rtd3_wake(s, o, idle_s);
+        return recovery == NV_RTD3_TICK_WOKE ? NV_RTD3_TICK_OFF_FAILED : recovery;
     }
-    if (!busy) return NV_RTD3_TICK_NONE;
-    int ok = o->acpi_on(o->ctx);
-    nv_rtd3_on_done(s, ok);
-    if (!ok) return NV_RTD3_TICK_WAKE_FAILED;
-    o->resume(o->ctx);
-    *idle_s = 0;
-    return NV_RTD3_TICK_WOKE;
+    return busy ? nv_rtd3_wake(s, o, idle_s) : NV_RTD3_TICK_NONE;
 }

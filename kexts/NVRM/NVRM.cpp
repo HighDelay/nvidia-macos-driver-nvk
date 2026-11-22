@@ -12,6 +12,9 @@
 #include "nvrm_aspm.h"
 #include "nvrm_shutdown_plan.h"
 #include "nvrm_ddc_abi.h"
+#include "nv_rtd3_demand.h"
+#include "nv_rtd3_policy.h"
+#include "nvrm_console_abi.h"
 
 extern "C" int nvrm_ddc_transfer(struct NVRMDdcRequest *);
 extern "C" int nvrm_edp_backlight(struct NVRMEdpBacklightRequest *);
@@ -64,6 +67,8 @@ __private_extern__ int _kext_apple_cc = __APPLE_CC__;
 }
 
 #define LOG(fmt, ...) do { kprintf("NVRM-xnu: " fmt "\n", ##__VA_ARGS__); IOLog("NVRM-xnu: " fmt "\n", ##__VA_ARGS__); } while (0)
+
+#include "nvrm-console.inc"
 
 // Longest a utilization firmware read may take before it counts as hung (chosen by us: two orders above a control
 // round trip, an order below the firmware's own timeout); the read's real duration is logged when it trips.
@@ -124,6 +129,7 @@ public:
     static void bootHoldCap(thread_call_param_t p0, thread_call_param_t p1);
     void releaseBootHold(const char *why);
     void snapshotBootScreen();
+    bool consoleFirmwareBase(NvU64 *base);
     void measureBootRaster();
     int fBootHead = -1; uint32_t fBootPclk = 0, fBootHt = 0, fBootVt = 0;
     static void headWatch(void *p0, wait_result_t w);
@@ -143,6 +149,9 @@ public:
     virtual IOReturn setPowerState(unsigned long ordinal, IOService *device) override;
     void systemWillShutdown(IOOptionBits specifier) override;
 private:
+    NvrmBootConsole *fConsole = nullptr;
+    bool fConsolePhysLost = false;
+    void startVerboseConsole(const PE_Video &, UInt64 oldBase, UInt64 oldSize, UInt64 newBase, UInt64 newSize);
     // System sleep (S3). NVRM is a power child of the GPU's IOPCIDevice, so it is told to power off before the slot
     // loses power and to power on once IOPCIFamily has the device back in D0.
     enum { kGpuPmRunning = 0, kGpuPmSuspended = 1, kGpuPmLost = 2 };
@@ -165,8 +174,26 @@ private:
     void restoreShutdownBars();
     void enableAspmL1();
     void restoreAspm();
-    void gpuSuspend();
-    void gpuResume();
+    bool gpuSuspend(bool runtime = false);
+    bool gpuResume();
+    void rtd3Prepare();
+    void rtd3Arm();
+    void rtd3Stop();
+    static void rtd3Poll(thread_call_param_t, thread_call_param_t);
+    bool rtd3Resource(const char *method);
+    bool rtd3HasClients();
+    IOReturn rtd3Demand(uintptr_t operation);
+    nv_rtd3_ops rtd3Ops();
+    IOLock *fRtd3Lock = nullptr;
+    thread_call_t fRtd3Call = nullptr;
+    IOACPIPlatformDevice *fRtd3Acpi = nullptr;
+    char fRtd3Resource[96] = {};
+    nv_rtd3 fRtd3 = {};
+    unsigned fRtd3Idle = 0;
+    unsigned fRtd3Users = 0;
+    unsigned fRtd3Polls = 0;
+    bool fRtd3Sleeping = false;
+    bool fRtd3Stopping = false;
     void pciSaveForSleep();
     bool pciRestoreAfterWake();
     bool gpuAnswers();
@@ -207,6 +234,7 @@ SYSCTL_QUAD(_debug, OID_AUTO, nvrm_evt_waits, CTLFLAG_RD, (int64_t *)&gNvEvtWait
 static IOLock  *gNvPmGate;
 static int      gNvPmUsers;
 static bool     gNvPmClosed;
+static bool     gNvPmRuntimeClosed;
 static thread_t gNvPmOwner;
 static SInt64   gNvPmWaited;
 SYSCTL_QUAD(_debug, OID_AUTO, nvrm_pm_waited, CTLFLAG_RD, &gNvPmWaited, "RM calls that waited for a GPU resume");
@@ -216,7 +244,12 @@ extern "C" int nv_xnu_pm_enter(void)
     IOLockLock(gNvPmGate);
     if (gNvPmClosed) {
         OSIncrementAtomic64(&gNvPmWaited);
-        while (gNvPmClosed) IOLockSleep(gNvPmGate, &gNvPmClosed, THREAD_UNINT);
+        while (gNvPmClosed && !nv_xnu_pm_runtime_closed())
+            IOLockSleep(gNvPmGate, &gNvPmClosed, THREAD_UNINT);
+        if (nv_xnu_pm_runtime_closed()) {
+            IOLockUnlock(gNvPmGate);
+            return -1;
+        }
     }
     gNvPmUsers++;
     IOLockUnlock(gNvPmGate);
@@ -224,7 +257,7 @@ extern "C" int nv_xnu_pm_enter(void)
 }
 extern "C" void nv_xnu_pm_exit(int counted)
 {
-    if (!counted || !gNvPmGate) return;
+    if (counted <= 0 || !gNvPmGate) return;
     IOLockLock(gNvPmGate);
     if (--gNvPmUsers == 0 && gNvPmClosed) IOLockWakeup(gNvPmGate, &gNvPmUsers, false);
     IOLockUnlock(gNvPmGate);
@@ -243,18 +276,30 @@ static bool nv_xnu_pm_try_enter(int *counted)
     return ready;
 }
 // Close the gate and wait up to waitMs for the calls already inside RM. Returns how many were still inside.
-static int nv_xnu_pm_close(uint32_t waitMs)
+extern "C" bool nv_xnu_pm_runtime_closed(void)
+{
+    return __atomic_load_n(&gNvPmRuntimeClosed, __ATOMIC_ACQUIRE);
+}
+static int nv_xnu_pm_close(uint32_t waitMs, bool runtime = false)
 {
     if (!gNvPmGate) return 0;
     uint64_t deadline; clock_interval_to_deadline(waitMs, kMillisecondScale, &deadline);
     IOLockLock(gNvPmGate);
     gNvPmClosed = true;
+    __atomic_store_n(&gNvPmRuntimeClosed, runtime, __ATOMIC_RELEASE);
     gNvPmOwner = current_thread();
     while (gNvPmUsers > 0)
         if (IOLockSleepDeadline(gNvPmGate, &gNvPmUsers, deadline, THREAD_UNINT) == THREAD_TIMED_OUT) break;
     const int left = gNvPmUsers;
     IOLockUnlock(gNvPmGate);
     return left;
+}
+static void nv_xnu_pm_drop_owner(void)
+{
+    if (!gNvPmGate) return;
+    IOLockLock(gNvPmGate);
+    gNvPmOwner = nullptr;
+    IOLockUnlock(gNvPmGate);
 }
 // System wake runs on another PM thread than the sleep that closed the gate: hand it the gate before RM and NVKMS
 // resume (nvKmsResume's RM calls waited at the gate on the wake thread until the 180 s wake watchdog panicked).
@@ -270,6 +315,7 @@ static void nv_xnu_pm_open(void)
     if (!gNvPmGate) return;
     IOLockLock(gNvPmGate);
     gNvPmClosed = false;
+    __atomic_store_n(&gNvPmRuntimeClosed, false, __ATOMIC_RELEASE);
     gNvPmOwner = NULL;
     IOLockWakeup(gNvPmGate, &gNvPmClosed, false);
     IOLockUnlock(gNvPmGate);
@@ -348,7 +394,9 @@ public:
     nv_state_t *nvState();
 protected:
     NVRM *fOwner = NULL;
+    bool startRmClient(IOService *provider);
 private:
+    NvrmRuntimeDemand fRuntimeDemand;
     nv_file_private_t fNvfp = {};
     // RM's pending mapping context for this fd (NVIDIA 620: RM allocates the node with os_alloc_mem and stores it here
     // through nv_acquire_file_va; at most one, a second is refused with NV_ERR_STATE_IN_USE). Freed in free().
@@ -583,7 +631,8 @@ static bool gRmInitDone = false;
 // about half a second. A GTX 1650 moved from 64 MB at 0xfff80000000 to 256 MB at 0x3ffa0000000 spent 247 s in
 // RmInitAdapter printing its register map, missed the settle + 120 s boot-hold cap, and reached the desktop with no
 // Metal device. The console is silenced at the move only in that case: a verbose boot whose console was inside the
-// old BAR1 and is not inside the new one. The framebuffer silences it at takeover anyway and never turns it back on.
+// old BAR1 and is not inside the new one. The RAM-backed console is started
+// only once the new PCI window has verified readback.
 static inline bool nvrmConsoleLostByMove(unsigned long long con, unsigned long long oldBase, unsigned long long oldSize,
                                          unsigned long long newBase, unsigned long long newSize, bool verbose)
 {
@@ -681,6 +730,11 @@ bool NVRM::start(IOService *provider)
     const bool bar1Placed = placeLargeBar1();
     fBar1Placed = bar1Placed;
     readBARs();
+    if (!fConsolePhysLost && !fConsole && nv->fb && getPlatform()) {
+        PE_Video video = {};
+        if (getPlatform()->getConsoleInfo(&video) == kIOReturnSuccess)
+            startVerboseConsole(video, nv->fb->cpu_address, nv->fb->size, nv->fb->cpu_address, nv->fb->size);
+    }
     {
         const char *nm = rm_get_device_name(nv->pci_info.device_id, nv->subsystem_vendor, nv->subsystem_id);
         if (nm && nm[0] && !nvrmNameIsUnknown(nm)) {
@@ -691,6 +745,12 @@ bool NVRM::start(IOService *provider)
             LOG("RM cannot name device 0x%04x (subsystem %04x:%04x) - publishing no model rather than a guess",
                 nv->pci_info.device_id, nv->subsystem_vendor, nv->subsystem_id);
         }
+    }
+    char nopm[8] = {};
+    const bool pmEnabled = !PE_parse_boot_argn("-nvrmnopm", nopm, sizeof nopm);
+    if (pmEnabled) {
+        if (!gNvPmGate) gNvPmGate = IOLockAlloc();
+        rtd3Prepare();
     }
     LOG("armed on %02x:%02x.%d %04x:%04x", bus, dev, fn, nv->pci_info.vendor_id, nv->pci_info.device_id);
     fPCI->setProperty("nvrm-claimed", kOSBooleanTrue);
@@ -741,12 +801,10 @@ bool NVRM::start(IOService *provider)
             { kIOPMPowerStateVersion1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 },
             { kIOPMPowerStateVersion1, kIOPMPowerOn | kIOPMDeviceUsable, kIOPMPowerOn, kIOPMPowerOn, 0, 0, 0, 0, 0, 0, 0, 0 },
         };
-        char nopm[8] = { 0 };
-        if (PE_parse_boot_argn("-nvrmnopm", nopm, sizeof nopm)) {
+        if (!pmEnabled) {
             setProperty("nvrm-pm", "off (-nvrmnopm)");
             LOG("power management OFF (-nvrmnopm): system sleep will lose the GPU");
         } else {
-            if (!gNvPmGate) gNvPmGate = IOLockAlloc();
             PMinit();
             fPCI->joinPMtree(this);
             registerPowerDriver(this, kNvrmPowerStates, 2);
@@ -874,6 +932,37 @@ void NVRM::snapshotBootScreen()
     fBootScreen = dst; fBootW = (uint32_t)v.v_width; fBootH = (uint32_t)v.v_height; fBootPitch = (uint32_t)v.v_rowBytes;
     LOG("boot screen: copied %ux%u pitch %u (%llu KB) from the console at 0x%llx in %llu ms", fBootW, fBootH, fBootPitch,
         size >> 10, phys, ns / 1000000);
+}
+
+void NVRM::startVerboseConsole(const PE_Video &video, UInt64 oldBase, UInt64 oldSize, UInt64 newBase, UInt64 newSize)
+{
+    char verbose[8];
+    if (fConsole || !fBootScreen || !oldBase || !newBase ||
+        !PE_parse_boot_argn("-v", verbose, sizeof verbose) ||
+        video.v_width != fBootW || video.v_height != fBootH || video.v_rowBytes != fBootPitch)
+        return;
+    const UInt64 address = video.v_baseAddr & ~3ull;
+    const UInt64 bytes = fBootScreen->getLength();
+    if (address < oldBase || !nvrmConsoleRangeFits(address - oldBase, bytes, oldSize) ||
+        !nvrmConsoleRangeFits(address - oldBase, bytes, newSize))
+        return;
+    fConsole = NvrmBootConsole::start(getPlatform(), video, newBase, address - oldBase, fBootScreen->getBytesNoCopy());
+    if (fConsole) setProperty("nvrm-console-copier", "firmware");
+}
+
+bool NVRM::consoleFirmwareBase(NvU64 *base)
+{
+    if (!fConsole || fPassDone >= 2) return false;
+    IOLockLock(fConsole->lock);
+    const bool valid = fConsole->active && !fConsole->offset && fNv.fb->cpu_address == fConsole->bar;
+    if (valid) *base = fConsole->bar;
+    IOLockUnlock(fConsole->lock);
+    return valid;
+}
+
+extern "C" bool nvrm_console_fw_base(nv_state_t *nv, NvU64 *base)
+{
+    return gNVRMService && nv == nv_xnu_gpu_state() && gNVRMService->consoleFirmwareBase(base);
 }
 
 static int gSmoothHead = -1; static uint32_t gSmoothPclk = 0, gSmoothHt = 0, gSmoothVt = 0;
@@ -1553,6 +1642,22 @@ bool NVRM::placeLargeBar1()
     LOG("bar1: placing BAR1 %llu MB @0x%llx, BAR3 %llu MB @0x%llx, root port window 0x%llx-0x%llx (was 0x%08x %08x/%08x)",
         bar1Size >> 20, bar1Base, bar3Size >> 20, bar3Base, bar1Base, winEnd, rp24, rp28, rp2c);
 
+    PE_Video console = {};
+    auto *platform = getPlatform();
+    char verbose[8];
+    const bool haveConsole = platform && platform->getConsoleInfo(&console) == kIOReturnSuccess;
+    const bool consoleMoves = haveConsole && nvrmConsoleLostByMove(console.v_baseAddr & ~3ull, fwBar1, fwBar1Size,
+        bar1Base, bar1Size, PE_parse_boot_argn("-v", verbose, sizeof verbose));
+    if (consoleMoves) platform->setConsoleInfo(nullptr, kPEDisableScreen);
+    const auto restoreConsole = [&] {
+        if (!consoleMoves) return;
+        const bool restored = fPCI->configRead32(0x14) == lo14 && fPCI->configRead32(0x18) == old18 &&
+            (fPCI->configRead16(0x04) & 0x2) && rp->configRead32(0x24) == rp24 &&
+            rp->configRead32(0x28) == rp28 && rp->configRead32(0x2c) == rp2c &&
+            (!newSize || fPCI->extendedConfigRead32(rbCtlOff) == rbCtlOld);
+        if (restored) platform->setConsoleInfo(nullptr, kPEEnableScreen);
+        else fConsolePhysLost = true;
+    };
     UInt16 cmd = fPCI->configRead16(0x04);
     fPCI->configWrite16(0x04, cmd & ~0x2);
     if (newSize) {   // PCIe 7.8.6: change the size only while memory decode is off
@@ -1561,7 +1666,9 @@ bool NVRM::placeLargeBar1()
         if (((got >> 8) & 0x3f) != (UInt32)(__builtin_ctzll(newSize) - 20)) {
             LOG("bar1: resize to %llu MB did not take (ctl 0x%x) — restoring", newSize >> 20, got);
             fPCI->extendedConfigWrite32(rbCtlOff, rbCtlOld); fPCI->configWrite32(0x14, lo14); fPCI->configWrite32(0x18, old18);
-            fPCI->configWrite16(0x04, cmd); return false;
+            fPCI->configWrite16(0x04, cmd);
+            restoreConsole();
+            return false;
         }
         LOG("bar1: resized BAR1 to %llu MB", newSize >> 20);
     }
@@ -1582,6 +1689,7 @@ bool NVRM::placeLargeBar1()
         if (newSize) fPCI->extendedConfigWrite32(rbCtlOff, rbCtlOld);
         fPCI->configWrite32(0x14, lo14); fPCI->configWrite32(0x18, old18); fPCI->configWrite32(0x1c, lo1c); fPCI->configWrite32(0x20, hi20);
         fPCI->configWrite16(0x04, cmd);
+        restoreConsole();
         return false;
     }
     fPCI->configWrite16(0x04, cmd | 0x2);
@@ -1591,15 +1699,10 @@ bool NVRM::placeLargeBar1()
                  lo14, old18, lo1c, hi20, rp24, rp28, rp2c };
     fPCI->setProperty("nvrm-bar1-placed", bar1Base, 64);
     LOG("bar1: PLACED — BAR1 %llu MB live at 0x%llx", bar1Size >> 20, bar1Base);
-    {
-        PE_Video pv; bzero(&pv, sizeof pv);
-        const UInt64 con = (getPlatform() && getPlatform()->getConsoleInfo(&pv) == kIOReturnSuccess) ? ((UInt64)pv.v_baseAddr & ~3ull) : 0;
-        char vb[8] = { 0 };
-        const bool verbose = PE_parse_boot_argn("-v", vb, sizeof vb);
-        if (nvrmConsoleLostByMove(con, fwBar1, fwBar1Size, bar1Base, bar1Size, verbose)) {
-            getPlatform()->setConsoleInfo(0, kPEDisableScreen);
-            LOG("bar1: verbose console at 0x%llx is no longer decoded after the move - silenced until the framebuffer takes over", con);
-        }
+    if (consoleMoves) {
+        fConsolePhysLost = true;
+        startVerboseConsole(console, fwBar1, fwBar1Size, bar1Base, bar1Size);
+        if (!fConsole) setProperty("nvrm-console-copier", "paused after BAR1 move");
     }
     return true;
 }
@@ -1788,7 +1891,9 @@ IOReturn NVRM::go(uint32_t pass)
         fIntSrc->enable();
         nv->interrupt_line = (NvU32)msi;
         LOG("MSI %d armed; calling rm_init_adapter() — GSP boot from inside macOS", msi);
+        if (fConsole) fConsole->pause();  // BAR1 may change meaning at any point inside RM.
         NvBool ok = rm_init_adapter(NULL, nv);
+        if (fConsole) fConsole->afterRm(nv, ok);
         LOG("rm_init_adapter -> %s", ok ? "OK" : "FAILED");
         nv_xnu_dump_live_allocs();
         nv_xnu_dump_gsp_regs(nv);
@@ -1816,6 +1921,7 @@ IOReturn NVRM::go(uint32_t pass)
         publishGpuProfile();
         if (nvkms_xnu_load()) nvrm_display_publish(this, fNv.gpu_id);
         nvrm_power_start(fPower, &fNv);
+        rtd3Arm();
     }
     return kIOReturnSuccess;
 }
@@ -1849,6 +1955,9 @@ void NVRM::interruptOccurred(IOInterruptEventSource *src, int count)
 
 void NVRM::stop(IOService *provider)
 {
+    if (fConsole) fConsole->finish();
+    rtd3Stop();
+    const bool reachable = nv_rtd3_gpu_reachable(&fRtd3);
     nvrm_power_stop(fPower);  // drain before PMstop or any RM adapter teardown
     // Keep the lock until free(): another service can retain this object and
     // call its platform interface after stop(), when it must answer NotReady.
@@ -1863,15 +1972,15 @@ void NVRM::stop(IOService *provider)
             // contract; it must not send an RM free to a GPU still in standby.
             NvXnuPmUse pmUse;
             IOLockLock(fUtilizationLock);
-            nvrm_free_utilization(&fUtilizationState);
+            if (pmUse.allowed()) nvrm_free_utilization(&fUtilizationState);
             IOLockUnlock(fUtilizationLock);
         }
     }
     if (fPmJoined) { PMstop(); fPmJoined = false; }
-    if (fAdapter) { rm_shutdown_adapter(NULL, &fNv); fAdapter = false; }
+    if (fAdapter && reachable) { rm_shutdown_adapter(NULL, &fNv); fAdapter = false; }
     if (OSAddAtomic(0, &fGpuPm) == kGpuPmRunning) restoreAspm();
     clearInterruptSource();
-    if (fPrivateState) { rm_free_private_state(NULL, &fNv); fPrivateState = false; }
+    if (fPrivateState && reachable) { rm_free_private_state(NULL, &fNv); fPrivateState = false; }
     super::stop(provider);
 }
 
@@ -1953,6 +2062,12 @@ void NVRM::restoreShutdownBars()
 
 void NVRM::systemWillShutdown(IOOptionBits specifier)
 {
+    if (fConsole) fConsole->finish();
+    if (fRtd3Lock) {
+        IOLockLock(fRtd3Lock);
+        fRtd3Stopping = true;
+        IOLockUnlock(fRtd3Lock);
+    }
     char mode[16] = {};
     char off[8] = {};
     const bool requested = PE_parse_boot_argn("nvrmshutdown", mode, sizeof mode) &&
@@ -2044,7 +2159,11 @@ void NVRM::restoreAspm()
 
 void NVRM::free()
 {
+    if (fConsole) { fConsole->dispose(); fConsole = nullptr; }
+    OSSafeReleaseNULL(fBootScreen);
     nvrm_power_release(fPower); fPower = nullptr;
+    OSSafeReleaseNULL(fRtd3Acpi);
+    if (fRtd3Lock) IOLockFree(fRtd3Lock);
     if (fEdpBacklightLock) { IOLockFree(fEdpBacklightLock); fEdpBacklightLock = nullptr; }
     if (fUtilizationLock) { IOLockFree(fUtilizationLock); fUtilizationLock = nullptr; }
     super::free();
@@ -2054,20 +2173,34 @@ extern "C" { void nvkms_xnu_suspend(NvU32 gpuId); void nvkms_xnu_resume(NvU32 gp
 
 IOReturn NVRM::setPowerState(unsigned long ordinal, IOService *device)
 {
-    if (OSAddAtomic(0, &fShutdownHandled)) return kIOPMAckImplied;
+    if (fRtd3Lock) IOLockLock(fRtd3Lock);
+    if (OSAddAtomic(0, &fShutdownHandled) || (fRtd3Stopping && ordinal == 0)) {
+        if (fRtd3Lock) IOLockUnlock(fRtd3Lock);
+        return kIOPMAckImplied;
+    }
     nv_xnu_power_refresh();        // a wake can be a change of power source; this runs before the firmware asks
+    fRtd3Sleeping = ordinal == 0;
+    fRtd3Idle = 0;
     const SInt32 pm = OSAddAtomic(0, &fGpuPm);
     if (ordinal == 0 && pm == kGpuPmRunning && fAdapter) gpuSuspend();
-    else if (ordinal != 0 && pm == kGpuPmSuspended) gpuResume();
+    else if (ordinal != 0 && pm == kGpuPmSuspended) {
+        if (nv_rtd3_gpu_reachable(&fRtd3)) gpuResume();
+        else {
+            const auto ops = rtd3Ops();
+            nv_rtd3_wake(&fRtd3, &ops, &fRtd3Idle);
+        }
+    }
     else LOG("power: setPowerState %lu (gpu %s, adapter %s) - nothing to do", ordinal,
              pm == kGpuPmRunning ? "running" : pm == kGpuPmSuspended ? "suspended" : "lost", fAdapter ? "up" : "down");
+    if (fRtd3Lock) IOLockUnlock(fRtd3Lock);
     return kIOPMAckImplied;
 }
 
 // Linux order (nvidia_suspend): NVKMS first, while the GPU still serves the core channel, then RM standby. RM saves
 // what it must keep from VRAM to system memory and unloads GSP-RM; the GPU then loses power with the slot.
-void NVRM::gpuSuspend()
+bool NVRM::gpuSuspend(bool runtime)
 {
+    if (fConsole) fConsole->finish();
     uint64_t t0 = mach_absolute_time();
     fPmCycles++;
     nvrm_power_suspend(fPower);  // drain before closing the RM PM gate
@@ -2078,29 +2211,49 @@ void NVRM::gpuSuspend()
     // NVKMS first: once it is suspended no thread is inside it, so none can hold gKmsLock while it waits at the RM
     // gate (closing the gate first deadlocked against an NVKMS ioctl calling into RM).
     nvkms_xnu_suspend(fNv.gpu_id);
-    const int busy = nv_xnu_pm_close(10000);
+    const int busy = nv_xnu_pm_close(10000, runtime);
+    if (runtime && busy) {
+        nvkms_xnu_resume(fNv.gpu_id, NV_TRUE);
+        nv_xnu_pm_open();
+        OSCompareAndSwap(kGpuPmSuspended, kGpuPmRunning, &fGpuPm);
+        setProperty("nvrm-pm", "running");
+        nvrm_power_resume(fPower);
+        return false;
+    }
     if (busy) LOG("sleep #%u: %d RM call(s) still running after 10 s - suspending anyway", fPmCycles, busy);
     // nv_preempt_user_channels(): with every VRAM allocation preserved, user channels must be idle and stopped
     // while their memory is copied out, and restarted once it is back.
     NV_STATUS cst = rm_stop_user_channels(NULL, &fNv);
+    if (runtime && cst != NV_OK) {
+        rm_restart_user_channels(NULL, &fNv);
+        nvkms_xnu_resume(fNv.gpu_id, NV_TRUE);
+        nv_xnu_pm_open();
+        OSCompareAndSwap(kGpuPmSuspended, kGpuPmRunning, &fGpuPm);
+        setProperty("nvrm-pm", "running");
+        nvrm_power_resume(fPower);
+        return false;
+    }
     pciSaveForSleep();
     NV_STATUS st = rm_power_management(NULL, &fNv, NV_PM_ACTION_STANDBY);
     if (fIntSrc) fIntSrc->disable();
     uint64_t ns = 0; absolutetime_to_nanoseconds(mach_absolute_time() - t0, &ns);
     LOG("sleep #%u: user channels stopped -> 0x%x; rm_power_management(STANDBY) -> 0x%x in %llu ms%s", fPmCycles,
         (unsigned)cst, (unsigned)st, ns / 1000000ULL, st == NV_OK ? "" : " - resume will still be tried, as on Linux");
+    nv_xnu_pm_drop_owner();
+    if (runtime && st != NV_OK) gpuResume();
+    return cst == NV_OK && st == NV_OK;
 }
 
 // The slot is powered again and IOPCIFamily restored the config space it shadowed. Put back what it does not know
 // (the resized BAR1 and the root port window placeLargeBar1 set), check the GPU answers, then RM resume (GSP boots
 // again through FSP) and NVKMS resume. The framebuffers re-light their heads when told the GPU is back.
-void NVRM::gpuResume()
+bool NVRM::gpuResume()
 {
     uint64_t t0 = mach_absolute_time();
     LOG("wake #%u: resuming the GPU", fPmCycles);
     nv_xnu_pm_take();
     bool ok = pciRestoreAfterWake() && gpuAnswers();
-    if (fIntSrc) fIntSrc->enable();
+    if (ok && fIntSrc) fIntSrc->enable();
     NV_STATUS st = ok ? rm_power_management(NULL, &fNv, NV_PM_ACTION_RESUME) : NV_ERR_GPU_IS_LOST;
     ok = st == NV_OK;
     if (ok) enableAspmL1();
@@ -2115,6 +2268,169 @@ void NVRM::gpuResume()
         (unsigned)st, (unsigned)cst, ns / 1000000ULL,
         ok ? "GPU running, telling the framebuffers" : "GPU LOST: NVKMS refuses all display work until a restart");
     notifyFramebuffers(ok ? 1 : 2);
+    return ok;
+}
+
+void NVRM::rtd3Prepare()
+{
+    if (!nvrmRuntimeRequested() || !gNvPmGate || nvrm_gopfb_enabled()) return;
+    if (!PE_parse_boot_argn("nvrtd3res", fRtd3Resource, sizeof fRtd3Resource) ||
+        fRtd3Resource[0] != '\\' || !memchr(fRtd3Resource, '\0', sizeof fRtd3Resource))
+        return;
+
+    OSObject *pathObject = fPCI->copyProperty("acpi-path");
+    OSString *path = OSDynamicCast(OSString, pathObject);
+    IORegistryEntry *entry = path ? IORegistryEntry::fromPath(path->getCStringNoCopy()) : nullptr;
+    OSSafeReleaseNULL(pathObject);
+    fRtd3Acpi = OSDynamicCast(IOACPIPlatformDevice, entry);
+    if (!fRtd3Acpi) { OSSafeReleaseNULL(entry); return; }
+
+    const char *const methods[] = {"_ON", "_OFF"};
+    for (const char *method : methods) {
+        char name[104];
+        snprintf(name, sizeof name, "%s.%s", fRtd3Resource, method);
+        if (fRtd3Acpi->validateObject(name) != kIOReturnSuccess) {
+            LOG("RTD3 resource has no %s method", name);
+            OSSafeReleaseNULL(fRtd3Acpi);
+            return;
+        }
+    }
+    fRtd3Lock = IOLockAlloc();
+    if (fRtd3Lock) fRtd3 = {1, NV_RTD3_ON, 1};
+}
+
+bool NVRM::rtd3Resource(const char *method)
+{
+    char name[104];
+    snprintf(name, sizeof name, "%s.%s", fRtd3Resource, method);
+    OSObject *result = nullptr;
+    const IOReturn status = fRtd3Acpi->evaluateObject(name, &result);
+    OSSafeReleaseNULL(result);
+    LOG("RTD3 %s -> 0x%x", name, status);
+    return status == kIOReturnSuccess;
+}
+
+bool NVRM::rtd3HasClients()
+{
+    if (fRtd3Users || fBootHold) return true;
+    // The family owns its own Metal user clients. Their opens take a temporary
+    // demand while attaching; the registry covers their attached lifetime.
+    OSIterator *services = fPCI->getChildIterator(gIOServicePlane);
+    if (!services) return true;
+    bool busy = false;
+    while (IOService *child = OSDynamicCast(IOService, services->getNextObject())) {
+        if (!child->metaCast("NVAccel")) continue;
+        IORegistryIterator *clients = IORegistryIterator::iterateOver(child, gIOServicePlane,
+                                                                      kIORegistryIterateRecursively);
+        if (!clients) { busy = true; break; }
+        while (auto *client = clients->getNextObject()) {
+            if (client->metaCast("IOUserClient")) { busy = true; break; }
+        }
+        busy |= !clients->isValid();
+        clients->release();
+        if (busy) break;
+    }
+    services->release();
+    return busy;
+}
+
+nv_rtd3_ops NVRM::rtd3Ops()
+{
+    return {
+        this,
+        [](void *) { return 0; }, // Framebuffers hold demands just like RM clients.
+        [](void *ctx) { return int(static_cast<NVRM *>(ctx)->rtd3HasClients()); },
+        [](void *ctx) { return int(static_cast<NVRM *>(ctx)->gpuSuspend(true)); },
+        [](void *ctx) { return int(static_cast<NVRM *>(ctx)->gpuResume()); },
+        [](void *ctx) { return int(static_cast<NVRM *>(ctx)->rtd3Resource("_OFF")); },
+        [](void *ctx) { return int(static_cast<NVRM *>(ctx)->rtd3Resource("_ON")); },
+    };
+}
+
+void NVRM::rtd3Poll(thread_call_param_t param, thread_call_param_t)
+{
+    auto *rm = static_cast<NVRM *>(param);
+    IOLockLock(rm->fRtd3Lock);
+    if (!rm->fRtd3Stopping && rm->fRtd3.enabled) {
+        if (!rm->fRtd3Sleeping && OSAddAtomic(0, &rm->fGpuPm) == kGpuPmRunning) {
+            const auto ops = rm->rtd3Ops();
+            const int action = nv_rtd3_tick(&rm->fRtd3, &ops, &rm->fRtd3Idle, 1);
+            if (action == NV_RTD3_TICK_POWERED_OFF) {
+                rm->setProperty("nvrm-pm", "runtime D3cold");
+            } else if (action < 0) {
+                // Avoid repeated firmware transitions after a failure.
+                rm->fRtd3.enabled = 0;
+                LOG("RTD3 automatic power-off disabled after transition error %d", action);
+            }
+        }
+        if (rm->fRtd3.enabled) {
+            uint64_t deadline;
+            clock_interval_to_deadline(1, kSecondScale, &deadline);
+            if (!thread_call_enter_delayed(rm->fRtd3Call, deadline)) ++rm->fRtd3Polls;
+        }
+    }
+    --rm->fRtd3Polls;
+    IOLockWakeup(rm->fRtd3Lock, &rm->fRtd3Polls, false);
+    IOLockUnlock(rm->fRtd3Lock);
+}
+
+void NVRM::rtd3Arm()
+{
+    if (!fRtd3Lock) return;
+    IOLockLock(fRtd3Lock);
+    if (!fRtd3Stopping && !fRtd3Call) {
+        fRtd3Call = thread_call_allocate_with_options(rtd3Poll, this, THREAD_CALL_PRIORITY_KERNEL,
+                                                       THREAD_CALL_OPTIONS_ONCE);
+        if (fRtd3Call) {
+            uint64_t deadline;
+            clock_interval_to_deadline(1, kSecondScale, &deadline);
+            if (!thread_call_enter_delayed(fRtd3Call, deadline)) ++fRtd3Polls;
+            LOG("RTD3 enabled with resource %s", fRtd3Resource);
+        }
+    }
+    IOLockUnlock(fRtd3Lock);
+}
+
+void NVRM::rtd3Stop()
+{
+    if (!fRtd3Lock) return;
+    IOLockLock(fRtd3Lock);
+    fRtd3Stopping = true;
+    if (!nv_rtd3_gpu_reachable(&fRtd3) && !fRtd3Sleeping) {
+        const auto ops = rtd3Ops();
+        nv_rtd3_wake(&fRtd3, &ops, &fRtd3Idle);
+    }
+    if (fRtd3Call) {
+        if (thread_call_cancel(fRtd3Call)) --fRtd3Polls;
+        while (fRtd3Polls) IOLockSleep(fRtd3Lock, &fRtd3Polls, THREAD_UNINT);
+        thread_call_free(fRtd3Call);
+        fRtd3Call = nullptr;
+    }
+    IOLockUnlock(fRtd3Lock);
+}
+
+IOReturn NVRM::rtd3Demand(uintptr_t operation)
+{
+    if (operation > kNvrmRuntimeTry) return kIOReturnBadArgument;
+    if (!fRtd3Lock) return kIOReturnSuccess;
+    if (operation == kNvrmRuntimeTry) {
+        if (!IOLockTryLock(fRtd3Lock)) return kIOReturnNotReady;
+    } else {
+        IOLockLock(fRtd3Lock);
+    }
+    if (operation == kNvrmRuntimeRelease) {
+        if (fRtd3Users) --fRtd3Users;
+        IOLockUnlock(fRtd3Lock);
+        return kIOReturnSuccess;
+    }
+    if (operation == kNvrmRuntimeWake && !fRtd3Stopping && !fRtd3Sleeping) {
+        const auto ops = rtd3Ops();
+        nv_rtd3_wake(&fRtd3, &ops, &fRtd3Idle);
+    }
+    const bool ready = !fRtd3Stopping && !fRtd3Sleeping && OSAddAtomic(0, &fGpuPm) == kGpuPmRunning;
+    if (ready) ++fRtd3Users;
+    IOLockUnlock(fRtd3Lock);
+    return ready ? kIOReturnSuccess : kIOReturnNotReady;
 }
 
 void NVRM::pciSaveForSleep()
@@ -2238,13 +2554,31 @@ public:
     void setOwner(NVRM *o) { fOwner = o; }
     bool start(IOService *provider) override {
         if (!fOwner) { kprintf("NVRM-xnu: bridge started with no owner\n"); return false; }
-        return IOUserClient::start(provider);
+        return startRmClient(provider);
     }
 };
 OSDefineMetaClassAndStructors(IOAccelNVRMBridge, NVRMUserClient)
 
 IOReturn NVRM::callPlatformFunction(const OSSymbol *fn, bool wait, void *p1, void *p2, void *p3, void *p4)
 {
+    if (fn && fn->isEqualTo(NVRM_RTD3_DEMAND)) return rtd3Demand((uintptr_t)p1);
+    if (fn && fn->isEqualTo(NVRM_CONSOLE_PAUSE)) {
+        if (fConsole) fConsole->pause();
+        return fConsole || fConsolePhysLost ? kIOReturnSuccess : kIOReturnNotFound;
+    }
+    if (fn && fn->isEqualTo(NVRM_CONSOLE_SCANOUT)) {
+        if (!fConsole || !p1 || !fConsole->takeScanout(*static_cast<NvrmConsoleScanout *>(p1)))
+            return kIOReturnNotReady;
+        setProperty("nvrm-console-copier", "framebuffer");
+        return kIOReturnSuccess;
+    }
+    if (fn && fn->isEqualTo(NVRM_CONSOLE_DONE)) {
+        if (fConsole) {
+            fConsole->finish();
+            setProperty("nvrm-console-copier", "finished");
+        }
+        return kIOReturnSuccess;
+    }
     if (fn && fn->isEqualTo(NVRM_UTILIZATION_FN)) {
         NVRMUtilization *sample = (NVRMUtilization *)p1;
         if (!sample || sample->version != NVRM_UTILIZATION_ABI_VERSION) return kIOReturnBadArgument;
@@ -2327,6 +2661,7 @@ IOReturn NVRM::callPlatformFunction(const OSSymbol *fn, bool wait, void *p1, voi
         const bool rmCall = fn->isEqualTo(NVRM_GPUVA_FN_ALLOC) || fn->isEqualTo(NVRM_GPUVA_FN_MAP) || fn->isEqualTo(NVRM_GPUVA_FN_FREE)
                          || fn->isEqualTo(NVRM_SS_FN_RM) || fn->isEqualTo(NVRM_SS_FN_PAGEOFF);
         NvXnuPmUse pmUse(rmCall);
+        if (!pmUse.allowed()) return kIOReturnNotReady;
         struct NVRMGpuVaRequest *g = (struct NVRMGpuVaRequest *)p1;
         if (fn->isEqualTo(NVRM_GPUVA_FN_ALLOC))
             return nvrm_gpuva_alloc(g) ? kIOReturnIOError : kIOReturnSuccess;
@@ -2352,8 +2687,15 @@ IOReturn NVRM::callPlatformFunction(const OSSymbol *fn, bool wait, void *p1, voi
 bool NVRMUserClient::start(IOService *provider)
 {
     fOwner = OSDynamicCast(NVRM, provider);
+    return startRmClient(provider);
+}
+bool NVRMUserClient::startRmClient(IOService *provider)
+{
     if (!fOwner || OSAddAtomic(0, &fOwner->fShutdownHandled)) return false;
-    return super::start(provider);
+    if (!fRuntimeDemand.acquire(fOwner)) return false;
+    if (super::start(provider)) return true;
+    fRuntimeDemand.release();
+    return false;
 }
 bool NVRMUserClient::initWithTask(task_t owningTask, void *securityID, UInt32 type, OSDictionary *properties)
 {
@@ -2419,7 +2761,10 @@ IOReturn NVRMUserClient::clientClose(void)
     if (OSCompareAndSwap(0, 1, &fCleaned)) {
         Gate g(fGate);
         if (gNvClientsLock && fFd >= 0) { IOLockLock(gNvClientsLock); gNvClients[fFd] = NULL; nv_pm_close(fPm); IOLockUnlock(gNvClientsLock); }
-        if (fOwner) { NvXnuPmUse pmUse; rm_cleanup_file_private(NULL, nvState(), &fNvfp); }
+        if (fOwner) {
+            NvXnuPmUse pmUse;
+            if (pmUse.allowed()) rm_cleanup_file_private(NULL, nvState(), &fNvfp);
+        }
         // The ranges are NOT freed here. clientClose can run while another thread is inside
         // clientMemoryForType, which reads this array and hands its entries to
         // IOMemoryDescriptor::withPhysicalAddress - so freeing it here let a process map whatever
@@ -2428,6 +2773,7 @@ IOReturn NVRMUserClient::clientClose(void)
         IOLockLock(fMapLock);
         if (fMapList) fMapList->context.valid = NV_FALSE;
         IOLockUnlock(fMapLock);
+        fRuntimeDemand.release();
         if (nv_xnu_chat()) kprintf("NVRM-xnu: client fd %d closed\n", fFd);
     }
     terminate();
@@ -2435,6 +2781,11 @@ IOReturn NVRMUserClient::clientClose(void)
 }
 void NVRMUserClient::free(void)
 {
+    if (gNvClientsLock && fFd >= 0) {
+        IOLockLock(gNvClientsLock);
+        if (gNvClients[fFd] == this) { gNvClients[fFd] = nullptr; nv_pm_close(fPm); }
+        IOLockUnlock(gNvClientsLock);
+    }
     if (fMapLock) IOLockLock(fMapLock);
     nvMapListFree(&fMapList);
     fMapLen = 0; fMapLenNode = nullptr; fMapGen++;
@@ -2812,6 +3163,7 @@ IOReturn NVRMUserClient::esc(uint32_t cmd, void *data, uint32_t size)
     if (!fOwner || fOwner->fPassDone < 2) { static bool once; if (!once) { once = true; kprintf("NVRM-xnu: esc 0x%x refused: adapter not up (run nvrmctl go 2)\n", cmd); } return kIOReturnNotReady; }
     nv_state_t *nv = nvState();
     NvXnuPmUse pmUse;
+    if (!pmUse.allowed()) return kIOReturnNotReady;
     switch (cmd) {
     case NV_ESC_CARD_INFO: {
         if (!fIsCtl) return kIOReturnBadArgument;

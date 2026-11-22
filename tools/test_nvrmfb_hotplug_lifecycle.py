@@ -24,14 +24,15 @@ assert 'scheduleCall(fConnectNotify, deadline)' in notify and 'thread_call_enter
 assert 'NVRMCallReference callReference(me)' in callback and 'me->fConnect.proc(me->fConnect.target, me->fConnect.ref)' in callback
 assert '&fConnectNotify' in extract(src, 'void NVRMNVDAFramebuffer::stop(')
 assert src.index('fConnectNotify = nvrmfbCall(connectNotifyFire, this)') < src.index('super::start(provider)')
-assert 'return !fDpyLost && fEdidSize >= 128;' in src
+assert 'return !fDpyLost && !fHidden && fEdidSize >= 128;' in src
 hotplug = extract(src, 'void NVRMNVDAFramebuffer::hotplugFire(')
 missing = hotplug[hotplug.index('for (int k = 0; k < gNDpy; k++'):]
-missing = missing[:missing.index('if (!added) return;')]
-assert 'if (!me->fKms->getDynamicDisplayInfo(me->fDev, dd) || dd->connected) continue;' in missing
+missing = missing[:missing.index('const unsigned displayCount')]
+assert 'if (!kms->getDynamicDisplayInfo(gDev, dd) || dd->connected) continue;' in missing
 assert 'fb->fDpyLost = true;' in missing and 'fb->fEdidSize = 0;' in missing and 'fb->clearDisplayAudioProperties();' in missing
-assert hotplug.index('if (sl) IORecursiveLockUnlock(sl);') < hotplug.index('notify[f]->notifyConnectionChanged(500);')
-assert hotplug.index('if (sl) IORecursiveLockUnlock(sl);') < hotplug.index('fb->reflip()')
+unlocked = hotplug.index('IORecursiveLockUnlock(sl);', hotplug.index('const unsigned displayCount'))
+assert unlocked < hotplug.index('notify[f]->notifyConnectionChanged(500);')
+assert unlocked < hotplug.index('fb->reflip()')
 assert 'fb->fDpyLost = false;' in hotplug and 'fb->notifyConnectionChanged(500);' in hotplug
 assert 'fb->fSurf =' not in hotplug and 'fb->fSize =' not in hotplug
 fixture = r'''
@@ -54,7 +55,7 @@ struct OSObject{int refs=1;void retain(){++refs;}void release(){--refs;}};
 class Base{public:IOReturn getAttributeForConnection(IOIndex,IOSelect,std::uintptr_t*){return 77;}};
 struct NVRMNVDAFramebuffer:OSObject,Base{
 volatile int fConnectOwed=0;
-using super=Base; bool fDpyLost=false,fInternal=false,fConnectFired=false,fRotationEnabled=false; unsigned fEdidSize=0,fIndex=0; UInt8 fEdid[256]={};
+using super=Base; bool fDpyLost=false,fHidden=false,fInternal=false,fConnectFired=false,fRotationEnabled=false; unsigned fEdidSize=0,fIndex=0; UInt8 fEdid[256]={};
 volatile int fStopping=0; thread_call_t fConnectNotify=reinterpret_cast<void*>(1);
 struct{void(*proc)(void*,void*);void*target;void*ref;}fConnect{}; unsigned scheduled=0;std::uint64_t deadline=0;
 void scheduleCall(thread_call_t,std::uint64_t d){++scheduled;deadline=d;retain();}
@@ -76,6 +77,11 @@ assert(f.getAttributeForConnection(0,kConnectionSupportsHLDDCSense,&v)==kIORetur
 UInt8 out[128]={};IOByteCount n=128;assert(f.getDDCBlock(0,1,kIODDCBlockTypeEDID,0,out,&n)==kIOReturnUnsupported);
 f.fDpyLost=false;f.fEdidSize=128;for(unsigned i=0;i<128;i++)f.fEdid[i]=(UInt8)i;n=128;
 assert(f.getDDCBlock(0,1,kIODDCBlockTypeEDID,0,out,&n)==kIOReturnSuccess&&n==128&&out[127]==127);
+f.fHidden=true;
+assert(f.getAttributeForConnection(0,kConnectionCheckEnable,&v)==kIOReturnSuccess&&v==0);
+assert(f.getDDCBlock(0,1,kIODDCBlockTypeEDID,0,out,&n)==kIOReturnUnsupported);
+f.fHidden=false;
+assert(f.getDDCBlock(0,1u<<25,kIODDCBlockTypeEDID,0,out,&n)==kIOReturnUnsupported);
 n=127;assert(f.getDDCBlock(0,1,kIODDCBlockTypeEDID,0,out,&n)==kIOReturnBadArgument);
 assert(f.getDDCBlock(0,0,kIODDCBlockTypeEDID,0,out,&n)==kIOReturnUnsupported);
 assert(f.getDDCBlock(0,1,99,0,out,&n)==kIOReturnUnsupported);f.notifyConnectionChanged(500);

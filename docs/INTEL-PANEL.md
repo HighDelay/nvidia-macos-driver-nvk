@@ -76,6 +76,20 @@ If a copy's completion or a scanout mapping becomes uncertain, the bridge retain
 its resources and refuses further transfers. A negative `nmintelfb_ram` or a
 nonzero `nvaccel_iop_quarantined` requires a reboot before retrying.
 
+## Experimental wake and Type-C
+
+- `nmhybridresume=1` enables replay of the firmware-lit eDP mode after wake on
+  display versions 12–14. Versions 20 and 30 additionally require
+  `nmhybrid20=1`. Version 30 panel matching also requires that setting.
+- `nmhybriddmc=1` enables the display firmware upload on supported versions
+  12–14. After boot, run `sudo bash Optional/Intel-DMC/nm-dmc-load.sh` from the
+  extracted package. The helper verifies pinned Intel firmware before upload.
+  The driver validates the register plan and leaves the DMC events disabled.
+- `nmhybridtc=1` logs Type-C port changes on display versions 12 and 13.
+  `nmhybridext=1` also drives one compatible DisplayPort Alt Mode output at a
+  time with color bars. It requires a free pipe, display-buffer space and
+  unused graphics-table entries. The output is available for link diagnostics.
+
 ## Recovery and testing limits
 
 `-nvoff`, `-nmintelfboff`, `nmxintel=1`, the NVIDIA recovery flag and a tripped boot
@@ -85,11 +99,9 @@ After an interrupted panel start, remove `nullmoth-intelfb-attaching` with
 two minutes after activation completes. Failed NVIDIA/panel initialization drops
 the claim so the firmware framebuffer can match again.
 
-**Sleep/wake remains unsupported by this bridge. Keep the test laptop awake.**
 The source project reports an Acer Nitro V15 / Raptor Lake i5-13420H / RTX 3050
 Laptop running Sequoia 15.8.1. This adapted port still needs physical laptop tests
-for boot, brightness, acceleration and RAM scanout. Host simulation, compilation
-and kernel linking do not establish those results.
+for boot, brightness, acceleration, RAM scanout, wake and the Type-C test output.
 
 ## Build
 

@@ -28,6 +28,13 @@ extern "C" {
 #include "../NVRM/agdc/AppleGraphicsDeviceControl_re.h"
 #include "../NVRM/agdc/nvrm-agdc-k5.h"
 #include "../NVRM/nvrm_gpuva_abi.h"
+#include "../NVRM/nv_rtd3_demand.h"
+#include "../NVRM/accel/nm_hybrid.h"
+#include "../NVRM/accel/nm_hybrid_resume14.h"
+#include "../NVRM/accel/nm_hybrid_vbt.h"
+#include "../NVRM/accel/nm_hybrid_dmc.h"
+#include "../NVRM/accel/nm_hybrid_extmode.h"
+#include "../NVRM/accel/nm_hybrid_heads.h"
 #include <IOKit/IOBufferMemoryDescriptor.h>
 #include <IOKit/IOTimerEventSource.h>
 #include <IOKit/IOWorkLoop.h>
@@ -301,6 +308,47 @@ private:
     int fPipe = -1;
     uint8_t fVer = 0;
 
+    // The optional hardware paths share fRamLock with panel scanout.
+    NvrmRuntimeDemand fRuntimeDemand;
+    thread_call_t fPanelCall = nullptr;
+    unsigned fPanelCalls = 0;
+    bool fPanelSleeping = false, fPanelWake = false;
+    struct nmr_snap *fSnap = nullptr;
+    uint64_t *fFwPte = nullptr;
+    unsigned fFwPteCount = 0;
+    struct nmt_port fTcPort[4] = {};
+    uint32_t fTcLast[4] = {};
+    unsigned fTcN = 0;
+    bool fExtOn = false;
+    struct nmhd fHeads = {};
+    struct nmhd_ops fHeadOps = {};
+    struct ExtHead;
+    bool fDmcOn = false;
+    uint8_t *fDmcBlob = nullptr;
+    uint32_t fDmcLen = 0, fPwmDuty = 0;
+    struct nmr_ops panelOps();
+    bool readVbt(struct nmr_edp *, uint8_t **, uint32_t *);
+    void resumeCapture();
+    bool resumeRun();
+    struct nmd_step dmcStep() const;
+    bool dmcApply();
+    void advancedStart();
+    void advancedStop();
+    void advancedPower(bool on);
+    void schedulePanelCall(unsigned delayMs);
+    static void panelFire(thread_call_param_t, thread_call_param_t);
+    void tcStart();
+    void tcScan();
+    void tcStop();
+    volatile uint64_t *ggtt() const;
+    static void *extCreate(void *, unsigned, unsigned);
+    static int extBringUp(void *, void *, unsigned);
+    static void extTakeDown(void *, void *, unsigned);
+    static void extRelease(void *, void *);
+public:
+    int dmcAccept(const uint8_t *, uint32_t);
+    const char *fDmcWant = nullptr;
+private:
     uint32_t rd(uint32_t off) const { return *(volatile uint32_t *)(fRegs + off); }
     void wr(uint32_t off, uint32_t v) const { *(volatile uint32_t *)(fRegs + off) = v; }
     bool adoptFirmwareMode();
@@ -372,6 +420,7 @@ public:
     // NVRMFB acknowledges at once and answers the power attributes itself. With NMIntelFB under NVRM the
     // first WindowServer restart froze every display.
     IOReturn setPowerState(unsigned long ordinal, IOService *) override {
+        advancedPower(ordinal != 0);
         handleEvent(ordinal ? kIOFBNotifyDidPowerOn : kIOFBNotifyWillPowerOff);
         return kIOPMAckImplied;
     }
@@ -600,6 +649,7 @@ IOReturn NMIntelFB::setInterruptState(void *ref, UInt32 state)
 void NMIntelFB::free()
 {
     drainWorkers();
+    advancedStop();
     if (fIrqLock) {
         unregisterInterrupt(&fVbl);
         unregisterInterrupt(&fConnect);
@@ -727,6 +777,10 @@ static bool ifb_pci_ok(IOPCIDevice *pci, uint8_t *ver)
     uint16_t dev = pci->configRead16(kIOPCIConfigDeviceID);
     fVer = displayVersion(dev);
     if (!fVer) return false;   // an Intel GPU this driver does not know (older ones have Apple's own driver)
+    if (fVer == 30) {
+        unsigned enable = 0;
+        if (!PE_parse_boot_argn("nmhybrid20", &enable, sizeof enable) || enable != 1) return false;
+    }
     if (ifb_nv_has("nullmoth-intelfb-attaching")) {
         IFBLOG("the last start never returned (boot guard) - leaving the firmware screen; sudo nvram -d nullmoth-intelfb-attaching");
         ifb_nv_set("nullmoth-intelfb-trail", "guard: the last start never returned");
@@ -849,6 +903,7 @@ bool NMIntelFB::startReal(IOService *provider)
     else fPCI = ifb_copy_pci();
     if (!fPCI) return false;
     const bool bridge = provider->getProperty("nm-intel-panel") != nullptr;
+    if (bridge && !fRuntimeDemand.acquire(provider->getProvider())) return false;
     fPCI->setMemoryEnable(true);
     fMMIO = fPCI->mapDeviceMemoryWithRegister(kIOPCIConfigBaseAddress0);
     IODeviceMemory *ap = fPCI->getDeviceMemoryWithRegister(kIOPCIConfigBaseAddress2);
@@ -889,6 +944,7 @@ bool NMIntelFB::startReal(IOService *provider)
     fVblAlways = ifb_knob("nullmoth-intelfb-vbl", 1) != 0;
     if (!armVbl()) return false;
     publishBacklight();   // Keep the fork's brightness handler before framebuffer registration.
+    advancedStart();
     if (!IOFramebuffer::start(provider)) { ifb_trail("fb-start-failed"); return false; }
     ifb_trail("fb-started");
     setProperty("NMIntelFBPipe", fPipe, 32);
@@ -924,6 +980,7 @@ bool NMIntelFB::startReal(IOService *provider)
 void NMIntelFB::startUnwind()
 {
     drainWorkers();
+    advancedStop();
 #ifdef NMINTELFB_VIRTUAL
     if (gVirt == this) { sysctl_unregister_oid(&sysctl__debug_nmintelfb_sample); gVirt = nullptr; }
 #endif
@@ -948,7 +1005,10 @@ void NMIntelFB::startUnwind()
     kapiFree();
     if (fBacklight) { fBacklight->terminate(kIOServiceSynchronous); fBacklight->detach(this); OSSafeReleaseNULL(fBacklight); }
     fPwmPeriod = 0;
-    if (!quarantined()) { OSSafeReleaseNULL(fSurfMap); OSSafeReleaseNULL(fMMIO); fRegs = nullptr; }
+    if (!quarantined()) {
+        OSSafeReleaseNULL(fSurfMap); OSSafeReleaseNULL(fMMIO); fRegs = nullptr;
+        fRuntimeDemand.release();
+    }
 
 }
 
@@ -1180,10 +1240,18 @@ void NMIntelBacklight::applyFire(thread_call_param_t p, thread_call_param_t)
 
 bool NMIntelFB::setPanelPercent(uint32_t percent)
 {
-    if (!fRegs || !fPwmPeriod || __atomic_load_n(&fStopping, __ATOMIC_ACQUIRE) || percent > 100) return false;
-    uint32_t duty = nmintelfb::pwmDuty(fPwmPeriod, percent, fPwmInverted);
-    wr(kBlcPwmDuty, duty);
-    return rd(kBlcPwmDuty) == duty;
+    IOLockLock(fRamLock);
+    bool ok = fRegs && fPwmPeriod && !__atomic_load_n(&fStopping, __ATOMIC_ACQUIRE) && percent <= 100;
+    if (ok) {
+        const uint32_t duty = nmintelfb::pwmDuty(fPwmPeriod, percent, fPwmInverted);
+        if (!fPanelSleeping) {
+            wr(kBlcPwmDuty, duty);
+            ok = rd(kBlcPwmDuty) == duty;
+        }
+        if (ok) fPwmDuty = duty;
+    }
+    IOLockUnlock(fRamLock);
+    return ok;
 }
 
 // Brightness only when the firmware enabled the PWM with a usable period; otherwise the panel keeps the level it has.
@@ -1196,6 +1264,7 @@ void NMIntelFB::publishBacklight()
         return;
     }
     fPwmPeriod = period;
+    fPwmDuty = duty;
     fPwmInverted = (ctl & (1u << 29)) != 0;
     SInt32 level = (SInt32)((uint64_t)(fPwmInverted ? period - duty : duty) * 100 / period);
     fBacklight = NMIntelBacklight::withFB(this, level);
@@ -1599,6 +1668,7 @@ static void ifb_ram_register(bool on)
 }
 
 #include "scanout.inc"
+#include "panel_advanced.inc"
 
 #ifdef NMINTELFB_VIRTUAL
 // Test loader: attaches a virtual panel under the NVIDIA PCI device on demand, the way the real driver will place the

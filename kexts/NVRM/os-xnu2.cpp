@@ -1611,6 +1611,7 @@ NV_STATUS NV_API_CALL nv_acpi_dsm_method(nv_state_t *nv, NvU8 *pAcpiDsmGuid, NvU
     }
     return st;
 }
+extern "C" bool nvrm_console_fw_base(nv_state_t *, NvU64 *);
 void  NV_API_CALL nv_get_screen_info(nv_state_t *nv, NvU64 *pa, NvU32 *w, NvU32 *h, NvU32 *depth, NvU32 *pitch, NvU64 *size)
 {
     TRC;
@@ -1623,6 +1624,8 @@ void  NV_API_CALL nv_get_screen_info(nv_state_t *nv, NvU64 *pa, NvU32 *w, NvU32 
     if (pe->getConsoleInfo(&pv) != kIOReturnSuccess) return;
     if (!pv.v_baseAddr || !pv.v_rowBytes || !pv.v_width || !pv.v_height) return;
     NvU64 base = (NvU64)pv.v_baseAddr & ~3ull;
+    // Keep RM's reservation tied to the firmware surface while XNU draws into RAM.
+    nvrm_console_fw_base(nv, &base);
     NvU64 sz   = (NvU64)pv.v_rowBytes * (NvU64)pv.v_height;
     if (pa)    *pa    = base;
     if (w)     *w     = (NvU32)pv.v_width;

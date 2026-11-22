@@ -43,6 +43,8 @@ static int OSAddAtomic(int n,int *value) { int old=*value;*value+=n;return old; 
 #define FBLOGV(...) ((void)0)
 struct NVRMNVDAFramebuffer {
     NVRMHeadGateState fPrimaryGate;
+    NVRMHeadGateState &primaryGate() { return fPrimaryGate; }
+    bool fHidden=false;
     bool fHeadSlept=false, fModeSet=true, sleepOK=true, wakeOK=true;
     bool fPowerOn=true, pagingState=true, fSysSlept=false, gpuReady=true;
     unsigned familyWakes=0;

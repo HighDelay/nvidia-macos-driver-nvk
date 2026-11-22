@@ -214,6 +214,10 @@ def stage(base, zink, output, components=None, native_gld=False, records=None, w
             'source_commit': run('git', '-C', ROOT, 'rev-parse', 'HEAD').strip(),
             'source_sha256': {str(p.relative_to(ROOT)): base_tools.digest(p) for p in
                 [ROOT/'build/build_intel_panel.sh', ROOT/'tools/intel_panel_control.sh',
+                 ROOT/'kexts/NVRM/nv_rtd3_demand.h',
+                 ROOT/'package/nm-dmc-load.sh', ROOT/'package/nm_dmc_push.c',
+                 ROOT/'package/dmc_pins.sh', ROOT/'package/dmc_fetch.sh',
+                 *sorted((ROOT/'kexts/NVRM/accel').glob('nm_hybrid*.h')),
                  ROOT/'kexts/NVRM/nvrm_gpuva_abi.h', ROOT/'kexts/NVRM/agdc/AppleGraphicsDeviceControl_re.h',
                  ROOT/'kexts/NVRM/agdc/nvrm-agdc-k5.h', *sorted((ROOT/'kexts/NMIntelFB').glob('*'))]
                 if p.is_file()},
@@ -229,6 +233,16 @@ def stage(base, zink, output, components=None, native_gld=False, records=None, w
         shutil.copy2(ROOT/'docs/INTEL-PANEL.md', payload/'Optional/README.md')
         shutil.copy2(ROOT/'tools/intel_panel_control.sh', payload/'Optional/Intel-panel.command')
         (payload/'Optional/Intel-panel.command').chmod(0o755)
+        dmc = payload/'Optional/Intel-DMC'
+        dmc.mkdir(exist_ok=True)
+        for name in ('nm-dmc-load.sh', 'dmc_pins.sh', 'dmc_fetch.sh'):
+            shutil.copy2(ROOT/'package'/name, dmc/name)
+        shutil.copy2(ROOT/'licenses/Intel-i915-firmware-LICENSE.txt', dmc/'LICENSE')
+        run('xcrun', 'clang', '-arch', 'x86_64', '-mmacosx-version-min=15.0', '-O2',
+            ROOT/'package/nm_dmc_push.c', '-o', dmc/'nm_dmc_push')
+        run('codesign', '--force', '--sign', '-', '--timestamp=none', dmc/'nm_dmc_push')
+        run('codesign', '--verify', '--strict', dmc/'nm_dmc_push')
+        panel_identity['display_firmware_helper'] = {p.name: base_tools.digest(p) for p in sorted(dmc.iterdir())}
         replacements = {}
         # Verify the firmware version from the actual NVRM image, not stale text
         # in release manifests. Every referenced mandatory firmware must exist.

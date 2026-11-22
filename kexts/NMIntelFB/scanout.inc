@@ -167,7 +167,7 @@ int NMIntelFB::ramSetLocked(int mode)
 int NMIntelFB::ramSet(int mode)
 {
     IOLockLock(fRamLock);
-    const int result = ramSetLocked(mode);
+    const int result = fPanelSleeping ? -EBUSY : ramSetLocked(mode);
     IOLockUnlock(fRamLock);
     return result;
 }
@@ -184,7 +184,7 @@ IOReturn NMIntelFB::beginFrame(NMIntelFBFrame *frame)
 {
     if (!frame || frame->version != NMINTELFB_FRAME_VERSION) return kIOReturnBadArgument;
     IOLockLock(fRamLock);
-    if (__atomic_load_n(&fStopping, __ATOMIC_ACQUIRE) || !fSurfMap ||
+    if (__atomic_load_n(&fStopping, __ATOMIC_ACQUIRE) || !fSurfMap || fPanelSleeping ||
         fFrameGate.busy() || fFrameGate.quarantined()) {
         IOLockUnlock(fRamLock); return kIOReturnNotReady;
     }
@@ -226,7 +226,7 @@ IOReturn NMIntelFB::endFrame(const NMIntelFBFrame *frame)
     if (!fFrameGate.owns(frame->token)) { IOLockUnlock(fRamLock); return kIOReturnBadArgument; }
     const bool known = frame->result != NMINTELFB_GPU_UNCERTAIN;
     if (!known) quarantineRam();
-    else if (!__atomic_load_n(&fStopping, __ATOMIC_ACQUIRE) &&
+    else if (!__atomic_load_n(&fStopping, __ATOMIC_ACQUIRE) && !fPanelSleeping &&
              (frame->result == NMINTELFB_CPU_READY || frame->result == NMINTELFB_GPU_READY)) {
         if (frame->result == NMINTELFB_CPU_READY) __asm__ volatile("sfence" ::: "memory");
         if (fRamMode == 2) {

@@ -299,8 +299,8 @@ nvrm = (ROOT/'kexts/NVRM/NVRM.cpp').read_text()
 start = nvrm[nvrm.index('bool NVRM::start('):nvrm.index('extern "C" int sysctlbyname')]
 go = nvrm[nvrm.index('IOReturn NVRM::go('):nvrm.index('bool NVRM::interruptFilter(')]
 stop = nvrm[nvrm.index('void NVRM::stop('):nvrm.index('void NVRM::free()')]
-sleep = nvrm[nvrm.index('void NVRM::gpuSuspend()'):nvrm.index('void NVRM::gpuResume()')]
-wake = nvrm[nvrm.index('void NVRM::gpuResume()'):nvrm.index('void NVRM::pciSaveForSleep()')]
+sleep = nvrm[nvrm.index('bool NVRM::gpuSuspend('):nvrm.index('bool NVRM::gpuResume()')]
+wake = nvrm[nvrm.index('bool NVRM::gpuResume()'):nvrm.index('void NVRM::rtd3Prepare()')]
 assert start.index('nv_xnu_power_refresh();') < start.index('fPower = nvrm_power_create();') < start.index('kernel_thread_start(')
 assert go.index('fAdapter = true;') < go.index('nvrm_power_start(fPower, &fNv);')
 assert stop.index('nvrm_power_stop(fPower);') < stop.index('PMstop();') < stop.index('rm_shutdown_adapter(')

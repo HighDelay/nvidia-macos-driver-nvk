@@ -57,13 +57,9 @@ arm("the debt starts at zero on every framebuffer", "volatile SInt32 fConnectOwe
 
 
 def old_source():
-    dirty = subprocess.run(["git", "-C", str(ROOT), "diff", "--quiet", "HEAD", "--", REL]).returncode != 0
-    if dirty:
-        rev = "HEAD"
-    else:
-        log = subprocess.run(["git", "-C", str(ROOT), "log", "--format=%H", "-S", "fConnectOwed", "--", REL],
-                             capture_output=True, text=True, check=True).stdout.split()
-        rev = log[-1] + "~1"
+    log = subprocess.run(["git", "-C", str(ROOT), "log", "--format=%H", "-S", "fConnectOwed", "--", REL],
+                         capture_output=True, text=True, check=True).stdout.split()
+    rev = log[-1] + "~1"
     return subprocess.run(["git", "-C", str(ROOT), "show", f"{rev}:{REL}"], capture_output=True, text=True,
                           check=True).stdout
 

@@ -220,6 +220,11 @@ class IOAccelNVRMCarrier : public IOService {
 };
 OSDefineMetaClassAndStructors(IOAccelNVRMCarrier, IOService)
 
+#ifndef NMX_ACCEL
+#include "../nv_rtd3_demand.h"
+static IOService *nvAccelNVRM();
+#endif
+
 class NVAccel : public IOGraphicsAccelerator2 {
     OSDeclareDefaultStructors(NVAccel)
     NM_TAHOE_FWD(NVAccel)
@@ -682,6 +687,10 @@ public:
         }
 #endif
         if ((type & 0xFFFF0000u) != 0x4E560000u) {
+#ifndef NMX_ACCEL
+            NvrmRuntimeDemand demand;
+            if (nvrmRuntimeRequested() && !demand.acquire(nvAccelNVRM())) return kIOReturnNotReady;
+#endif
             IOReturn fr = IOGraphicsAccelerator2::newUserClient(owningTask, securityID, type, handler);
             if (fUcLogged < 40) { fUcLogged++;
                 ALOG("newUserClient(type %u / 0x%x) -> family returned 0x%x, client %s",

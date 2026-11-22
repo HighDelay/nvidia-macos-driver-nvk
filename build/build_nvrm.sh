@@ -79,6 +79,9 @@ OBJS+=("$OUT/nvrm_pageoff.o")
 # The notebook TGP control also needs RM-internal GPU headers and matching definitions.
 OGKM="$OGKM" python3 -B "$HERE/../kexts/NVRM/rmcc.py" "$SRC/nvrm_pmgr.c" "$OUT/nvrm_pmgr.o" 2>"$OUT/pmgr.err" || { echo "STOP: nvrm_pmgr.c did not compile"; tail "$OUT/pmgr.err"; exit 1; }
 OBJS+=("$OUT/nvrm_pmgr.o")
+# The console continuation uses RM's matched KernelBus layout.
+OGKM="$OGKM" python3 -B "$HERE/../kexts/NVRM/rmcc.py" "$SRC/nvrm_bar1state.c" "$OUT/nvrm_bar1state.o" 2>"$OUT/bar1state.err" || { echo "STOP: nvrm_bar1state.c did not compile"; tail "$OUT/bar1state.err"; exit 1; }
+OBJS+=("$OUT/nvrm_bar1state.o")
 xcrun clang++ -arch x86_64 -mmacosx-version-min=15.0 -fapple-kext -nostdlib -Xlinker -kext -lkmodc++ -lkmod -lcc_kext "${OBJS[@]}" \
   "$NV/_out/Darwin_x86_64/libnvkernel.a" "$KMSLIB" -o "$OUT/NVRM.kext/Contents/MacOS/NVRM" 2>"$OUT/link.err" || { echo "STOP: link failed"; grep -v "built for newer" "$OUT/link.err" | head; exit 1; }
 cp "$SRC/Info.plist" "$OUT/NVRM.kext/Contents/Info.plist"

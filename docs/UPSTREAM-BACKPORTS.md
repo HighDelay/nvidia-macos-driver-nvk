@@ -1,4 +1,4 @@
-# Deferred upstream backports
+# Upstream backports
 
 The fork retains Intel macOS 15.5+ and 26, Mesa **26.3.0 stable** and NVIDIA
 **620.70.06**. The kernel and NVK use the capability-negotiated mapping ABI.
@@ -53,16 +53,31 @@ interfaces. Startup retry, firmware wait and bounded VRAM mapping follow
 The large-readback path adapts
 [upstream 1e14008](https://github.com/nullmoth/nvidia-macos-driver/commit/1e14008).
 
-## Remaining integration
+## Display and power additions
 
-Runtime D3cold needs serialized consumer admission, successful standby and
-a tested recovery path before evaluating the ACPI power resource. Surround
-needs atomic ownership and completion across all participating heads.
-The [optional AMD panel integration](AMD-PANEL.md) adds NVIDIA rendering and
-CPU-copy presentation to a validated firmware framebuffer, including a
-headless NVIDIA GPU. It requires `nmhybrid=1`. Physical panel login and wake
-still need AMD + NVIDIA laptop testing. Firmware-to-AUX takeover remains
-deferred.
+- `nvrtd3=1 nvrtd3res=<ACPI path>` enables runtime D3cold for a headless
+  GPU with a validated ACPI power resource. A 60-second idle period, no
+  framebuffer or rendering clients and successful RM standby are required
+  before `_OFF`. Client and framebuffer opens wait for the transition and
+  require successful `_ON` before RM resume. [Hybrid power](HYBRID-LAPTOPS.md#idle-power-down)
+- `nvfbsurround=<mask>` groups two to four NVIDIA outputs into a wide SDR
+  display when their timings and available scanout memory permit it. For
+  example, `nvfbheads=3 nvfbsurround=7` selects the first three framebuffer
+  indices. A grouped commit uses one surface with a slice per head and waits
+  for every participating head. Members keep their own display-audio
+  identities. Losing a member returns the available displays to their
+  individual modes.
+- A monitor connected after a headless start can rematch an idle NVIDIA
+  framebuffer. Boot retries are bounded. Periodic recovery scans require
+  `nvfbhotplugpoll=<seconds>`. [Hot-plug settings](NVRMFB-HOTPLUG-LIFECYCLE.md)
+- The optional Intel panel adds firmware-mode replay on wake, pinned DMC
+  firmware and Type-C diagnostics. The test output displays color bars.
+  [Intel panel settings](INTEL-PANEL.md#experimental-wake-and-type-c)
+- During a verbose boot, the console renders into RAM when the driver can
+  verify the firmware framebuffer belongs to this GPU. The copier pauses
+  while RM rebinds BAR1. A confirmed RM reservation or the boot head's owned
+  scanout provides the next destination. WindowServer's connection ends the
+  copy.
 
 ## Runtime validation
 
@@ -70,5 +85,5 @@ Private RTX 2060 SUPER and Tahoe 26.7.1 checks cover 43 Zink cases, native
 Vulkan and Wine GPU-copy presentation through resize and restore, Wine Vulkan
 readback, 120 Metal render-feedback cases and injected post-loss command
 buffer completion. The installed kernel exercises the fallback mapping path.
-The new shared-token ABI, Sequoia runtime behavior and opt-in
-display and power settings still need live hardware testing.
+The new shared-token ABI, Sequoia runtime behavior, physical Intel/AMD laptop
+panels, Surround and connector detection still need live hardware testing.

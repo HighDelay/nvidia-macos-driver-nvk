@@ -47,7 +47,7 @@ static const char *const kKmsPmName[] = { "running", "suspended", "lost" };
 static bool kms_pm_wait_locked(bool tryOnly, uint32_t waitMs)
 {
     if (gKmsPmState == kKmsPmRunning) return true;
-    if (tryOnly || gKmsPmState == kKmsPmLost) return false;
+    if (tryOnly || gKmsPmState == kKmsPmLost || nv_xnu_pm_runtime_closed()) return false;
     uint64_t deadline = 0;
     if (waitMs) clock_interval_to_deadline(waitMs, kMillisecondScale, &deadline);
     while (gKmsPmState == kKmsPmSuspended) {
@@ -266,7 +266,29 @@ void nvkms_call_rm(void *ops)
         // KAPI allocations for NVRMFB/NVAccel (WindowServer) reach RM here without an NVKMS ioctl: hold them while the
         // GPU is in standby. NVKMS's own suspend and resume run on the PM thread, which the gate lets through.
         NvXnuPmUse pmUse;
-        rm_kernel_rmapi_op(NULL, ops);
+        if (pmUse.allowed()) {
+            rm_kernel_rmapi_op(NULL, ops);
+        } else {
+            // An unadmitted background KAPI request reached RM during RTD3.
+            switch (o->op) {
+            case NV01_FREE: o->params.free.status = NV_ERR_GPU_IS_LOST; break;
+            case NV01_ALLOC_MEMORY: o->params.allocMemory64.status = NV_ERR_GPU_IS_LOST; break;
+            case NV04_ALLOC: o->params.alloc.status = NV_ERR_GPU_IS_LOST; break;
+            case NV04_VID_HEAP_CONTROL:
+                if (o->params.pVidHeapControl) o->params.pVidHeapControl->status = NV_ERR_GPU_IS_LOST;
+                break;
+            case NV04_MAP_MEMORY: o->params.mapMemory.status = NV_ERR_GPU_IS_LOST; break;
+            case NV04_UNMAP_MEMORY: o->params.unmapMemory.status = NV_ERR_GPU_IS_LOST; break;
+            case NV04_ALLOC_CONTEXT_DMA: o->params.allocContextDma2.status = NV_ERR_GPU_IS_LOST; break;
+            case NV04_MAP_MEMORY_DMA: o->params.mapMemoryDma.status = NV_ERR_GPU_IS_LOST; break;
+            case NV04_UNMAP_MEMORY_DMA: o->params.unmapMemoryDma.status = NV_ERR_GPU_IS_LOST; break;
+            case NV04_BIND_CONTEXT_DMA: o->params.bindContextDma.status = NV_ERR_GPU_IS_LOST; break;
+            case NV04_CONTROL: o->params.control.status = NV_ERR_GPU_IS_LOST; break;
+            case NV04_DUP_OBJECT: o->params.dupObject.status = NV_ERR_GPU_IS_LOST; break;
+            case NV04_SHARE: o->params.share.status = NV_ERR_GPU_IS_LOST; break;
+            case NV04_ADD_VBLANK_CALLBACK: o->params.addVblankCallback.status = NV_ERR_GPU_IS_LOST; break;
+            }
+        }
     }
     // Only failures are logged: WindowServer duplicates objects and binds context DMAs for every surface, and logging
     // the successful ones filled the system log on a busy desktop (#242).
