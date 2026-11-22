@@ -255,8 +255,8 @@ show `zink` and `NVK` without any Minecraft companion mod or JVM argument.
 
 ### Build commands
 
-Use a separate, clean Mesa **26.3.0 stable** checkout at
-[`0a6fa60abb737d26ac8a316a4aad7c9ddf64f9e4`](https://gitlab.freedesktop.org/mesa/mesa/-/commit/0a6fa60abb737d26ac8a316a4aad7c9ddf64f9e4).
+Use a separate, clean Mesa **26.3.1 stable** checkout at
+[`fec8830e9c94b1d67f3d8469467d5529fb2978cd`](https://gitlab.freedesktop.org/mesa/mesa/-/commit/fec8830e9c94b1d67f3d8469467d5529fb2978cd).
 Do not apply this overlay to the Mesa tree producing the installed NVMTL plugin.
 The builder checks the source identity before applying its small Darwin/Zink
 patch. Dispatch generation uses the local Apple symbols/slots and refuses
@@ -264,9 +264,8 @@ unrecognized conventions; it does not whitelist a particular OS build. It retain
 descriptor sets for Darwin NVK, staging/GPU texture uploads
 instead of host image copies, and bounded inline texture uploads on the render
 worker. Other drivers retain their existing upload threshold.
-The [Zink stable update record](ZINK-MESA-26.3.0.md) describes the frontend API
-adjustment, retained repairs and validation limits. Zink's source identity is
-checked independently of the NVK renderer, even when both use the same version.
+Zink's source identity is checked independently of the NVK renderer, even
+when both use the same version. [Mesa 26.3.1 validation](NVK-BASE-AND-HEADERS.md#mesa-base)
 
 Install Xcode command-line tools, Vulkan-Headers, Python, Meson, Ninja, Mako,
 PyYAML, packaging and Bison 3.x. Bison 2.3 from macOS cannot parse this Mesa tree.
@@ -283,16 +282,15 @@ python3 tools/test_zink_runtime.py --runtime /path/to/zink-out \
 ```
 
 `VULKAN_HEADERS` can override the default `~/Vulkan-Headers/include`.
-For a checkout extracted from the pinned mirror archive, set
-`ZINK_MESA_ARCHIVE=/path/to/mesa-source.tar.gz`. The accepted archive SHA-256 is
-`cf65daa7cb857010df1b56169426350cc11d8481def906ca3653fa2ccd2cd0d4`;
-its URL is `https://codeload.github.com/chaotic-cx/mesa-mirror/tar.gz/0a6fa60abb737d26ac8a316a4aad7c9ddf64f9e4`.
-Its 12,923 file contents match the pinned Git tree after normalizing the
-33 CSV files with CRLF checkout rules. Older development archives are rejected.
-The builder records the actual archive hash and
-checks extracted files against it. Source/build hashes,
-Mesa identity and the private renderer pairing are recorded in `ZINK-BUILD.json`
-and `NATIVE-BUILD.json`; packaging rejects stale or mismatched components.
+For a source tree extracted from Mesa's official release archive, set
+`ZINK_MESA_ARCHIVE=/path/to/mesa-26.3.1.tar.xz`. Verify the archive's SHA-256
+is `4e4e438eac7b840a9383988cbb7c08dad8041da544b9319fc26d319fa7348961`.
+The builder records the archive hash and checks the extracted files against it.
+[Mesa 26.3.1 source archive](https://archive.mesa3d.org/mesa-26.3.1.tar.xz)
+
+`ZINK-BUILD.json` and `NATIVE-BUILD.json` record source and build hashes,
+Mesa identity and the private renderer pairing. Packaging uses those records to
+reject stale or mismatched components.
 
 Add `--front-buffer` to test composited single-buffer windows, render-flush
 aliases, explicit front-buffer drawing, back-buffer isolation, non-current

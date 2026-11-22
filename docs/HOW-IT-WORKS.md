@@ -70,7 +70,7 @@ descriptors, read-only metadata, physical bounds) in `plugin/nvmtl_*.h`.
 to, into SPIR-V that NVK can compile. It is based on metal2vulkan (LGPL-3.0).
 
 **NVK** (`/Library/GPUBundles/nvmtl/`) is Mesa's Vulkan driver for NVIDIA plus the NAK shader compiler, patched to run
-on macOS against NVRM instead of the Linux DRM interface (`nvk/nvk-macos.patch` and the rest of the chain on Mesa `90a959eb`, 26.3.0-rc3).
+on macOS through NVRM. The fork builds it from the stable Mesa revision in `nvk/MESA_BASE`.
 
 **NVIDIAShared.bundle** is no longer in the package. Packages up to 2.8.1 carried it with two of NVIDIA's closed
 compiler libraries; the plugin used it only when a developer switch (`NVMTL_VENDOR_COMPILER`) was set. The installer
@@ -148,22 +148,22 @@ Nothing is sent; you can upload the file on the site yourself.
 
 ## 7. Building
 
-See the README, *Build from source*. The kexts need NVIDIA's `open-gpu-kernel-modules` at tag `620.70.06`; NVK needs
-Mesa `90a959eb` (the mesa-26.3.0-rc3 tag; 2.8 and 2.8.1 used `17ca6174`) with, in order, `nvk/nvk-macos.patch`, `nvk/nvk-fixes-after-def16.patch`, `nvk/nvk-620-kernel.patch`,
-`nvk/nvk-recycle.patch`, `nvk/nvk-slab.patch`, `nvk/nvk-slabdef.patch`, `nvk/nvk-hubfix.patch`, `nvk/nvk-perf-boost-burst.patch`,
-`nvk/nvk-rated-tdp.patch`, `nvk/nvk-gps-maxpower.patch`, `nvk/nvk-metal-wsi.patch`, `nvk/nvk-card-select.patch`, `nvk/hwrt/ttu-nak.patch`, `nvk/hwrt/ttu-rq.patch`, `nvk/curves/curves.patch`, `nvk/hwrt/wide.patch` and `nvk/nvk-warnings.patch` (`patch -p1` from the Mesa root; the last two are the ray-query part for the RT cores, off unless `NVK_HWRT_QUERY=1`, see `docs/HWRT.md`; `nvk/hwrt/nvk_hwrt.h` and `nvk_hwrt_layout.h` are copied into `src/nouveau/vulkan` after them), then
-`nvk/dlss/patch_dlss_cache.py <mesa tree>`. NVK compiles against the `open-gpu-kernel-modules` 610.57.04 headers with
-`nvk/ogkm-nvos-620.patch` and `nvk/ogkm-warnings.patch` applied to that tree; 620's `nv.h` does not compile in user space, so the rest stays 610.
+The kexts use NVIDIA's `open-gpu-kernel-modules` at tag `620.70.06`. NVK uses
+the 610.57.04 headers with the NVOS compatibility and warning patches.
+[Mesa revision and header provenance](NVK-BASE-AND-HEADERS.md)
 
-`nvk/nvk-metal-wsi.patch` turns on `VK_EXT_metal_surface`: it adds the extension to NVK's instance table, counts the Metal platform as a window system, and runs Mesa's Metal swapchain in its software mode (a linear host-visible image copied into the `CAMetalLayer` drawable by Mesa's layer helper, because the hardware mode needs a driver that can bind a Metal texture to a `VkImage`). `nvk/nvk-card-select.patch` (last in the chain) makes the RM connection honour `NVK_ACCEL_ID`, the registry entry id of one accelerator, so a process bound to one of several cards opens that card (unset, the first accelerator, as before). The build uses `-Dplatforms=macos` for the NVK build and still `-Dplatforms=` for the native `mesa_clc` tool build.
+`build/build_nvk.sh <mesa git> <610.57.04 tree> <out> [3.0|2.8]` exports
+the revision in `nvk/MESA_BASE`, applies the selected patch chain and DLSS
+source transform, and builds `mesa_clc` and `vtn_bindgen2` from the same tree.
+The renderer build produces `libvulkan_nouveau.dylib` for x86_64 and records its
+source inputs, UUID and exports. The default `3.0` profile negotiates the shared
+mapping ABI with NVRM. The `2.8` profile uses one connection per mapping.
 
-`build/build_nvk.sh <mesa git> <610.57.04 tree> <out> [2.9|2.8]` does all of it: it exports Mesa `90a959eb` (26.3.0-rc3; `2.8` exports `17ca6174`) with `git archive`,
-applies the header patch and the chain above (and copies the two hwrt headers), builds `mesa_clc` and `vtn_bindgen2` from that same tree (tools from another Mesa
-revision deserialize NVK's internal shaders as garbage), cross-builds `libvulkan_nouveau.dylib` for x86_64 and prints its
-LC_UUID and export count. The `2.8` argument builds the set the 2.8 / 2.8.1 package was made from (no hubfix, boost, rated-tdp
-or gps-maxpower patches; `nvk/release-2.8/nvk-fixes-after-def16.patch`). Rebuilding 2.8 gives the shipped library byte for byte
-except the 16 LC_UUID bytes: the linker derives the UUID from the unstripped file, which records the absolute path of every
-object, so a different build directory gives a different UUID. `build/nvk_compare.py` states exactly which bytes differ.
+The fork's native Vulkan, Zink and Wine frontends use GPU-copy presentation.
+The default renderer honors `NVK_ACCEL_ID` when a process selects a specific
+accelerator and enables hardware ray queries with `NVK_HWRT_QUERY=1`.
+[Hardware ray queries](HWRT.md)
+
 The NAK changes under `nvk/speed267` are already contained in `nvk-macos.patch`; the scripts there record how they were made.
 
 The video codecs in `libnvencvt.dylib` are built from `vendor/nvenc` (mickys/nvenc, MIT) by `build/build_nvencvt.sh`. The

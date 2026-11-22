@@ -175,9 +175,9 @@ build/accel_build_all.sh kexts/NVRM <out>
 ```
 
 These build the translator, Metal plugin, NVK, kexts and both OS accelerators.
-The NVK builder exports official Mesa **26.3.0** from `nvk/MESA_BASE` and applies
+The NVK builder exports official Mesa **26.3.1** from `nvk/MESA_BASE` and applies
 the complete 620-compatible patch chain, including matched native compiler tools.
-[Mesa update, dependencies and validation limits](docs/MESA-26.3.0-UPDATE.md).
+[Mesa build inputs and validation](docs/NVK-BASE-AND-HEADERS.md).
 Rebuild **both accelerators** whenever `nvrm_vram_abi.h` or `nvrm_gpuva_abi.h`
 changes. [Zink build and packaging instructions](docs/ZINK-OPENGL.md#building-locally).
 

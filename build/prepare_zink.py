@@ -11,8 +11,8 @@ import tarfile
 import tempfile
 from opengl_api import requirements
 
-MESA_COMMIT = '0a6fa60abb737d26ac8a316a4aad7c9ddf64f9e4'
-ARCHIVE_SHA256 = 'cf65daa7cb857010df1b56169426350cc11d8481def906ca3653fa2ccd2cd0d4'
+MESA_COMMIT = 'fec8830e9c94b1d67f3d8469467d5529fb2978cd'
+ARCHIVE_SHA256 = '4e4e438eac7b840a9383988cbb7c08dad8041da544b9319fc26d319fa7348961'
 ROOT = Path(__file__).resolve().parents[1]
 FRONTEND = ('nvk_zink.c', 'nvk_zink.h', 'nvk_zink_private.h', 'nvk_iosurface.c',
             'nvk_present.c', 'nvk_present.h', 'meson.build', 'zink_sync_probe.c')
@@ -90,7 +90,7 @@ def prepare(source, archive=None):
 def main():
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument('source',type=Path)
-    ap.add_argument('--archive',type=Path,help='Verified Mesa 26.3.0 source archive for a checkout without .git')
+    ap.add_argument('--archive',type=Path,help='Verified Mesa 26.3.1 source archive for a checkout without .git')
     args = ap.parse_args()
     prepare(args.source.resolve(),args.archive)
 

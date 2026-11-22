@@ -1,5 +1,13 @@
 # Retained fork changes for upstream merges
 
+## Mesa 26.3.1
+
+Keep NVK and Zink on the stable release at `fec8830e9c94b1d67f3d8469467d5529fb2978cd`.
+Use matching native Mesa compiler tools, the retained `3.0` NVK patch chain
+and the independently verified native Zink overlay. The private build passed
+the automated rendering checks and the user's 256 MiB and 8 GiB BAR1 trials.
+[Mesa source and validation](NVK-BASE-AND-HEADERS.md#mesa-base)
+
 ## Runtime power and display backports
 
 Keep the runtime D3cold opt-in tied to native framebuffer and user-client
@@ -30,10 +38,9 @@ display, flip and BAR1 behavior. See [AMD panel setup](AMD-PANEL.md).
 
 ## Deferred upstream backports, 2026-11-20
 
-Keep NVK and Zink on stable Mesa **26.3.0** at
-`0a6fa60abb737d26ac8a316a4aad7c9ddf64f9e4` with the NVIDIA **620.70.06**
-core. The default renderer now uses the `3.0` patch profile matched to this
-NVRM. Keep capability negotiation and the one-connection-per-mapping path for
+These backports used Mesa **26.3.0** and the NVIDIA **620.70.06** core.
+The default renderer uses the `3.0` patch profile matched to this NVRM.
+Keep capability negotiation and the one-connection-per-mapping path for
 an older NVRM. Keep the fork's uncached streams, small-BAR topology, GPU-copy
 presentation and separate Wine, Minecraft and Zink frontends. The software
 Metal WSI patch remains outside the release profile.
@@ -367,9 +374,9 @@ qualify the complete staged package or replace a physical full-BAR rerun.
 The merge of `87e524ab36f12d17c04626d6cf7fc3bde1cc63e4` uses
 `7412cdde81447f78da0ebb64216dc258d8beaedb` as its common ancestor.
 Follow the [scope, equivalence review and validation limits](UPSTREAM-3.0-INTEGRATION.md).
-Legacy macOS support is excluded at the user's request. Keep stable Mesa 26.3.0,
-the 620.70.06 mapping ABI and the default/release `2.8` patch chain; append only
-the compatible uncached-stream patch. Deferred 2.9/3.0 power/token/display
+Legacy macOS support is excluded at the user's request. This merge used Mesa
+26.3.0, the 620.70.06 mapping ABI and the `2.8` patch profile with the
+uncached-stream patch. Deferred 2.9/3.0 power/token/display
 implementations are not qualified by the merge ancestry.
 
 Preserve full surface-ID/plane keys and linear-image exclusions in dirty-mark

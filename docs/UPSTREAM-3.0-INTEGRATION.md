@@ -30,12 +30,11 @@ the live display object.
 
 ## Retained boundaries
 
-- Keep stable Mesa **26.3.0** at
-  `0a6fa60abb737d26ac8a316a4aad7c9ddf64f9e4`, the NVIDIA **620.70.06**
-  mapping/kernel interface, and default/release patch-chain selection **2.8**.
-  Upstream 2.9/3.0 token, hub, power and broader display changes remain deferred.
-  The later [optional notebook TGP manager](NOTEBOOK-TGP.md) is a separate narrow
-  backport; it does not require the deferred NVK power chain.
+- The initial integration used Mesa **26.3.0** with the NVIDIA **620.70.06**
+  mapping/kernel interface and default/release patch profile **2.8**. The initial
+  review deferred the upstream token, hub, power and broader display changes.
+  See the [later backports](UPSTREAM-BACKPORTS.md) and
+  [current Mesa and NVK build profile](NVK-BASE-AND-HEADERS.md#mesa-base).
 - Keep the existing framebuffer head/cursor lifetimes, scale ownership,
   shutdown paths and Intel-panel controller architecture. The new upstream
   derived-refresh validation and backlight keeper depend on the deferred display

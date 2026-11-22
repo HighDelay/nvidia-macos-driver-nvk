@@ -1,8 +1,11 @@
 ## Fork integration of upstream 3.0 (unreleased)
 
-- Integrate compatible macOS 15/26 fixes while retaining stable Mesa 26.3.0,
-  the matched NVIDIA 620 interface and the fork's rendering/performance repairs.
+- Integrate compatible macOS 15/26 fixes while retaining the matched NVIDIA 620
+  interface and the fork's rendering and performance repairs.
   Legacy macOS kits are excluded. See [review and validation](docs/UPSTREAM-3.0-INTEGRATION.md).
+- Update NVK and native Zink to Mesa 26.3.1 for Zink shader, buffer upload and
+  rendering fixes. The private runtime worked on RTX 2060 SUPER with both
+  256 MiB and 8 GiB BAR1. [Mesa validation](docs/NVK-BASE-AND-HEADERS.md#mesa-base)
 - Use uncached NVK command/upload streams, deduplicate shared-surface marks per
   commit, resolve old-SDK macOS version answers and safely refuse uninitialized
   Metal devices. Packed YUV422 is enabled with an opt-out; invalid multisample

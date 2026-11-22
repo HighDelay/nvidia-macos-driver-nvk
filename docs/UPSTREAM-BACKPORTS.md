@@ -1,10 +1,11 @@
 # Upstream backports
 
-The fork retains Intel macOS 15.5+ and 26, Mesa **26.3.0 stable** and NVIDIA
+The backports retain support for Intel macOS 15.5+ and 26 with NVIDIA
 **620.70.06**. The kernel and NVK use the capability-negotiated mapping ABI.
 The NVK build keeps the GPU-copy frontends, uncached streams and BAR-aware
 memory types. Hardware ray queries remain opt-in with `NVK_HWRT_QUERY=1`.
 Legacy macOS and software Metal WSI are excluded at the user's request.
+This backport set was built with Mesa 26.3.0. [Current Mesa pin](NVK-BASE-AND-HEADERS.md#mesa-base)
 
 ## Behavior
 
