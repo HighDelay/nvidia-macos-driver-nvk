@@ -115,6 +115,9 @@ struct Chain {
    uint32_t cursor{};
    bool retired{};
    VkResult present_error{VK_SUCCESS};
+#ifdef NVKBRIDGE_WINE
+   bool reported_host_frame{};
+#endif
    VkAllocationCallbacks allocator{};
    bool custom_allocator{};
    const VkAllocationCallbacks *alloc() const { return custom_allocator ? &allocator : nullptr; }
@@ -132,6 +135,7 @@ struct Device {
    bool private_copy_queue{};
    bool reuse_present_resources{}, profile_present{};
    VkDeviceSize host_present_alignment{};
+   bool present_from_host{};
    std::atomic<bool> uncertain{};
    std::atomic<bool> closing{};
    std::recursive_mutex submit;
@@ -382,6 +386,16 @@ id<MTLDevice> metal_device(const VkPhysicalDeviceProperties &props) {
 }
 
 #ifdef NVKBRIDGE_WINE
+bool nvidia_device_is_headless(id<MTLDevice> device) {
+   const io_service_t service=IOServiceGetMatchingService(kIOMainPortDefault,IORegistryEntryIDMatching(device.registryID));
+   if (!service) return false;
+   CFTypeRef property=IORegistryEntryCreateCFProperty(service,CFSTR("NVAccelHeadless"),kCFAllocatorDefault,0);
+   const bool headless=property && CFEqual(property,kCFBooleanTrue);
+   if (property) CFRelease(property);
+   IOObjectRelease(service);
+   return headless;
+}
+
 // Wine creates the window's layer with the system-default Intel or AMD device,
 // before Vulkan chooses NVIDIA. Only defer this initial foreign
 // binding; an NVIDIA-bound layer must retain the existing device checks.
@@ -500,10 +514,9 @@ bool limited_bar_memory(const VkPhysicalDeviceMemoryProperties &memory) {
 }
 
 void enable_host_present(const std::shared_ptr<Device> &d,std::vector<const char *> &extensions) {
-   // Full BAR keeps its original device extensions and VRAM import path. Only
-   // limited-BAR devices may recover a refused drawable import using its host
-   // pages, as Zink does. Pixels still travel directly from the GPU.
-   if(!limited_bar_memory(d->memory))return;
+   // A headless NVIDIA GPU publishes through IOSurface system pages.
+   // A display-owning GPU needs host import only for limited-BAR recovery.
+   if(!d->present_from_host && !limited_bar_memory(d->memory))return;
    uint32_t count=0;
    auto enumerate_extensions=IP(d->instance,EnumerateDeviceExtensionProperties);
    if(enumerate_extensions(d->physical,nullptr,&count,nullptr)!=VK_SUCCESS)return;
@@ -577,7 +590,14 @@ VkResult VKAPI_CALL create_device(VkPhysicalDevice physical, const VkDeviceCreat
       }
       if (std::none_of(extensions.begin(),extensions.end(),[](auto name) { return !strcmp(name,VK_KHR_EXTERNAL_MEMORY_FD_EXTENSION_NAME); }))
          extensions.push_back(VK_KHR_EXTERNAL_MEMORY_FD_EXTENSION_NAME);
+#ifdef NVKBRIDGE_WINE
+      state->present_from_host=nvidia_device_is_headless(state->metal);
+#endif
       enable_host_present(state,extensions);
+      if(state->present_from_host && !state->host_present_alignment) {
+         fprintf(stderr,"NVK Bridge: headless presentation requires IOSurface host-page import\n");
+         return VK_ERROR_FEATURE_NOT_PRESENT;
+      }
    }
    VkDeviceCreateInfo copy=*info;
    copy.enabledExtensionCount=static_cast<uint32_t>(extensions.size()); copy.ppEnabledExtensionNames=extensions.data();
@@ -596,6 +616,8 @@ VkResult VKAPI_CALL create_device(VkPhysicalDevice physical, const VkDeviceCreat
    { std::lock_guard<std::mutex> lock(registry); devices[*result]=state; }
    fprintf(stderr,"NVK Bridge: native device=%s; copy family=%u; Metal registry=%llu\n",
       state->properties.deviceName,state->copy_family,(unsigned long long)state->metal.registryID);
+   if(state->present_from_host)
+      fprintf(stderr,"NVK Bridge: headless NVIDIA presentation uses IOSurface system pages\n");
    fprintf(stderr,"NVK Bridge: presentation completion=%s; private copy queue=%s\n",
       state->presenter?"asynchronous (bounded to 2 jobs)":"synchronous",state->private_copy_queue?"yes":"no");
    return VK_SUCCESS;
@@ -888,7 +910,10 @@ VkResult import_host_frame(const std::shared_ptr<Frame> &frame,VkBufferCreateInf
    frame->host_locked=true;
    void *base=IOSurfaceGetBaseAddress(frame->surface);
    if(!base || reinterpret_cast<uintptr_t>(base)%alignment)return VK_ERROR_INVALID_EXTERNAL_HANDLE;
-   DP(d,DestroyBuffer)(d->raw,frame->buffer,nullptr);frame->buffer=VK_NULL_HANDLE;
+   if(frame->buffer) {
+      DP(d,DestroyBuffer)(d->raw,frame->buffer,nullptr);
+      frame->buffer=VK_NULL_HANDLE;
+   }
    VkExternalMemoryBufferCreateInfo external{VK_STRUCTURE_TYPE_EXTERNAL_MEMORY_BUFFER_CREATE_INFO};
    constexpr auto handle_type=VK_EXTERNAL_MEMORY_HANDLE_TYPE_HOST_ALLOCATION_BIT_EXT;
    external.handleTypes=handle_type;buffer.pNext=&external;
@@ -1005,21 +1030,29 @@ VkResult copy_frame(const std::shared_ptr<Chain> &c,uint32_t index,VkSemaphore h
       frame->surface=(IOSurfaceRef)CFRetain(surface);frame->row=row;frame->allocation_size=size;
       frame->bytes=(uint64_t)row*c->extent.height;
       VkBufferCreateInfo buffer{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};buffer.size=frame->bytes;buffer.usage=VK_BUFFER_USAGE_TRANSFER_DST_BIT|VK_BUFFER_USAGE_TRANSFER_SRC_BIT;buffer.sharingMode=VK_SHARING_MODE_EXCLUSIVE;
-      r=DP(d,CreateBuffer)(d->raw,&buffer,nullptr,&frame->buffer);if (r!=VK_SUCCESS) return r;
-      VkMemoryRequirements req{};DP(d,GetBufferMemoryRequirements)(d->raw,frame->buffer,&req);
-      if (req.size>size) return VK_ERROR_OUT_OF_DEVICE_MEMORY;
-      int mt=memory_type(*d,req.memoryTypeBits,VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);if (mt<0) return VK_ERROR_OUT_OF_DEVICE_MEMORY;
-      VkImportMemoryFdInfoKHR imported{VK_STRUCTURE_TYPE_IMPORT_MEMORY_FD_INFO_KHR};
-      imported.handleType=VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_FD_BIT;imported.fd=sandbox_open("/dev/null",O_RDONLY|O_CLOEXEC);
-      if (imported.fd<0) return VK_ERROR_OUT_OF_HOST_MEMORY;
-      VkMemoryAllocateInfo allocation{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
-      allocation.pNext=&imported;allocation.allocationSize=req.size;allocation.memoryTypeIndex=mt;
-      Share share{3,IOSurfaceGetID(frame->surface),0,0,req.size};
-      stage_import(&share);r=DP(d,AllocateMemory)(d->raw,&allocation,nullptr,&frame->memory);stage_import(nullptr);
-      if (r!=VK_SUCCESS) {
-         close(imported.fd);import_failures++;
-         if(r!=VK_ERROR_INVALID_EXTERNAL_HANDLE || !d->host_present_alignment)return r;
-         r=import_host_frame(frame,buffer);if(r!=VK_SUCCESS)return r;
+      if(d->present_from_host) {
+         r=import_host_frame(frame,buffer);
+         if(r!=VK_SUCCESS) {
+            fprintf(stderr,"NVK Bridge: headless drawable host-page import failed (%d)\n",r);
+            return r;
+         }
+      } else {
+         r=DP(d,CreateBuffer)(d->raw,&buffer,nullptr,&frame->buffer);if (r!=VK_SUCCESS) return r;
+         VkMemoryRequirements req{};DP(d,GetBufferMemoryRequirements)(d->raw,frame->buffer,&req);
+         if (req.size>size) return VK_ERROR_OUT_OF_DEVICE_MEMORY;
+         int mt=memory_type(*d,req.memoryTypeBits,VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);if (mt<0) return VK_ERROR_OUT_OF_DEVICE_MEMORY;
+         VkImportMemoryFdInfoKHR imported{VK_STRUCTURE_TYPE_IMPORT_MEMORY_FD_INFO_KHR};
+         imported.handleType=VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_FD_BIT;imported.fd=sandbox_open("/dev/null",O_RDONLY|O_CLOEXEC);
+         if (imported.fd<0) return VK_ERROR_OUT_OF_HOST_MEMORY;
+         VkMemoryAllocateInfo allocation{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
+         allocation.pNext=&imported;allocation.allocationSize=req.size;allocation.memoryTypeIndex=mt;
+         Share share{3,IOSurfaceGetID(frame->surface),0,0,req.size};
+         stage_import(&share);r=DP(d,AllocateMemory)(d->raw,&allocation,nullptr,&frame->memory);stage_import(nullptr);
+         if (r!=VK_SUCCESS) {
+            close(imported.fd);import_failures++;
+            if(r!=VK_ERROR_INVALID_EXTERNAL_HANDLE || !d->host_present_alignment)return r;
+            r=import_host_frame(frame,buffer);if(r!=VK_SUCCESS)return r;
+         }
       }
       r=DP(d,BindBufferMemory)(d->raw,frame->buffer,frame->memory,0);if (r!=VK_SUCCESS) return r;
       VkCommandPoolCreateInfo pool{VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO};pool.queueFamilyIndex=d->copy_family;
@@ -1099,6 +1132,10 @@ VkResult copy_frame(const std::shared_ptr<Chain> &c,uint32_t index,VkSemaphore h
    publication.finish();
    frame->drawable=nil;
 #ifdef NVKBRIDGE_WINE
+   if(d->present_from_host && !c->reported_host_frame) {
+      c->reported_host_frame=true;
+      fprintf(stderr,"NVK Bridge: first headless frame submitted to the display compositor\n");
+   }
    if(c->surface->hud)c->surface->hud->record(std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count());
 #endif
    copies++;copy_bytes+=frame->bytes;

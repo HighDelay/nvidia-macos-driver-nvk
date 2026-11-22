@@ -114,7 +114,17 @@ existing host checks retain small-BAR, async/reuse and lifetime coverage. On
 Intel UHD 770 + CMP 40HX, the original Wine-default layer failed while explicit
 NVIDIA and deferred layers each displayed 180 changing-color GPU-copy frames.
 The affected user confirmed Star Rail rendering after installing the update.
-AMD hybrid systems and muxless laptops remain untested.
+
+For headless Wine presentation, use the matched NVIDIA accelerator's
+`NVAccelHeadless` property. The headless GPU writes directly into IOSurface
+system pages, including with full BAR1, so the GPU driving the display can
+composite the window. Keep the host-import capability check, wait for the GPU
+fence before unlocking the IOSurface and preserve VRAM imports for
+NVIDIA-driven displays.
+On Tahoe 26.7.2 with WhateverXe driving the built-in Intel display and an
+RTX 4050 Laptop GPU rendering via NVK, the tester confirmed that the bridge
+trial restored visible output in Arknights: Endfield. Host checks cover direct
+system-page copies, the display-owning full-BAR path and limited-BAR recovery.
 
 The v3.0.1-only builder, updater implementation and transaction tests were
 removed from `main` after that confirmation. Their original source remains in
@@ -328,8 +338,9 @@ Physical small-BAR and full-BAR application results must remain separately state
 Retain the limited-BAR drawable fallback for exact invalid-external-handle
 refusals: GPU-copy into imported coherent IOSurface host pages, with checked
 alignment/size, transfer visibility, lock/seed publication, cache re-lock and
-timeout quarantine. Full-BAR devices skip its capability query and extension
-addition and keep the original import/publication path. Preserve both the
+timeout quarantine. When NVIDIA drives a display, full-BAR devices skip the
+capability query and extension addition and keep the original import/publication
+path. Headless Wine follows the hybrid presentation rule above. Preserve the
 sanitizer lifecycle fixtures and the real GPU forced-import pixel/resize test.
 Minecraft startup, world rendering and resize were user-confirmed on the
 physical 256 MiB BAR1 desktop after restarting the launcher. This does not

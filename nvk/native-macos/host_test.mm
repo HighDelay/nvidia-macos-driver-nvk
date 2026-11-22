@@ -266,6 +266,11 @@ int main() { @autoreleasepool {
       advertise_host_memory=true;const int before=host_property_queries;
       assert(!limited_bar_memory(m));enable_host_present(topology,extensions);
       assert(!topology->host_present_alignment && host_property_queries==before && extensions.size()==1);
+      // Wine's headless device needs system pages even when BAR1 covers VRAM.
+      topology->present_from_host=true;
+      enable_host_present(topology,extensions);
+      assert(topology->host_present_alignment==4096 && host_property_queries==before+1 && extensions.size()==2);
+      topology->present_from_host=false;topology->host_present_alignment=0;extensions.resize(1);
       // The old limited-BAR layout has a small visible heap; the new one has
       // no visible VRAM type. Both permit the same presentation recovery.
       m.memoryHeapCount=3;m.memoryHeaps[2]={256ull<<20,VK_MEMORY_HEAP_DEVICE_LOCAL_BIT};m.memoryTypes[1].heapIndex=2;
@@ -284,7 +289,7 @@ int main() { @autoreleasepool {
       host_import_alignment=4096;enable_host_present(topology,extensions);assert(topology->host_present_alignment==4096);
       m.memoryHeaps[0].size=0;assert(!limited_bar_memory(m));
       advertise_host_memory=false;
-      puts("PASS limited-BAR host recovery capability checks; full BAR leaves extensions and queries unchanged");
+      puts("PASS host import capability checks for limited BAR, headless Wine and display-owning full BAR");
    }
    {
       float priority=1;
@@ -471,6 +476,19 @@ int main() { @autoreleasepool {
       d->host_present_alignment=0;d->reuse_present_resources=true;host_memory_bits=1;
       fd_import_result=VK_SUCCESS;host_wait_result=VK_SUCCESS;
       puts("PASS limited-BAR host GPU-copy recovery, publication, cache re-lock, failed-import cleanup and timeout page quarantine");
+   }
+   {
+      d->present_from_host=true;d->host_present_alignment=64;d->reuse_present_resources=false;
+      host_memory_bits=3;fd_import_result=VK_ERROR_OUT_OF_DEVICE_MEMORY;
+      const int imports_before=host_imports,dirty_before=dirty_called,presented_before=drawable_presented;
+      const uint32_t seed_before=IOSurfaceGetSeed(cpu);
+      bool consumed=false;
+      assert(copy_frame(c,0,VK_NULL_HANDLE,consumed)==VK_SUCCESS);
+      assert(host_imports==imports_before+1 && surface_locks==surface_unlocks && IOSurfaceGetSeed(cpu)!=seed_before);
+      assert(drawable_presented==presented_before+1 && dirty_called==dirty_before);
+      d->present_from_host=false;d->host_present_alignment=0;d->reuse_present_resources=true;
+      host_memory_bits=1;fd_import_result=VK_SUCCESS;
+      puts("PASS headless Wine copies directly to IOSurface system pages and publishes the seed");
    }
    // The actual bridge worker must release submit during both kinds of wait.
    d->presenter=std::make_unique<nvkbridge::PresentWorker>([device=d.get()](std::exception_ptr){fail_presenter(device);});
