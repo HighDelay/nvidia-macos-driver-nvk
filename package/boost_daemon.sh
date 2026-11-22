@@ -93,7 +93,7 @@ install)
   SRC="$ROOTDIR/Optional/GPU-Boost/nvmtl-boost"
   [ -f "$SRC" ] || { echo "gpu boost: this package carries no boost daemon; nothing installed"; exit 0; }
   if [ -z "$P" ]; then
-    lipo -verify_arch x86_64 "$SRC" && codesign --verify --strict "$SRC" || exit 1
+    lipo "$SRC" -verify_arch x86_64 && codesign --verify --strict "$SRC" || exit 1
   fi
   safe_chain "$P/Library" || exit 1
   make_dir "$P/Library/NullMoth" && safe_chain "$P/Library/NullMoth" || exit 1

@@ -104,6 +104,24 @@ require_install_directory() {
   esac
 }
 
+# Optional GPU boost cleanup runs after the driver removal commits.
+BOOST_DIR=/Library/NullMoth/boost
+BOOST_PLIST=/Library/LaunchDaemons/com.nullmoth.nvmtl-boost.plist
+REMOVE_BOOST=0
+if [ -f "$BOOST_DIR/nvmtl-boost" ] || [ -f "$BOOST_PLIST" ]; then
+  if (
+    for directory in / /Library /Library/NullMoth /Library/LaunchDaemons "$BOOST_DIR"; do
+      if [ -e "$directory" ] || [ -L "$directory" ]; then
+        require_install_directory "$directory"
+      fi
+    done
+  ); then
+    REMOVE_BOOST=1
+  else
+    echo "GPU boost paths require manual removal." >&2
+  fi
+fi
+
 # Shared with uninstall.sh: resolve old staging references by bundle identity,
 # never by filename. Existing permanent paths may contain a pending update;
 # recovery of a missing/temporary path requires the recorded version too.
@@ -250,6 +268,12 @@ rm -rf "$RB"
 if [ -f /Library/NullMoth/backlight_keeper.sh ]; then
   launchctl bootout system/com.nullmoth.backlight 2>/dev/null || true
   rm -f /Library/NullMoth/backlight_keeper.sh /Library/NullMoth/backlight.level /Library/LaunchDaemons/com.nullmoth.backlight.plist
+fi
+if [ "$REMOVE_BOOST" = 1 ]; then
+  launchctl bootout system/com.nullmoth.nvmtl-boost 2>/dev/null || true
+  rm -f "$BOOST_PLIST" "$BOOST_DIR/nvmtl-boost" /Library/NullMoth/gpuboost ||
+    echo "Unable to remove all GPU boost files." >&2
+  rmdir "$BOOST_DIR" 2>/dev/null || true
 fi
 # Change boot-args only after removal commits. A failed NVRAM write keeps the ownership record for recovery.
 # Keep identical to install.sh: an unreadable NVRAM store is not empty boot-args.

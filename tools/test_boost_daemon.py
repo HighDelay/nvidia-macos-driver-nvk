@@ -22,9 +22,19 @@ if not SCRIPT.exists():
 inst = (ROOT / "package/install.sh").read_text()
 unin = (ROOT / "package/uninstall.sh").read_text()
 script = SCRIPT.read_text()
-check("the installer runs it only for NULLMOTH_GPU_BOOST=1", 'NULLMOTH_GPU_BOOST:-0}" = 1' in inst)
-check("the installer trusts it only when SHA256SUMS covers the script and the binary", "boost_daemon\\.sh$" in inst and "nvmtl-boost$" in inst)
-check("the uninstaller removes it", "boost_daemon.sh" in unin and '" remove' in unin)
+opt_in = 'if [ "${NULLMOTH_GPU_BOOST:-}" = 1 ]; then'
+setup = '/bin/bash "$HERE/$boost/boost_daemon.sh" install "$HERE"'
+check("the installer runs the daemon setup only on explicit opt-in",
+      inst.count(setup) == 1 and setup in inst.partition(opt_in)[2])
+check("the verified package covers both boost files before setup",
+      inst.index('shasum -a 256 --strict -c SHA256SUMS') < inst.index(setup) and
+      inst.index('bash "$HERE/sums_complete.sh" "$HERE"') < inst.index(setup))
+cleanup = 'launchctl bootout system/com.nullmoth.nvmtl-boost'
+check("the uninstaller removes the daemon after committing the driver removal",
+      unin.index('REMOVING=0\nrm -rf "$RB"') < unin.index(cleanup) and
+      'rm -f "$BOOST_PLIST" "$BOOST_DIR/nvmtl-boost" /Library/NullMoth/gpuboost' in unin)
+check("the Mach-O check passes the binary before -verify_arch",
+      'lipo "$SRC" -verify_arch x86_64 && codesign --verify --strict "$SRC"' in script)
 check("the daemon is not installed under /usr/local (user-writable on an Intel Mac)", 'BIN="$DIR/nvmtl-boost"' in script and 'DIR="$P/Library/NullMoth/boost"' in script)
 
 ME = os.getuid()
