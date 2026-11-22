@@ -421,6 +421,10 @@ static bool nvmtl_is_encode_service(const char *me)
 {
     return me && strncmp(me, "VTEncoderXPCService", 19) == 0;
 }
+static bool nvmtl_is_webkit_gpu_process(const char *me)
+{
+    return me && !strcmp(me, "com.apple.WebKit.GPU");
+}
 static bool nvmtl_is_chromium_gpu_process(void)
 {
     int argc = *_NSGetArgc();
@@ -494,7 +498,7 @@ static unsigned nvmtl_nvencvt_scope(const char *me, bool decoderAllowed)
     unsigned scope = nvmtl_is_decode_service(me) ? 1u :
         nvmtl_is_encode_service(me) ? 2u : 2u | (decoderAllowed ? 1u : 0u);
     if (!nvmtl_is_decode_service(me) && !nvmtl_is_encode_service(me)
-        && nvmtl_gecko_decoder_process_type() == 1) scope = decoderAllowed ? 1u : 0u;
+        && (nvmtl_is_webkit_gpu_process(me) || nvmtl_gecko_decoder_process_type() == 1)) scope &= 1u;
     if (getenv("NVMTL_NO_NVDEC")) scope &= ~1u;
     if (getenv("NVMTL_NO_NVENC")) scope &= ~2u;
     return scope;
@@ -525,6 +529,12 @@ static bool nvmtl_sandbox_decoder_bridge_available(const char *me)
 }
 static bool nvmtl_can_register_decoder(const char *me)
 {
+    if (nvmtl_is_webkit_gpu_process(me)) {
+        // The optional helper permits the matched decoder images in WebKit's GPU process.
+        const char *enabled = getenv("NVMTL_WEBKIT_NVDEC");
+        return enabled && !strcmp(enabled, "1") && !getenv("NVMTL_NO_NVDEC")
+            && nvmtl_sandbox_decoder_bridge_available(me);
+    }
     if (nvmtl_is_decode_service(me) || !nvmtl_is_sandboxed()) return true;
     // Native sandboxed players delegate to VTDecoderXPCService. Chromium's GPU process and Gecko's
     // RDD/GPU processes query local capability and can use the accelerator connections in their sandbox.
@@ -630,17 +640,7 @@ static void nvmtl_nvencvt_register(void)
             if (!named) return;
         }
         if (!nvmtl_video_has_codecs()) return;
-        unsigned scope;
-        if (!strcmp(me, "com.apple.WebKit.GPU")) {
-            // WebKit queries VP9 hardware support in its own GPU process.
-            // The optional helper admits this addon through its normal signing and mapping checks.
-            const char *enabled = getenv("NVMTL_WEBKIT_NVDEC");
-            if (!enabled || strcmp(enabled, "1") || getenv("NVMTL_NO_NVDEC")
-                || !nvmtl_sandbox_decoder_bridge_available(me)) return;
-            scope = 1u;
-        } else {
-            scope = nvmtl_nvencvt_scope(me, nvmtl_can_register_decoder(me));
-        }
+        unsigned scope = nvmtl_nvencvt_scope(me, nvmtl_can_register_decoder(me));
         if (!scope) return;
         Dl_info di;
         if (!dladdr((const void *)nvmtl_nvencvt_register, &di) || !di.dli_fname) { nvlog("nvencvt: dladdr failed - not registering"); return; }

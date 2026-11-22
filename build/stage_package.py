@@ -27,6 +27,8 @@ AGDC = Path("Library/Extensions/NVRMAGDC.kext")
 ACCEL = {v: Path("Library/NullMoth/kexts") / v / "NVAccel.kext" for v in ("15", "26")}
 MINECRAFT = RUNTIME / "minecraft"
 WINE = RUNTIME / "wine"
+VIDEO_RECORDS = RUNTIME / "video"
+VIDEO_ADDON = PLUGIN / "Contents/MacOS/libnvencvt.dylib"
 SEQUOIA_RUNTIME_MINIMUM = "15.5"
 
 
@@ -169,11 +171,15 @@ def replace_file(source, destination):
     shutil.copy2(source, destination)
 
 
-def validate_video_runtime(root):
-    """A separately built, signed codec addon with pinned source provenance."""
+def validate_video_runtime(root, *, inherited=False):
+    """Verify a standalone or already packaged codec addon against the pin."""
     root = root.resolve(strict=True)
-    regular(root / "NVENC-BUILD.json")
-    fields = json.loads((root / "NVENC-BUILD.json").read_text())
+    records = root / VIDEO_RECORDS if inherited else root
+    library = root / VIDEO_ADDON if inherited else root / VIDEO_ADDON.name
+    require(records.is_dir() and not records.is_symlink() and inside(records.resolve(), root), "invalid codec record directory")
+    manifest = records / "NVENC-BUILD.json"
+    regular(manifest)
+    fields = json.loads(manifest.read_text())
     pin = json.loads((REPO / "video/nvenc-source.json").read_text())
     require(fields.get("schema_version") == 1 and fields.get("kind") == "nvenc-codecs", "invalid codec runtime schema")
     require(fields.get("registration_api") == {"version": 2, "symbol": "NVEncVT_RegisterCodecs",
@@ -185,25 +191,28 @@ def validate_video_runtime(root):
     require(fields.get("target") == {"os": "macos", "arch": "x86_64", "minimum_macos": "15.0"}, "incompatible codec platform")
     require(fields.get("turing_defaults") == {"additional_decoders": ["vp08", "vp09"], "replace_stock_encoders": False, "av1": False},
             "incompatible Turing codec selection")
-    require(fields.get("installation") == {"library": "/Library/GPUBundles/NVMTLDriver.bundle/Contents/MacOS/libnvencvt.dylib",
-                                          "records": "/Library/GPUBundles/nvmtl/video"}, "unexpected codec installation paths")
-    expected = {"libnvencvt.dylib", "source-changes.patch", "INSTALL.md", "LICENSES/nvenc-MIT.txt", "LICENSES/NVIDIA-MIT.txt", "LICENSES/WebKit-BSD.txt"}
+    require(fields.get("installation") == {"library": "/" + VIDEO_ADDON.as_posix(),
+                                          "records": "/" + VIDEO_RECORDS.as_posix()}, "unexpected codec installation paths")
+    expected = {"source-changes.patch", "INSTALL.md", "LICENSES/nvenc-MIT.txt", "LICENSES/NVIDIA-MIT.txt", "LICENSES/WebKit-BSD.txt"}
     files = fields.get("files", {})
-    require(set(files) == expected, "incomplete or unexpected codec payload")
-    actual = {p.relative_to(root).as_posix() for p in root.rglob("*") if p.is_file() or p.is_symlink()}
-    require(actual == expected | {"NVENC-BUILD.json"}, "unrecorded codec runtime files")
-    for name in sorted(expected):
-        path = root / name
+    require(set(files) == expected | {library.name}, "incomplete or unexpected codec payload")
+    if not inherited:
+        expected.add(library.name)
+    actual = {p.relative_to(records).as_posix() for p in records.rglob("*") if p.is_file() or p.is_symlink()}
+    require(actual == expected | {manifest.name}, "unrecorded codec runtime files")
+    paths = {name: records / name for name in sorted(expected)}
+    paths[library.name] = library
+    for name, path in paths.items():
         regular(path)
         require(inside(path.resolve(strict=True), root), "codec file escapes its runtime")
         require(re.fullmatch(r"[0-9a-f]{64}", files[name]) is not None and digest(path) == files[name], "codec runtime hash mismatch: " + name)
-    require(digest(root / "source-changes.patch") == fields["overlay_sha256"], "packaged codec overlay mismatch")
-    require(digest(root / "LICENSES/nvenc-MIT.txt") == digest(REPO / "video/nvenc-MIT.txt"), "codec source license mismatch")
-    run("lipo", root / "libnvencvt.dylib", "-verify_arch", "x86_64")
-    run("codesign", "--verify", "--strict", root / "libnvencvt.dylib")
-    version = run("vtool", "-show-build", root / "libnvencvt.dylib").stdout
+    require(digest(records / "source-changes.patch") == fields["overlay_sha256"], "packaged codec overlay mismatch")
+    require(digest(records / "LICENSES/nvenc-MIT.txt") == digest(REPO / "video/nvenc-MIT.txt"), "codec source license mismatch")
+    run("lipo", library, "-verify_arch", "x86_64")
+    run("codesign", "--verify", "--strict", library)
+    version = run("vtool", "-show-build", library).stdout
     require(re.search(r"\bminos 15\.0\b", version) is not None, "codec deployment target mismatch")
-    return tuple(root / name for name in sorted(expected | {"NVENC-BUILD.json"}))
+    return (*paths.values(), manifest)
 
 
 def video_default_config(text):
@@ -219,16 +228,17 @@ def video_default_config(text):
 
 
 def stage_video_runtime(root, video, files):
-    video = video.resolve(strict=True)
-    records = root / RUNTIME / "video"
-    require(not records.is_symlink(), "codec record directory is a symlink")
-    if records.exists():
-        shutil.rmtree(records)
-    for source in files:
-        relative = source.relative_to(video)
-        target = root / PLUGIN / "Contents/MacOS/libnvencvt.dylib" if relative == Path("libnvencvt.dylib") else records / relative
-        target.parent.mkdir(parents=True, exist_ok=True)
-        replace_file(source, target)
+    if video is not None:
+        video = video.resolve(strict=True)
+        records = root / VIDEO_RECORDS
+        require(not records.is_symlink(), "codec record directory is a symlink")
+        if records.exists():
+            shutil.rmtree(records)
+        for source in files:
+            relative = source.relative_to(video)
+            target = root / VIDEO_ADDON if relative == Path(VIDEO_ADDON.name) else records / relative
+            target.parent.mkdir(parents=True, exist_ok=True)
+            replace_file(source, target)
     conf = root / RUNTIME / "nvrm610.conf"
     require(not conf.is_symlink(), "codec config is a symlink")
     conf.write_text(video_default_config(conf.read_text() if conf.exists() else ""))
@@ -467,6 +477,9 @@ def stage(args):
     if video:
         video = video.resolve(strict=True)
     video_files = validate_video_runtime(video) if video else ()
+    inherited_video = not video and (base / VIDEO_RECORDS / "NVENC-BUILD.json").exists()
+    if inherited_video:
+        validate_video_runtime(base, inherited=True)
     for source, _ in replacements:
         run("lipo", source, "-verify_arch", "x86_64")
 
@@ -542,9 +555,9 @@ def stage(args):
                     "bundled translator link must point to the canonical nvmtl translator")
         elif bundled.exists():
             replace_file(work / TRANSLATOR, bundled)
-        if video:
+        if video or inherited_video:
             stage_video_runtime(work, video, video_files)
-        if air_dis is not None:
+        elif air_dis is not None:
             run("codesign", "--force", "--sign", "-", "--timestamp=none", work / PLUGIN)
             run("codesign", "--verify", "--strict", work / PLUGIN)
         # install.sh chooses the OS variant. Refresh only replaced variants.
@@ -565,7 +578,7 @@ def stage(args):
           + "".join(", macOS " + major + " NVAccel" for major, source in accelerators.items() if source)
           + (", Minecraft native NVK runtime" if minecraft else "")
           + (", Wine native NVK provider and DXVK" if wine else ""))
-    if video:
+    if video or inherited_video:
         print("Included: pinned additional NVIDIA video codecs; existing explicit codec settings preserved.")
     print("SHA256SUMS verified. Install on Sequoia or Tahoe using install.sh.")
     return output

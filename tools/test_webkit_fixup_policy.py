@@ -25,6 +25,16 @@ int main() {
     assert(!read(1,1,codec) && !map(1,7,2,codec) && !map(1,5,1,codec));
     assert(resource("/Library/GPUBundles/NVMTLDriver.bundle/Contents/MacOS/libnvencvt.dylib.bak")==Resource::None);
     assert(resource("/Library/GPUBundles/nvmtl/libnvencvt.dylib")==Resource::None);
+    for (const char *name : {"libnvdec_h264.dylib", "libnvdec_h264_t2d.dylib", "libnvdec_hevc.dylib"}) {
+        char path[256];
+        snprintf(path, sizeof(path), "/System/Volumes/Data/Library/GPUBundles/NVMTLDriver.bundle/Contents/MacOS/%s", name);
+        const auto decoder = resource(path);
+        assert(decoder==Resource::Runtime && map(1,5,2,decoder) && map(1,4,2,decoder));
+        assert(!read(1,1,decoder) && !map(1,7,2,decoder) && !map(1,5,1,decoder));
+        strlcat(path, ".bak", sizeof(path));
+        assert(resource(path)==Resource::None);
+    }
+    assert(resource("/Library/GPUBundles/NVMTLDriver.bundle/Contents/MacOS/libnvenc_h264.dylib")==Resource::None);
     for(const char *bad : {"/Library/GPUBundles/evil.dylib", "/Library/GPUBundles/NVMTLDriver.bundle/Contents/MacOS/NVMTLDriver.evil", "/tmp/NVMTLDriver", "/Library/GPUBundles/nvmtl/../evil.dylib", "/System/Volumes/Data/dev/null", "/System/Volumes/DataX/Library/GPUBundles/NVMTLDriver.bundle/Contents/MacOS/NVMTLDriver", "", (const char *)nullptr})
         assert(resource(bad)==Resource::None);
     assert(resource("/dev/null")==Resource::NullDevice);

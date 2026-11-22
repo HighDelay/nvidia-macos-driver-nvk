@@ -70,6 +70,30 @@ static void IOObjectRelease(io_service_t service) { assert(service == 17); relea
 PRODUCTION
 int main(int argc, char **argv) {
     scenario = atoi(argv[1]);
+    if (argc == 6) {
+        const char *name = argv[2];
+        program_argc = 1;
+        if (*argv[3]) setenv("NVMTL_WEBKIT_NVDEC", argv[3], 1);
+        else unsetenv("NVMTL_WEBKIT_NVDEC");
+        if (*argv[4]) setenv("NVMTL_NO_NVDEC", argv[4], 1);
+        else unsetenv("NVMTL_NO_NVDEC");
+        const bool expected = atoi(argv[5]);
+        assert(nvmtl_can_register_decoder(name) == expected);
+        assert(nvmtl_can_register_decoder(name) == expected);
+        if (!strcmp(name, "com.apple.WebKit.GPU")) {
+            assert(nvmtl_nvencvt_scope(name, expected) == (expected ? 1u : 0u));
+            assert(!queries);
+            if (!strcmp(argv[3], "1") && !*argv[4]) {
+                assert(matches == 1 && logs == 1);
+                assert(opens == (scenario == 2 ? 0 : scenario == 3 ? 1 : 2));
+                assert(closes == (scenario == 5 ? 2 : scenario == 4 ? 1 : 0));
+                assert(releases == (scenario == 2 ? 0 : 1));
+                return 0;
+            }
+        }
+        assert(!matches && !opens && !closes && !releases && !logs);
+        return 0;
+    }
     const char *name = scenario == 1 ? "VTDecoderXPCService.arm64" : "Discord Helper";
     if (scenario == 7) name = "VTDecoderXPCServic";
     if (scenario == 8) name = NULL;
@@ -198,6 +222,21 @@ def main():
         for index, case in enumerate(cases):
             subprocess.run([str(exe), str(index)], check=True, stdout=subprocess.DEVNULL)
             print("PASS", case)
+        webkit = "com.apple.WebKit.GPU"
+        for bridge, client, enabled, disabled, expected in (
+            (5, webkit, "1", "", 1),
+            (5, webkit, "0", "", 0),
+            (5, webkit, "", "", 0),
+            (5, webkit, "1", "1", 0),
+            (2, webkit, "1", "", 0),
+            (3, webkit, "1", "", 0),
+            (4, webkit, "1", "", 0),
+            (6, webkit, "1", "", 0),
+            (5, "com.apple.WebKit.WebContent", "1", "", 0),
+            (5, webkit + ".other", "1", "", 0),
+        ):
+            subprocess.run([str(exe), str(bridge), client, enabled, disabled, str(expected)], check=True)
+        print("PASS WebKit GPU opt-in, decoder-only addon scope and both accelerator clients")
     for codec in ("nvmtl_nvdec_register", "nvmtl_nvdec_hevc_register"):
         start = SOURCE.index("static void " + codec + "(void)\n{")
         body = SOURCE[start:SOURCE.index("\n}\n", start) + 3]
