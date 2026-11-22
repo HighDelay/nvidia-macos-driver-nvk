@@ -8,6 +8,13 @@ the kernel symbols and hook instructions at startup. Safari WebGL and VP9
 hardware decoding were verified on RTX 2060 SUPER with Tahoe 26.7.1. Sequoia
 validation covers the source interfaces and simulated compatibility checks.
 
+The matched helper and driver make the same NVIDIA VideoToolbox decoders
+available to WebKit's GPU process as to Chromium. The built-in libraries supply
+H.264 and HEVC. The bundled addon registers VP8, VP9 and AV1 according to its
+GPU checks. Its AV1 path covers GA10x Ampere and Ada. Safari still selects the
+decoder according to the media format and capabilities it detects.
+[Codec and GPU details](https://github.com/HighDelay/nvidia-macos-driver-nvk/blob/main/video/INSTALL.md).
+
 ## Installer choices
 
 The installer offers **Manual**, **Automatic**, or **Skip**, separately from the

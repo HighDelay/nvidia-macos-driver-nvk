@@ -5,8 +5,8 @@
 <key>CFBundleIdentifier</key><string>com.highdelay.NVWebKitFixup</string>
 <key>CFBundleName</key><string>NVWebKitFixup</string>
 <key>CFBundlePackageType</key><string>KEXT</string>
-<key>CFBundleVersion</key><string>0.2.1</string>
-<key>CFBundleShortVersionString</key><string>0.2.1</string>
+<key>CFBundleVersion</key><string>0.2.2</string>
+<key>CFBundleShortVersionString</key><string>0.2.2</string>
 <key>IOKitPersonalities</key><dict><key>NVWebKitFixup</key><dict>
 <key>CFBundleIdentifier</key><string>com.highdelay.NVWebKitFixup</string>
 <key>IOClass</key><string>NVWebKitFixup</string>

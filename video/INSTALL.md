@@ -38,11 +38,13 @@ with VideoToolbox decoding and ANGLE enabled. If an earlier GPU crash forced
 software rendering, fully quit and reopen the browser after updating.
 [Browser repair and validation](../docs/BROWSER-VIDEO-DECODING.md).
 
-Safari needs separate verification: smooth playback does not establish NVDEC use.
-On the tested Tahoe/Safari setup, its GPU process denied executable mapping of
-`NVMTLDriver.bundle`, and the sampled H.264 playback used `AppleH264SW`. Registering
-codecs in the decoder service alone does not change the client's decoder choice.
-This update does not claim Safari hardware decoding or disable its sandbox.
+On Intel Sequoia and Tahoe, install the matching optional NVWebKitFixup helper
+in OpenCore and reboot. The complete package enables `NVMTL_WEBKIT_NVDEC=1`
+by default. WebKit can then register the built-in H.264/HEVC decoders and the
+addon's supported VP8, VP9 and AV1 decoders in its GPU process. The pinned addon
+exposes AV1 on GA10x Ampere and Ada. Safari's codec and container selection still
+applies. VP9 hardware playback was verified in Safari on an RTX 2060 SUPER.
+[Safari setup and recovery](../docs/SAFARI-WEBGL.md).
 
 For command-line tools, preload the codec before their first VideoToolbox
 session. For example, with an existing compatible FFmpeg installation:

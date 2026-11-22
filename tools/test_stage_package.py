@@ -78,6 +78,60 @@ class StagePackage(unittest.TestCase):
         self.assertFalse((self.output / STAGE.RUNTIME / "air-opt").exists())
         STAGE.verify_manifest(self.output)
 
+    def add_inherited_video_runtime(self, config):
+        pin = json.loads((ROOT / "video/nvenc-source.json").read_text())
+        records = self.base / STAGE.VIDEO_RECORDS
+        library = self.put(self.base / STAGE.VIDEO_ADDON, b"pinned codec addon")
+        files = {
+            "INSTALL.md": b"guide",
+            "source-changes.patch": (ROOT / "video" / pin["overlay"]).read_bytes(),
+            "LICENSES/nvenc-MIT.txt": (ROOT / "video/nvenc-MIT.txt").read_bytes(),
+            "LICENSES/NVIDIA-MIT.txt": b"NVIDIA license",
+            "LICENSES/WebKit-BSD.txt": b"WebKit license",
+        }
+        hashes = {name: STAGE.digest(self.put(records / name, data)) for name, data in files.items()}
+        hashes[library.name] = STAGE.digest(library)
+        record = {
+            "schema_version": 1, "kind": "nvenc-codecs", "source": pin["source"], "dependencies": pin["dependencies"],
+            "registration_api": {"version": 2, "symbol": "NVEncVT_RegisterCodecs", "decoder_scope": 1, "encoder_scope": 2},
+            "overlay_sha256": hashes["source-changes.patch"],
+            "target": {"os": "macos", "arch": "x86_64", "minimum_macos": "15.0"},
+            "turing_defaults": {"additional_decoders": ["vp08", "vp09"], "replace_stock_encoders": False, "av1": False},
+            "installation": {"library": "/" + STAGE.VIDEO_ADDON.as_posix(), "records": "/" + STAGE.VIDEO_RECORDS.as_posix()},
+            "files": hashes,
+        }
+        self.put(records / "NVENC-BUILD.json", json.dumps(record).encode())
+        self.put(self.base / STAGE.RUNTIME / "nvrm610.conf", config)
+        self.seal_base()
+        return library
+
+    def test_reused_scoped_addon_gets_safari_default(self):
+        library = self.add_inherited_video_runtime(b"NVMTL_NVENCVT=OBS\n")
+        self.stage()
+        self.assertEqual((self.output / STAGE.VIDEO_ADDON).read_bytes(), library.read_bytes())
+        conf = (self.output / STAGE.RUNTIME / "nvrm610.conf").read_text()
+        self.assertIn("NVMTL_WEBKIT_NVDEC=1\n", conf)
+        self.assertIn("NVMTL_NVENCVT=OBS\n", conf)
+        self.assertNotIn("NVMTL_NVENCVT=1\n", conf)
+        self.assert_manifest(self.output)
+        self.assert_unchanged()
+
+    def test_reused_addon_preserves_safari_optout(self):
+        config = b"NVMTL_NVENCVT=1\nNVMTL_WEBKIT_NVDEC=0\n"
+        self.add_inherited_video_runtime(config)
+        self.stage()
+        self.assertEqual((self.output / STAGE.RUNTIME / "nvrm610.conf").read_bytes(), config)
+        self.assert_unchanged()
+
+    def test_reused_addon_must_match_its_codec_record(self):
+        library = self.add_inherited_video_runtime(b"NVMTL_NVENCVT=1\n")
+        library.write_bytes(b"different addon")
+        self.seal_base()
+        with self.assertRaisesRegex(ValueError, "codec runtime hash mismatch: libnvencvt.dylib"):
+            self.stage()
+        self.assertFalse(self.output.exists())
+        self.assert_unchanged()
+
     def tearDown(self):
         self.temp.cleanup()
 
@@ -113,6 +167,9 @@ class StagePackage(unittest.TestCase):
         elif tool == "lipo":
             self.assertEqual(args[2:], ("-verify_arch", "x86_64"))
             status = int(Path(args[1]).read_bytes().startswith(b"ARM64"))
+        elif tool == "vtool":
+            self.assertEqual(args[1], "-show-build")
+            stdout = "minos 15.0\n"
         elif tool == "codesign":
             if args[1] == "--force":
                 self.assertEqual(args[1:6], ("--force", "--sign", "-", "--timestamp=none", args[5]))
