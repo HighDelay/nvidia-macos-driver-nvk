@@ -112,6 +112,7 @@ def stage_amd_panel(payload, build_dir):
         ROOT/'kexts/NVRM/nvrm_gopfb.h', ROOT/'kexts/NVRM/nvrm_display_identity.h',
         ROOT/'kexts/NVRM/nvrm_vram_abi.h', ROOT/'kexts/NVRM/nvrm_gpuva_abi.h',
         ROOT/'kexts/NVRM/accel/nv_iop_pixel.h', ROOT/'kexts/NVRMFB/nvrm_off.h',
+        ROOT/'kexts/nvrm_boot_guard.h',
     ]
     return {
         'bundle_version': info['CFBundleVersion'],

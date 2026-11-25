@@ -15,7 +15,10 @@ import tempfile
 
 root = pathlib.Path(__file__).resolve().parents[1]
 src = (root / 'kexts/NVRM/nvrm_off.h').read_text()
-body = src[src.index('#define NVRM_GUARD_VAR'):]
+shared = (root / 'kexts/nvrm_boot_guard.h').read_text()
+body = shared[shared.index('#define NVRM_GUARD_VAR'):] + src[src.index('// What this boot did'):]
+fb = (root / 'kexts/NVRMFB/nvrm_off.h').read_text()
+assert '#include "../nvrm_boot_guard.h"' in src and '#include "../nvrm_boot_guard.h"' in fb
 for fn in ('nvrm_guard_count_start', 'nvrm_guard_pause_for_wait', 'nvrm_guard_resume_after_wait', 'nvrm_guard_display_up', 'nvrm_driver_off'):
     assert fn + '(' in body, fn
 
@@ -29,8 +32,8 @@ fixture = r'''
 typedef int SInt32;
 // ---- a fake NVRAM: the calls the guard makes, over a map that survives "reboots"; two knobs model a registry that
 // is not published yet (fromPath returns NULL) and a write that fails ----
-static bool gOptionsGone, gWritesFail;
-struct OSObject { virtual ~OSObject() {} void release() { delete this; } };
+static bool gOptionsGone, gWritesFail, gDecisionWriteFails, gBootArgOff;
+struct OSObject { virtual ~OSObject() {} virtual void release() { delete this; } };
 struct OSData : OSObject {
     std::vector<unsigned char> b;
     static OSData *withBytes(const void *p, unsigned n) { OSData *d = new OSData; d->b.assign((const unsigned char *)p, (const unsigned char *)p + n); return d; }
@@ -40,23 +43,36 @@ struct OSData : OSObject {
 template <class T> T *OSDynamicCast_impl(OSObject *o) { return dynamic_cast<T *>(o); }
 #define OSDynamicCast(T, o) OSDynamicCast_impl<T>(o)
 static std::map<std::string, std::vector<unsigned char>> gNvram, gSynced;   // gSynced: what reached the firmware
-struct OSBoolean : OSObject {};
-static OSBoolean gTrueObj;
+struct OSBoolean : OSObject {
+    explicit OSBoolean(bool v) : value(v) {}
+    bool value;
+    bool isTrue() const { return value; }
+};
+static OSBoolean gTrueObj(true), gFalseObj(false);
 #define kOSBooleanTrue (&gTrueObj)
-#define kIONVRAMSyncNowPropertyKey "IONVRAM-SYNCNOW-PROPERTY"
+#define kOSBooleanFalse (&gFalseObj)
 struct IORegistryEntry : OSObject {
+    OSBoolean *decision = nullptr;
+    static IORegistryEntry *getRegistryRoot() { static IORegistryEntry root; return &root; }
     static IORegistryEntry *fromPath(const char *, int) { return gOptionsGone ? nullptr : new IORegistryEntry; }
-    OSObject *copyProperty(const char *k) { auto it = gNvram.find(k); return it == gNvram.end() ? nullptr : OSData::withBytes(it->second.data(), (unsigned)it->second.size()); }
+    OSObject *copyProperty(const char *k) {
+        if (this == getRegistryRoot()) return decision ? new OSBoolean(decision->value) : nullptr;
+        auto it = gNvram.find(k);
+        return it == gNvram.end() ? nullptr : OSData::withBytes(it->second.data(), (unsigned)it->second.size());
+    }
     bool setProperty(const char *k, OSData *d) { if (gWritesFail) return false; gNvram[k] = d->b; return true; }
     void removeProperty(const char *k) { if (!gWritesFail) gNvram.erase(k); }
-    // the sync key copies the kernel's NVRAM to the firmware; nothing else does until a clean shutdown
-    bool setProperty(const char *k, OSObject *) { if (!strcmp(k, kIONVRAMSyncNowPropertyKey)) gSynced = gNvram; return true; }
+    bool setProperty(const char *, OSBoolean *value) {
+        if (gDecisionWriteFails) return false;
+        decision = value;
+        return true;
+    }
 };
 static int gIODTPlane = 0;
 typedef void *thread_t;
 static thread_t gThread = (thread_t)1;                     // which auto-go worker is running
 static thread_t current_thread() { return gThread; }
-static bool PE_parse_boot_argn(const char *, void *, unsigned) { return false; }
+static bool PE_parse_boot_argn(const char *, void *, unsigned) { return gBootArgOff; }
 static int IOLog(const char *, ...) { return 0; }
 static bool OSCompareAndSwap(SInt32 oldv, SInt32 newv, volatile SInt32 *p) { if (*p != oldv) return false; *p = newv; return true; }
 ''' + body + r'''
@@ -67,11 +83,20 @@ int main(int argc, char **argv) {
     if (argc > 2) for (const char *p = argv[2]; *p;) { const char *e = strchr(p, '='); const char *c = strchr(p, ','); if (!c) c = p + strlen(p);
         std::string k(p, e), v(e + 1, c); gNvram[k] = std::vector<unsigned char>(v.begin(), v.end()); p = *c ? c + 1 : c; }
     gSynced = gNvram;   // what the firmware held when this boot began
+    gOptionsGone = sc.find("early") != std::string::npos;
+    gBootArgOff = sc == "bootarg";
+    gDecisionWriteFails = sc.find("latch-write-fail") != std::string::npos;
     const bool off = nvrm_driver_off();
+    bool lateOff = off;
+    gOptionsGone = false;
     if (!off) {
         gOptionsGone = sc.find("nooptions-at-start") != std::string::npos;      // registry not published when NVRM started
         nvrm_guard_count_start();
         gOptionsGone = false;
+        if (sc.find("late-remove") != std::string::npos) gNvram["nullmoth-remove"] = {1};
+        if (sc.find("late-bootarg") != std::string::npos) gBootArgOff = true;
+        lateOff = nvrm_driver_off();
+        if (sc.find("check-admission") != std::string::npos && lateOff) goto out;
         const bool wait = sc.find("wait") != std::string::npos;
         if (wait) {
             gWritesFail = sc.find("pausefail") != std::string::npos;             // the pause could not be written
@@ -93,7 +118,7 @@ int main(int argc, char **argv) {
     }
 out:
     if (sc.find("panic") != std::string::npos) gNvram = gSynced;            // a panic: only what was synced survives
-    printf("off=%d starts=%u ok=%d\n", off, starts(), gNvram.count(NVRM_GUARD_OK_VAR) ? 1 : 0);
+    printf("off=%d starts=%u ok=%d late-off=%d\n", off, starts(), gNvram.count(NVRM_GUARD_OK_VAR) ? 1 : 0, lateOff);
     for (auto &kv : gNvram) { printf("NV %s=", kv.first.c_str()); for (unsigned char c : kv.second) printf("%c", c); printf("\n"); }
     return 0;
 }
@@ -101,17 +126,20 @@ out:
 
 
 def build(h):
-    d = tempfile.mkdtemp()
-    s = pathlib.Path(d, 'g.cpp'); s.write_text(fixture.replace(body, h))
-    exe = pathlib.Path(d, 'g')
+    tmp = tempfile.TemporaryDirectory()
+    temporary_builds.append(tmp)
+    d = pathlib.Path(tmp.name)
+    s = d / 'g.cpp'
+    s.write_text(fixture.replace(body, h))
+    exe = d / 'g'
     r = subprocess.run(['clang++', '-std=c++17', '-Wno-unused-function', '-o', str(exe), str(s)], capture_output=True, text=True)
     assert r.returncode == 0, r.stderr
     return exe
 
 
-def boots(exe, scenarios):
-    """Run the scenarios as consecutive boots; return (off, starts, ok) per boot."""
-    nv, out = '', []
+def boots(exe, scenarios, nv=''):
+    """Return (off at admission, strikes, display up, off after increment) for each boot."""
+    out = []
     for sc in scenarios:
         r = subprocess.run([str(exe), sc, nv], capture_output=True, text=True, check=True)
         first = r.stdout.splitlines()[0].split()
@@ -120,16 +148,33 @@ def boots(exe, scenarios):
     return out
 
 
-fails = 0
+temporary_builds = []
+fails = checks = 0
 
 
 def check(name, ok, detail=''):
-    global fails
+    global fails, checks
+    checks += 1
     print(('ok   ' if ok else 'FAIL ') + name + (f' ({detail})' if detail else ''))
     fails += not ok
 
 
 exe = build(body)
+r = boots(exe, ['hang', 'check-admission', 'good'])
+check('a second start can load NVAccel and NVRMFB and clear the guard', r[1] == (0, 0, 1, 0), r)
+r = boots(exe, ['hang', 'check-admission-dark', 'good'])
+check('a second failed start disables the next boot', r[1] == (0, 2, 0, 0) and r[2] == (1, 2, 0, 1), r)
+r = boots(exe, ['bootarg'])
+check('-nvoff disables the driver before counting', r[0] == (1, 0, 0, 1), r)
+r = boots(exe, ['good'], nv='nullmoth-remove=1')
+check('the recovery flag disables the driver before counting', r[0] == (1, 0, 0, 1), r)
+for override in ('late-remove', 'late-bootarg'):
+    r = boots(exe, ['hang', f'check-admission-{override}'])
+    check(f'{override} takes precedence over an earlier allow decision', r[1] == (0, 2, 0, 1), r)
+r = boots(exe, ['hang', 'check-admission-early-dark', 'check-admission'])
+check('early admission without NVRAM leaves the first strike usable', r[1] == (0, 1, 0, 0) and r[2] == (0, 0, 1, 0), r)
+r = boots(exe, ['hang', 'check-admission-latch-write-fail-dark', 'check-admission'])
+check('failure to publish the boot decision does not block late drivers', r[1] == (0, 1, 0, 0) and r[2] == (0, 0, 1, 0), r)
 r = boots(exe, ['good', 'good'])
 check('a start that lights its display leaves no count', [x[:2] for x in r] == [(0, 0), (0, 0)], r)
 r = boots(exe, ['hang', 'hang', 'good'])
@@ -161,20 +206,27 @@ accel = (root / 'kexts/NVRM/accel/nvrm-accel.cpp').read_text()
 h0 = accel.index('static void headlessCheck(')
 headless = accel[h0:accel.index('void deliverModeChange()', h0)]
 check('the headless fallback does not clear the guard', 'nvrm_guard_display_up(' not in headless)
-fb = (root / 'kexts/NVRMFB/fb/nvrm-fb.cpp').read_text()
+fb_code = (root / 'kexts/NVRMFB/fb/nvrm-fb.cpp').read_text()
 check('the framebuffer clears it on a connector list with no display when no AMD panel is pending',
-      'if (gNDpy == 0) {' in fb and 'if (!waitingForGopPanel()) fbGuardCleared(' in fb)
-# a start that panics never reaches a clean shutdown, so only a synced counter survives it (#529: six panicking boots, "start 1" each)
+      'if (gNDpy == 0) {' in fb_code and 'if (n && !waitingForGopPanel()) fbGuardCleared(' in fb_code)
+# The fork leaves persistence to the platform. A panic before a firmware flush can lose the strikes.
 r = boots(exe, ['hang-panic', 'hang-panic', 'good'])
-check('two starts that panic switch the driver off on the third boot (the count is synced, not left in the kernel copy)', r[2][0] == 1, r)
-nosync = body.replace('if (options) options->setProperty(kIONVRAMSyncNowPropertyKey, kOSBooleanTrue);', '(void)options;')
-assert nosync != body
-r = boots(build(nosync), ['hang-panic', 'hang-panic', 'good'])
-check('negative control: without the sync the panicking starts never add up (the field report)', r[2][0] == 0 and r[1][1] == 0, r)   # nothing reaches the firmware, so every boot logs start 1
+check('a panic before platform persistence loses the pending strike', r[0][1] == r[1][1] == 0 and r[2][0] == 0, r)
+# Remove both sides of the admission change to recreate the former threshold bug.
+previous = body.replace("""    bool off;
+    if (!nvrm_guard_read_decision(IORegistryEntry::getRegistryRoot(), off) || off)
+        return;
+""", '').replace(
+    """    if (!nvrm_guard_read_decision(root, off) && root)
+        root->setProperty(NVRM_GUARD_BOOT_KEY, off ? kOSBooleanTrue : kOSBooleanFalse);
+""", '')
+assert previous != body
+r = boots(build(previous), ['hang', 'check-admission', 'good'])
+check('negative control: the old check refuses late drivers at strike two', r[1] == (0, 2, 0, 1) and r[2][0] == 1, r)
 # negative control: the guard without the wait exemption switches the Mac off after two resets during the wait
 control = body.replace('nvrm_guard_pause_for_wait(unsigned ms)\n{', 'nvrm_guard_pause_for_wait(unsigned ms)\n{ (void)ms; return;')
 assert control != body
 r = boots(build(control), ['wait-reset-in-wait', 'wait-reset-in-wait', 'wait'])
 check('negative control: without the exemption two resets in the wait switch the driver off', r[2][0] == 1, r)
-print(f'boot guard wait: {17 - fails} of 17 arms')
+print(f'boot guard: {checks - fails} of {checks} checks')
 raise SystemExit(1 if fails else 0)

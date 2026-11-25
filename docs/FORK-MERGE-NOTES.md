@@ -1,5 +1,27 @@
 # Retained fork changes for upstream merges
 
+## Upstream 3.1 selective integration
+
+Adapt the [boot guard fix](https://github.com/nullmoth/nvidia-macos-driver/commit/3b7f6c7e)
+so NVRM, NVAccel, NVRMFB and the optional AMD panel share one admission decision
+in the current boot. With one prior failure, NVRM can record a second attempt
+without blocking NVAccel and NVRMFB from starting. Two failed attempts still
+disable the next boot. Keep the explicit recovery overrides and the driver's
+startup-wait exemption. If the registry cannot record admission, skip the
+counter increment. NVRAM persistence across a panic remains platform-dependent.
+
+Retain the fork's ANGLE Metal default, Safari helper and codec registration
+policy. The [3.0 WebGL report](https://github.com/nullmoth/nvidia-macos-driver/issues/600)
+also shows a WebKit sandbox denial. The boot-guard repair addresses a separate
+[system-wide accelerator startup failure](https://github.com/nullmoth/nvidia-macos-driver/issues/633).
+
+Defer the 3.1 VFX translator and late NAK load splitting until the shared
+compiler changes have browser, login-window and native NVK coverage against
+Mesa 26.3.1. Keep the existing GPU-copy frontends and leave the software Metal
+WSI profile out. The complete fork package ships firmware and omits the RyzenAdj
+helper, so the 3.1 firmware downloader and RyzenAdj linker fixes do not apply
+to the current installer.
+
 ## Mesa 26.3.1
 
 Keep NVK and Zink on the stable release at `fec8830e9c94b1d67f3d8469467d5529fb2978cd`.
