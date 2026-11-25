@@ -42,6 +42,13 @@ library is set. An ICD manifest alone does not change that preference. The
 argument selects the native frontend before Vulkan initialization; vanilla then
 passes the same provider path to SDL and retains its device/feature checks.
 
+With VSync off, the native bridge can present the latest completed frame from
+a worker when a separate copy queue is available. This lets rendering
+continue while macOS returns a drawable. To restore the previous timing for
+GUI launches, run `launchctl setenv NULLMOTH_PRESENT_MAILBOX 0` and fully quit
+and reopen the launcher. Run `launchctl unsetenv NULLMOTH_PRESENT_MAILBOX` and
+reopen it again to restore the default.
+
 ## Existing NVK Bridge mod users
 
 Add the JVM argument above, then disable or remove the `nvk-bridge` jar from the

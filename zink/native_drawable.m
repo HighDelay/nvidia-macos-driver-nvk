@@ -12,6 +12,9 @@
 @property uint32_t deviceID;
 @property unsigned width, height;
 @property BOOL pending, opaque, displaySync;
+@property BOOL prefetchActive, prefetchPending;
+@property uint64_t generation;
+@property(strong) id<CAMetalDrawable> readyDrawable;
 @end
 @implementation NVKZinkTarget
 @end
@@ -21,6 +24,39 @@
 @end
 @implementation NVKZinkFrame
 @end
+
+// Called under the target lock. Any running acquisition discards its result.
+static void reset_prefetch(NVKZinkTarget *target)
+{
+   ++target.generation;
+   target.prefetchActive = NO;
+   target.readyDrawable = nil;
+}
+
+// Called under the target lock. The worker never holds this lock across
+// nextDrawable, so it cannot hold up the application's swap thread.
+static void prefetch_drawable(NVKZinkTarget *target, CAMetalLayer *layer)
+{
+   if (target.prefetchPending) return;
+   target.prefetchPending = YES;
+   uint64_t generation = target.generation;
+   dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INTERACTIVE, 0), ^{
+      @autoreleasepool {
+         id<CAMetalDrawable> drawable = nil;
+         @try { drawable = [layer nextDrawable]; }
+         @catch (NSException *exception) {
+            fprintf(stderr, "NVK Zink: asynchronous drawable acquisition failed: %s\n", exception.reason.UTF8String);
+         }
+         @synchronized(target) {
+            target.prefetchPending = NO;
+            if (target.generation == generation) {
+               target.readyDrawable = drawable;
+               if (!drawable) target.prefetchActive = NO;
+            }
+         }
+      }
+   });
+}
 
 static NSMutableDictionary<NSValue *, NVKZinkTarget *> *bindings(void)
 {
@@ -70,6 +106,7 @@ void nvk_native_bind_view(CGLContextObj context, void *pointer)
       if (!target && view) { target = [NVKZinkTarget new]; table[key] = target; }
       @synchronized(target) {
          if (target.view != view) {
+            reset_prefetch(target);
             [target.layer removeFromSuperlayer]; target.layer = nil;
             target.view = view; target.width = target.height = 0;
          }
@@ -87,7 +124,10 @@ void nvk_native_remove(CGLContextObj context)
    }
    if (!target) return;
    void (^remove)(void) = ^{
-      @synchronized(target) { [target.layer removeFromSuperlayer]; target.layer = nil; target.view = nil; }
+      @synchronized(target) {
+         reset_prefetch(target);
+         [target.layer removeFromSuperlayer]; target.layer = nil; target.view = nil;
+      }
    };
    if ([NSThread isMainThread]) remove(); else dispatch_async(dispatch_get_main_queue(), remove);
 }
@@ -101,6 +141,7 @@ static void configure(NVKZinkTarget *target, uint32_t vendor, uint32_t deviceID,
       NSView *view = target.view;
       target.pending = NO;
       if (!view || !device) return;
+      reset_prefetch(target);
       if (!target.layer) {
          view.wantsLayer = YES;
          CAMetalLayer *layer = [CAMetalLayer layer];
@@ -129,13 +170,16 @@ static void configure(NVKZinkTarget *target, uint32_t vendor, uint32_t deviceID,
 }
 
 int nvk_native_acquire(CGLContextObj context, uint32_t vendor, uint32_t deviceID,
-                       unsigned width, unsigned height, int opaque, void **frame, IOSurfaceRef *surface)
+                       unsigned width, unsigned height, int opaque, bool can_skip,
+                       void **frame, IOSurfaceRef *surface)
 {
    if (!context || !frame || !surface || !width || !height) return 0;
    *frame = NULL; *surface = NULL;
    GLint interval = 1;
    CGLGetParameter(context, kCGLCPSwapInterval, &interval);
    BOOL displaySync = interval != 0;
+   const char *mailbox = getenv("NULLMOTH_PRESENT_MAILBOX");
+   const BOOL prefetch = can_skip && !displaySync && (!mailbox || strcmp(mailbox, "0") != 0);
    @autoreleasepool {
       @try {
          NSMutableDictionary *table = bindings();
@@ -162,14 +206,28 @@ int nvk_native_acquire(CGLContextObj context, uint32_t vendor, uint32_t deviceID
             else dispatch_async(dispatch_get_main_queue(), ^{ configure(target, vendor, deviceID, width, height, opaque != 0, displaySync); });
          }
          CAMetalLayer *layer;
+         id<CAMetalDrawable> drawable = nil;
+         BOOL synchronous = YES;
          @synchronized(target) {
             if (target.pending) return 2;
             layer = target.layer;
             if (!layer) return 0;
             if (target.width != width || target.height != height || target.deviceID != deviceID ||
                 target.opaque != (opaque != 0) || target.displaySync != displaySync) return 2;
+            if (prefetch && target.prefetchActive) {
+               synchronous = NO;
+               drawable = target.readyDrawable;
+               target.readyDrawable = nil;
+               prefetch_drawable(target, layer);
+            } else if (prefetch) {
+               // Qualify the first drawable synchronously after configuration.
+               target.prefetchActive = YES;
+            } else if (target.prefetchActive) {
+               reset_prefetch(target);
+            }
          }
-         id<CAMetalDrawable> drawable = [layer nextDrawable];
+         if (!drawable && !synchronous) return NVK_NATIVE_SKIPPED;
+         if (synchronous) drawable = [layer nextDrawable];
          if (!drawable) return 2;
          id<MTLTexture> texture = drawable.texture;
          if (texture.width != width || texture.height != height) return 2;

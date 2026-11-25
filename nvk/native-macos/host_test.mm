@@ -193,6 +193,10 @@ static VkResult throw_error() { throw std::runtime_error("injected"); }
 
 int main() { @autoreleasepool {
    unsetenv("WINE_NVK_ASYNC_PRESENT");
+   unsetenv("NULLMOTH_PRESENT_MAILBOX");
+   assert(mailbox_requested());
+   setenv("NULLMOTH_PRESENT_MAILBOX","0",1);assert(!mailbox_requested());
+   unsetenv("NULLMOTH_PRESENT_MAILBOX");
 #ifdef NVKBRIDGE_WINE
    assert(async_present_requested());
 #else
@@ -491,6 +495,7 @@ int main() { @autoreleasepool {
       puts("PASS headless Wine copies directly to IOSurface system pages and publishes the seed");
    }
    // The actual bridge worker must release submit during both kinds of wait.
+   d->ordered_async=true;
    d->presenter=std::make_unique<nvkbridge::PresentWorker>([device=d.get()](std::exception_ptr){fail_presenter(device);});
    drawable_block.enable();c->images[0].acquired=true;c->images[1].acquired=true;
    assert(queue_present(q->raw,&present)==VK_SUCCESS);drawable_block.await();
@@ -536,6 +541,34 @@ int main() { @autoreleasepool {
    assert(native_released==before_destroy);
    fence_block.release();destruction.get();assert(!find(chains,c->handle));
    chains[c->handle]=c;c->retired=false;c->images[0].raw=(VkImage)(uintptr_t)76;
+   c->present_mode=VK_PRESENT_MODE_IMMEDIATE_KHR;d->mailbox=true;
+   c->images[0].acquired=c->images[1].acquired=true;
+   drawable_block.enable();
+   const int mailbox_before=drawable_presented, mailbox_semaphores=destroyed_semaphores;
+   assert(queue_present(q->raw,&present)==VK_SUCCESS);
+   drawable_block.await();
+   uint32_t latest=1;
+   present.pImageIndices=&latest;
+   assert(queue_present(q->raw,&present)==VK_SUCCESS);
+   assert(!c->images[0].acquired && !c->images[0].present_pending &&
+      c->images[1].acquired && c->images[1].present_pending);
+   assert(c->mailbox_pending->index==1 && destroyed_semaphores==mailbox_semaphores+1);
+   drawable_block.release();drain_presenter(d);
+   assert(drawable_presented==mailbox_before+1 && destroyed_semaphores==mailbox_semaphores+2);
+   assert(!c->mailbox_pending && !c->images[1].acquired && !c->images[1].present_pending);
+   puts("PASS latest completed image replaces an older image without waiting for its drawable");
+   c->present_error=VK_ERROR_OUT_OF_DATE_KHR;
+   const int rejected_submits=submits;
+   VkResult rejected_result=VK_SUCCESS;
+   present.pResults=&rejected_result;
+   present.waitSemaphoreCount=1;present.pWaitSemaphores=&semaphore;
+   assert(queue_present(q->raw,&present)==VK_ERROR_OUT_OF_DATE_KHR &&
+      rejected_result==VK_ERROR_OUT_OF_DATE_KHR && submits==rejected_submits+1);
+   assert(drawable_presented==mailbox_before+1 && destroyed_semaphores==mailbox_semaphores+2);
+   present.pResults=nullptr;present.waitSemaphoreCount=0;present.pWaitSemaphores=nullptr;
+   c->present_error=VK_SUCCESS;
+   puts("PASS rejected mailbox presents consume the caller's wait without publishing a frame");
+   present.pImageIndices=&zero;d->mailbox=false;c->present_mode=VK_PRESENT_MODE_FIFO_KHR;
    d->presenter->stop();d->presenter.reset();
    puts("PASS late resize latching and swapchain destruction drain pending work before freeing resources");
    // Timeout on the cached entry must retain every GPU-owned object unchanged.
@@ -551,6 +584,7 @@ int main() { @autoreleasepool {
    d->uncertain=false;quarantine.clear();assert(native_released==before_release+4);
    puts("PASS uncertain GPU completion retains native resources, device, drawable and image reservations without publication");
    c->retired=false;c->present_error=VK_SUCCESS;c->images[0].acquired=true;c->images[1].acquired=true;
+   d->ordered_async=true;
    d->presenter=std::make_unique<nvkbridge::PresentWorker>([device=d.get()](std::exception_ptr){fail_presenter(device);});
    fence_block.enable();dirty_called=drawable_presented=0;
    const int async_releases=native_released,async_semaphores=destroyed_semaphores;

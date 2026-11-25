@@ -44,6 +44,7 @@ struct nvk_cgl_bridge {
    } gpu_present[2];
    unsigned gpu_width, gpu_height, gpu_slot;
    bool present_configured, gpu_disabled, native_present, native_required, apple_uncertain;
+   bool double_buffer, flushing_front;
    void *driver;
    void **engine_back;
    void *apple_back[(PREFIX_BYTES - 8) / sizeof(void *)];
@@ -243,7 +244,9 @@ static void missing_entrypoint(const char *name)
 static void flush_front_buffer(struct nvk_cgl_bridge *b)
 {
    if (!nvk_zink_begin_front_flush(b->zink)) return;
+   b->flushing_front = true;
    int presented = present_drawable(b->context) == 1;
+   b->flushing_front = false;
    nvk_zink_end_front_flush(b->zink, presented);
 }
 
@@ -561,6 +564,7 @@ static int materialize(struct nvk_cgl_bridge *b)
           *(void **)((char *)b->engine + 0x5b00)) { share = other->zink; break; }
    b->zink = nvk_zink_create_drawable_profile(b->width, b->height, share, double_buffer, b->legacy,
                                             alpha_bits > 0);
+   b->double_buffer = double_buffer != 0;
    pthread_mutex_unlock(&bridges_lock);
    if (!b->zink) return fail("Cannot create automatic Zink context");
    install_integer_dispatch(b);
@@ -638,6 +642,7 @@ EXPORT int nvk_cgl_attach(CGLContextObj context, unsigned width, unsigned height
           *(void **)((char *)b->engine + 0x5b00)) { share = other->zink; break; }
    b->zink = nvk_zink_create_drawable_profile(width, height, share, double_buffer, b->legacy,
                                              alpha_bits > 0);
+   b->double_buffer = double_buffer != 0;
    pthread_mutex_unlock(&bridges_lock);
    if (!b->zink || !nvk_zink_make_current(b->zink)) {
       nvk_zink_destroy(b->zink); free(b); CGLUnlockContext(context);
@@ -927,7 +932,9 @@ static int present_drawable(CGLContextObj context)
       uint32_t vendor = 0, device = 0;
       if (!nvk_zink_device_info(b->zink, &vendor, &device)) return fail("Native presentation requires an NVK device");
       void *frame = NULL; IOSurfaceRef surface = NULL;
-      int acquired = nvk_native_acquire(context, vendor, device, b->width, b->height, opaque_drawable(context), &frame, &surface);
+      int acquired = nvk_native_acquire(context, vendor, device, b->width, b->height, opaque_drawable(context),
+                                        b->double_buffer && !b->flushing_front, &frame, &surface);
+      if (acquired == NVK_NATIVE_SKIPPED) return nvk_zink_swap(b->zink);
       if (acquired == 2) return 2; /* Main-thread setup/resize or minimized window. */
       if (acquired != 1) {
          if (acquired == NVK_NATIVE_NO_VIEW) {

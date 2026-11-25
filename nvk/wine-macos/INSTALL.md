@@ -110,7 +110,9 @@ Updated Wine/NVK providers present through a bounded worker by default when a
 separate copy queue is available. The worker acquires drawables and waits for the
 GPU copy while application submissions continue. It retains at most two jobs;
 GPU completion, publication ordering and timeout quarantine remain required.
-Minecraft and Zink keep their existing synchronous policy.
+With VSync off, the worker can replace an older pending frame with a newer
+completed frame. Set `export NULLMOTH_PRESENT_MAILBOX=0` before launching Wine
+to keep ordered presentation for immediate swaps.
 
 For troubleshooting, set `export WINE_NVK_ASYNC_PRESENT=0` before launching Wine
 or YAAGL, then restart the game. Unset it to restore the default. The synchronous

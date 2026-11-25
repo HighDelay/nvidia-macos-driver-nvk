@@ -10,6 +10,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <stdexcept>
+#include <string>
 #include <cstring>
 #include <initializer_list>
 #include <chrono>
@@ -131,6 +132,10 @@ int main(int argc, char **argv)
 {
    @autoreleasepool { try {
       require(argc >= 3, "usage: native-probe libnvk_cgl.dylib nvk_icd.json [transparent] [automatic] [worker] [reject|uncertain] [default] [windows] [swap-interval] [pacing] [large-resize|odd-resize]");
+      const char *env_mailbox = getenv("NULLMOTH_PRESENT_MAILBOX");
+      std::string mailbox(env_mailbox ? env_mailbox : "1");
+      // Exact pixel and failure checks need one publication per swap.
+      setenv("NULLMOTH_PRESENT_MAILBOX", "0", 1);
       setvbuf(stdout, nullptr, _IOLBF, 0);
       bool automatic = false, worker = false, defaults = false, windows = false;
       bool swap_interval = false, pacing = false, large_resize = false, odd_resize = false;
@@ -279,6 +284,7 @@ int main(int argc, char **argv)
          /* Measure actual presentation without the diagnostic readback. This
           * is a report, not a speed assertion: other GPU clients may run. */
          observer(nullptr);
+         setenv("NULLMOTH_PRESENT_MAILBOX", mailbox.c_str(), 1);
          unsigned width = worker ? 80 : 640, height = worker ? 112 : 480;
          for (GLint interval : {0,1,0}) {
             require(!CGLSetParameter(cgl,kCGLCPSwapInterval,&interval),"Pacing swap interval");
@@ -293,6 +299,7 @@ int main(int argc, char **argv)
             } while (seconds < 1.0);
             printf("PACING interval=%d frames=%u seconds=%.3f fps=%.1f\n",interval,frames,seconds,frames/seconds);
          }
+         setenv("NULLMOTH_PRESENT_MAILBOX", "0", 1);
          observer(observe);
       }
       if (failure) {

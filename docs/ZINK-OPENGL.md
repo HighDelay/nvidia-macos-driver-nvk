@@ -36,9 +36,12 @@ Native presentation follows the context's CGL swap interval: `0` disables
 CAMetalLayer display synchronization and a nonzero interval enables it. An
 application's VSync toggle takes effect on subsequent frames, independently for
 each context, including render-thread clients. Intervals greater than one do not
-currently add multi-refresh pacing. With VSync off, render throughput can exceed
-the monitor's refresh rate; GPU copy completion is still required before a frame
-is published. The display's physical refresh rate does not change.
+currently add multi-refresh pacing. With VSync off, double-buffered contexts
+acquire the next drawable in the background. A swap can advance the render
+buffers while the drawable is busy. GPU copy completion is still required
+before a frame is published. Set `NULLMOTH_PRESENT_MAILBOX=0` to restore
+blocking drawable acquisition. For Finder launches, use
+`launchctl setenv NULLMOTH_PRESENT_MAILBOX 0`, then relaunch the app.
 
 Window swaps also accept a non-current context, as Apple's `CGLFlushDrawable`
 and Cocoa `flushBuffer` do. The bridge locks and temporarily binds that context,

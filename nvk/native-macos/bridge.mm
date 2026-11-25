@@ -26,6 +26,7 @@
 #include <cstring>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <type_traits>
 #include <unordered_map>
@@ -89,6 +90,7 @@ struct Surface {
 };
 struct Queue { VkQueue raw{}; uint32_t family{}; std::weak_ptr<Device> dev; };
 struct Image { VkImage raw{}; VkDeviceMemory memory{}; bool acquired{},present_pending{}; };
+struct MailboxFrame { uint32_t index; VkSemaphore ready; };
 struct Frame;
 struct Chain {
    std::shared_ptr<Device> dev;
@@ -113,6 +115,8 @@ struct Chain {
    std::mutex mutex;
    std::condition_variable available;
    uint32_t cursor{};
+   std::optional<MailboxFrame> mailbox_pending;
+   bool mailbox_scheduled{};
    bool retired{};
    VkResult present_error{VK_SUCCESS};
 #ifdef NVKBRIDGE_WINE
@@ -133,6 +137,8 @@ struct Device {
    VkQueue copy_queue{};
    bool swapchain{};
    bool private_copy_queue{};
+   bool mailbox{}, ordered_async{};
+   VkFence mailbox_fence{};
    bool reuse_present_resources{}, profile_present{};
    VkDeviceSize host_present_alignment{};
    bool present_from_host{};
@@ -199,6 +205,11 @@ bool async_present_requested() {
 #else
    return false;
 #endif
+}
+
+bool mailbox_requested() {
+   const char *value=getenv("NULLMOTH_PRESENT_MAILBOX");
+   return !value || strcmp(value,"0")!=0;
 }
 
 // Browser GPU-process sandboxes (Firefox/Zen) deny reading /dev/null and the
@@ -606,9 +617,13 @@ VkResult VKAPI_CALL create_device(VkPhysicalDevice physical, const VkDeviceCreat
    state->raw=*result;
    std::call_once(device_procs_once,[&] { backend_gdpa=IP(instance,GetDeviceProcAddr); });
    if (state->swapchain) DP(state,GetDeviceQueue)(*result,state->copy_family,state->copy_index,&state->copy_queue);
-   // Wine defaults to bounded asynchronous presentation with an explicit
-   // opt-out. A shared application/copy queue retains synchronous ordering.
-   if(state->swapchain && state->private_copy_queue && async_present_requested() && register_presenter_shutdown()) {
+   // Use the worker only with a queue reserved separately from the application.
+   state->ordered_async=async_present_requested();
+   state->mailbox=mailbox_requested();
+#ifdef NVKBRIDGE_WINE
+   state->mailbox=state->mailbox && state->ordered_async;
+#endif
+   if(state->swapchain && state->private_copy_queue && (state->mailbox || state->ordered_async) && register_presenter_shutdown()) {
       try { state->presenter=std::make_unique<nvkbridge::PresentWorker>(
          [device=state.get()](std::exception_ptr){fail_presenter(device);}); }
       catch(...) { fprintf(stderr,"NVK Bridge: presenter thread unavailable; using synchronous presentation\n"); }
@@ -619,7 +634,9 @@ VkResult VKAPI_CALL create_device(VkPhysicalDevice physical, const VkDeviceCreat
    if(state->present_from_host)
       fprintf(stderr,"NVK Bridge: headless NVIDIA presentation uses IOSurface system pages\n");
    fprintf(stderr,"NVK Bridge: presentation completion=%s; private copy queue=%s\n",
-      state->presenter?"asynchronous (bounded to 2 jobs)":"synchronous",state->private_copy_queue?"yes":"no");
+      state->presenter && state->ordered_async?"asynchronous (bounded to 2 jobs)":"synchronous",state->private_copy_queue?"yes":"no");
+   if(state->presenter && state->mailbox)
+      fprintf(stderr,"NVK Bridge: latest-frame presentation enabled for immediate swaps\n");
    return VK_SUCCESS;
 }
 void VKAPI_CALL get_queue(VkDevice device,uint32_t family,uint32_t index,VkQueue *out) {
@@ -666,6 +683,7 @@ void VKAPI_CALL destroy_device(VkDevice device,const VkAllocationCallbacks *allo
    std::lock_guard<std::recursive_mutex> lock(d->submit);
    if (d->uncertain) { fprintf(stderr,"NVK Bridge: uncertain GPU completion; retaining native device until process exit\n"); return; }
    DP(d,DeviceWaitIdle)(device);
+   if(d->mailbox_fence) DP(d,DestroyFence)(device,d->mailbox_fence,nullptr);
    { std::lock_guard<std::mutex> guard(registry);
      for (auto it=queues.begin();it!=queues.end();) { if (it->second->dev.lock()==d) it=queues.erase(it); else ++it; }
      devices.erase(device);
@@ -982,12 +1000,18 @@ std::shared_ptr<const nvkbridge_hud::Bitmap> prepare_hud(const std::shared_ptr<C
    return bitmap;
 }
 #endif
-VkResult copy_frame(const std::shared_ptr<Chain> &c,uint32_t index,VkSemaphore handoff,bool &consumed) {
+id<CAMetalDrawable> acquire_drawable(const std::shared_ptr<Chain> &c) {
    auto d=c->dev;
    auto start=std::chrono::steady_clock::now();
    id<CAMetalDrawable> drawable=[c->surface->layer nextDrawable];
    auto drawable_elapsed=elapsed(start);drawable_ns+=drawable_elapsed;
    if(d->profile_present)present_stats[2]+=drawable_elapsed;
+   return drawable;
+}
+
+VkResult copy_to_drawable(const std::shared_ptr<Chain> &c,id<CAMetalDrawable> drawable,uint32_t index,
+                          VkSemaphore handoff,bool &consumed) {
+   auto d=c->dev;
    if (!drawable) return VK_ERROR_OUT_OF_DATE_KHR;
    id<MTLTexture> texture=drawable.texture;
    if (texture.device.registryID!=d->metal.registryID || texture.iosurfacePlane!=0 || !texture.iosurface)
@@ -1108,7 +1132,7 @@ VkResult copy_frame(const std::shared_ptr<Chain> &c,uint32_t index,VkSemaphore h
    // The synchronous caller retains its outer recursive lock. The worker has
    // no outer lock, allowing application submissions while it waits on the GPU.
    backend_lock.unlock();
-   start=std::chrono::steady_clock::now();r=DP(d,WaitForFences)(d->raw,1,&frame->fence,VK_TRUE,5000000000ull);
+   auto start=std::chrono::steady_clock::now();r=DP(d,WaitForFences)(d->raw,1,&frame->fence,VK_TRUE,5000000000ull);
    backend_lock.lock();
    auto wait_elapsed=elapsed(start);producer_ns+=wait_elapsed;
    if(d->profile_present)present_stats[6]+=wait_elapsed;
@@ -1157,6 +1181,109 @@ VkResult copy_frame(const std::shared_ptr<Chain> &c,uint32_t index,VkSemaphore h
          if(entry) { c->present_cache_bytes-=entry->allocation_size;entry.reset();if(d->profile_present)present_stats[11]++; }
       }
       *slot=std::move(frame);c->present_cache_bytes+=(*slot)->allocation_size;
+   }
+   return VK_SUCCESS;
+}
+
+VkResult copy_frame(const std::shared_ptr<Chain> &c,uint32_t index,VkSemaphore handoff,bool &consumed) {
+   return copy_to_drawable(c,acquire_drawable(c),index,handoff,consumed);
+}
+
+void release_mailbox_image(Chain &chain,MailboxFrame frame) {
+   DP(chain.dev,DestroySemaphore)(chain.dev->raw,frame.ready,nullptr);
+   chain.images[frame.index].acquired=false;
+   chain.images[frame.index].present_pending=false;
+   chain.available.notify_all();
+}
+
+void present_mailbox(const std::shared_ptr<Chain> &c) {
+   @autoreleasepool {
+      auto d=c->dev;
+      if(d->uncertain) return;
+      id<CAMetalDrawable> drawable=acquire_drawable(c);
+      MailboxFrame frame;
+      {
+         std::lock_guard<std::mutex> lock(c->mutex);
+         c->mailbox_scheduled=false;
+         if(!c->mailbox_pending || d->uncertain) return;
+         frame=*c->mailbox_pending;
+         c->mailbox_pending.reset();
+         if(c->retired || c->present_error!=VK_SUCCESS) { release_mailbox_image(*c,frame);return; }
+      }
+      // The submitting queue already completed this image before publishing
+      // it to the worker. Keep it reserved until the copy fence completes.
+      bool consumed=false;
+      VkResult result=copy_to_drawable(c,drawable,frame.index,frame.ready,consumed);
+      if(d->uncertain) { fail_presenter(d.get());return; }
+      std::lock_guard<std::mutex> lock(c->mutex);
+      if(result!=VK_SUCCESS) c->present_error=result;
+      release_mailbox_image(*c,frame);
+   }
+}
+
+VkResult enqueue_mailbox(const std::shared_ptr<Chain> &c,VkQueue queue,const VkPresentInfoKHR *info) {
+   auto d=c->dev;
+   uint32_t index=info->pImageIndices[0];
+   VkResult rejection=VK_SUCCESS;
+   {
+      std::lock_guard<std::mutex> lock(c->mutex);
+      if(c->present_error!=VK_SUCCESS) rejection=c->present_error;
+      else if(c->retired || index>=c->images.size() || !c->images[index].acquired ||
+              c->images[index].present_pending) rejection=VK_ERROR_OUT_OF_DATE_KHR;
+   }
+   std::vector<VkPipelineStageFlags> stages(info->waitSemaphoreCount,VK_PIPELINE_STAGE_ALL_COMMANDS_BIT);
+   VkSubmitInfo ready{VK_STRUCTURE_TYPE_SUBMIT_INFO};
+   ready.waitSemaphoreCount=info->waitSemaphoreCount;
+   ready.pWaitSemaphores=info->pWaitSemaphores;
+   ready.pWaitDstStageMask=stages.data();
+   MailboxFrame frame{index,VK_NULL_HANDLE};
+   {
+      std::lock_guard<std::recursive_mutex> lock(d->submit);
+      if(d->uncertain) return VK_ERROR_DEVICE_LOST;
+      VkFenceCreateInfo create{VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};
+      VkResult result=d->mailbox_fence?DP(d,ResetFences)(d->raw,1,&d->mailbox_fence):
+         DP(d,CreateFence)(d->raw,&create,nullptr,&d->mailbox_fence);
+      if(result!=VK_SUCCESS) return result;
+      if(rejection==VK_SUCCESS) {
+         VkSemaphoreCreateInfo create_signal{VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO};
+         result=DP(d,CreateSemaphore)(d->raw,&create_signal,nullptr,&frame.ready);
+         if(result!=VK_SUCCESS) return result;
+         // A fence lets us drop an older submission safely. The semaphore
+         // also makes rendering writes visible to transfers on the copy queue.
+         ready.signalSemaphoreCount=1;ready.pSignalSemaphores=&frame.ready;
+      }
+      // Rejected WSI presents still consume the caller's wait semaphores.
+      result=DP(d,QueueSubmit)(queue,1,&ready,d->mailbox_fence);
+      if(result!=VK_SUCCESS) {
+         if(frame.ready) DP(d,DestroySemaphore)(d->raw,frame.ready,nullptr);
+         return result;
+      }
+   }
+   if(DP(d,WaitForFences)(d->raw,1,&d->mailbox_fence,VK_TRUE,5000000000ull)!=VK_SUCCESS) {
+      fail_presenter(d.get());
+      return VK_ERROR_DEVICE_LOST;
+   }
+   if(rejection!=VK_SUCCESS) return rejection;
+   nvkbridge::PresentWorker::Task task;
+   {
+      std::lock_guard<std::mutex> lock(c->mutex);
+      if(d->uncertain) {
+         DP(d,DestroySemaphore)(d->raw,frame.ready,nullptr);
+         return VK_ERROR_DEVICE_LOST;
+      }
+      if(c->present_error!=VK_SUCCESS) { release_mailbox_image(*c,frame);return c->present_error; }
+      if(!c->mailbox_scheduled) {
+         try { task=[c]{present_mailbox(c);}; }
+         catch(const std::bad_alloc &) { release_mailbox_image(*c,frame);return VK_ERROR_OUT_OF_HOST_MEMORY; }
+      }
+      if(c->mailbox_pending) release_mailbox_image(*c,*c->mailbox_pending);
+      c->mailbox_pending=frame;
+      c->images[index].present_pending=true;
+      c->mailbox_scheduled=true;
+   }
+   if(task && !d->presenter->post(std::move(task))) {
+      fail_presenter(d.get());
+      return VK_ERROR_DEVICE_LOST;
    }
    return VK_SUCCESS;
 }
@@ -1267,9 +1394,24 @@ VkResult VKAPI_CALL queue_present(VkQueue queue,const VkPresentInfoKHR *info) {
    PresentTimer total(d->profile_present,1),lock_wait(d->profile_present,14);
    std::lock_guard<std::mutex> gate(d->present_call);
    if(d->uncertain || d->closing)return VK_ERROR_DEVICE_LOST;
-   if(d->presenter) { lock_wait.finish();return enqueue_present(d,queue,info); }
+   if(d->presenter && d->mailbox && info->swapchainCount==1 && !info->pNext) {
+      auto c=find(chains,info->pSwapchains[0]);
+      if(c && c->dev==d && c->present_mode==VK_PRESENT_MODE_IMMEDIATE_KHR) {
+         lock_wait.finish();
+         VkResult result=enqueue_mailbox(c,queue,info);
+         if(info->pResults) info->pResults[0]=result;
+         return result;
+      }
+   }
+   if(d->presenter && d->ordered_async) {
+      if(d->mailbox && (info->swapchainCount!=1 || info->pNext)) drain_presenter(d);
+      lock_wait.finish();
+      return d->uncertain?VK_ERROR_DEVICE_LOST:enqueue_present(d,queue,info);
+   }
+   drain_presenter(d);
    std::lock_guard<std::recursive_mutex> lock(d->submit);
    lock_wait.finish();
+   if(d->uncertain) return VK_ERROR_DEVICE_LOST;
    VkSemaphore handoff{};VkSemaphoreCreateInfo sci{VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO};
    VkResult r=DP(d,CreateSemaphore)(d->raw,&sci,nullptr,&handoff);if (r!=VK_SUCCESS) return r;
    std::vector<VkPipelineStageFlags> stages(info->waitSemaphoreCount,VK_PIPELINE_STAGE_ALL_COMMANDS_BIT);

@@ -3,7 +3,9 @@
 The Wine frontend can move drawable acquisition and the presentation copy's
 completion wait off the application thread. This changes the host scheduling
 of the existing GPU-copy path; it does not remove GPU synchronization or
-introduce a CPU pixel copy. Native Minecraft and Zink keep synchronous policy.
+introduce a CPU pixel copy. Immediate Vulkan presentation also supports
+replacing a pending frame with a newer completed frame. The native Vulkan
+frontend uses that mode when a private copy queue is available.
 
 ## Why both waits matter
 
@@ -53,9 +55,10 @@ available, or worker startup fails, presentation stays synchronous. On the local
 host DXVK obtained a private queue; the D3D12 probe requested every available
 queue and exercised this fallback.
 
-`WINE_NVK_ASYNC_PRESENT=0` selects synchronous presentation after a game restart.
-The Wine-specific setting is independent of MSync, resource reuse and profiling.
-Native Minecraft/Zink frontends ignore it. The normal driver-owned provider
+`NULLMOTH_PRESENT_MAILBOX=0` restores ordered presentation for immediate
+swaps after a restart. `WINE_NVK_ASYNC_PRESENT=0` selects synchronous
+presentation for Wine. The Wine-specific setting is independent of MSync,
+resource reuse and profiling. The normal driver-owned provider
 contract and matching DLL pairs remain unchanged, so YAAGL needs no source update.
 
 In asynchronous mode, the existing total presentation CPU counter measures the
