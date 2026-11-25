@@ -361,7 +361,7 @@ int main() {
 
 
 code = fixture
-code += between(HEADER, "enum { kNVRMBacklightMax", "static inline unsigned nvrm_guard_starts")
+code += between(HEADER, "enum { kNVRMBacklightMax", "// NVRMFB, once the display path is up")
 code += between(SOURCE, "NVRMBacklightHandler *NVRMBacklightHandler::withRM", "void NVRMBacklightHandler::free()")
 code += between(SOURCE, "bool NVRMBacklightHandler::setDisplay", "// User changes arrive")
 code += between(SOURCE, "bool NVRMBacklightHandler::doIntegerSet", "void NVRMBacklightHandler::applyFire")
